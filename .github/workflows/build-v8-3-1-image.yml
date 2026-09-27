@@ -8,7 +8,7 @@ permissions:
   packages: write
 
 env:
-  IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/astra-quant-agent
+  IMAGE_NAME: ghcr.io/jonoka/astra-quant-agent
   SOURCE_REPOSITORY: 555cute/astra-quant-agent
   SOURCE_SHA: 73841f2dbb3f4b3d3eb8e76b3b69775c55e32aff
 

@@ -1,0 +1,118 @@
+name: Build AstraQuant release image
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  IMAGE_NAME: ghcr.io/jonoka/astra-quant-agent
+  SOURCE_REPOSITORY: 0xethanq/astra-quant-agent
+  SOURCE_SHA: 6617cabc2ab1d5fb21d556697c46d1220f4e4f77
+  SOURCE_VERSION: v8.4.0
+
+concurrency:
+  group: astra-release-image
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout Fork CI helpers
+        uses: actions/checkout@v4
+        with:
+          path: ci
+
+      - name: Checkout pinned release source
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.SOURCE_REPOSITORY }}
+          ref: ${{ env.SOURCE_SHA }}
+          fetch-depth: 1
+          path: source
+
+      - name: Verify source pin
+        shell: bash
+        working-directory: source
+        run: test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+
+      - name: Set up hosted migration test runtime
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install hosted test dependencies
+        run: python -m pip install -r source/requirements.txt
+
+      - name: Run official migration and administrator tests
+        working-directory: source
+        run: |
+          python -m unittest discover -s tests/ops -p test_migrate_r20_to_astra.py -v
+          python -m unittest discover -s tests/core -p test_admin_auth.py -v
+
+      - name: Rehearse encrypted legacy state and environment migration
+        run: python ci/.github/scripts/rehearse_release_migration.py source
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build candidate using the unchanged release Dockerfile
+        uses: docker/build-push-action@v6
+        with:
+          context: ./source
+          file: ./source/Dockerfile
+          platforms: linux/amd64
+          load: true
+          push: false
+          tags: astraquant:ci
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ env.SOURCE_REPOSITORY }}
+            org.opencontainers.image.revision=${{ env.SOURCE_SHA }}
+            org.opencontainers.image.version=${{ env.SOURCE_VERSION }}
+          provenance: false
+          sbom: false
+          cache-from: type=gha,scope=astra-release
+          cache-to: type=gha,scope=astra-release,mode=max
+
+      - name: Smoke test official Compose services and auth
+        run: python ci/.github/scripts/smoke_release_compose.py source astraquant:ci
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push linux/amd64 image
+        id: publish
+        uses: docker/build-push-action@v6
+        with:
+          context: ./source
+          file: ./source/Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: |
+            ${{ env.IMAGE_NAME }}:${{ env.SOURCE_VERSION }}
+            ${{ env.IMAGE_NAME }}:${{ env.SOURCE_SHA }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ env.SOURCE_REPOSITORY }}
+            org.opencontainers.image.revision=${{ env.SOURCE_SHA }}
+            org.opencontainers.image.version=${{ env.SOURCE_VERSION }}
+          provenance: mode=max
+          sbom: true
+          cache-from: type=gha,scope=astra-release
+
+      - name: Verify published immutable image
+        env:
+          IMAGE_DIGEST: ${{ steps.publish.outputs.digest }}
+        run: |
+          docker pull "$IMAGE_NAME@$IMAGE_DIGEST"
+          python ci/.github/scripts/smoke_release_compose.py source "$IMAGE_NAME@$IMAGE_DIGEST"
+          docker buildx imagetools inspect "$IMAGE_NAME@$IMAGE_DIGEST"
+          printf '### Verified release image\n\n- Source: `%s@%s`\n- Version: `%s`\n- Image: `%s@%s`\n- Platform: `linux/amd64`\n- Official migration, encrypted state, auth and both Compose healthchecks passed.\n' \
+            "$SOURCE_REPOSITORY" "$SOURCE_SHA" "$SOURCE_VERSION" "$IMAGE_NAME" "$IMAGE_DIGEST" >> "$GITHUB_STEP_SUMMARY"

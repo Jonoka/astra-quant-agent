@@ -1,14 +1,12 @@
 <script setup lang="ts">
 /**
- * PositionsOrdersPanel.vue · DeepSeek Harness 开发者工作台持仓与挂单面板
- * 侧栏/工位双向联动，低饱和黑白/深灰主题，高密度表格与清晰订单状态
+ * PositionsOrdersPanel.vue · AstraQuant 实盘持仓与挂单面板
+ * 侧栏/工位双向联动，低饱和黑白/深灰主题，高密度表格与清晰订单状态（OKX 专用）
  */
 import { computed, ref } from 'vue';
 import { useDashboardStore } from '../../stores/dashboard';
 import { useI18n } from '../../composables/useI18n';
-import { useRovingTabs } from '../../composables/useRovingTabs';
 import { fmtNum, fmtSigned, fmtPct, fmtPrice, arrow } from '../../utils/format';
-import { venueToneCls } from '../../utils/venueMeta';
 import { ShieldCheck, ShieldAlert } from 'lucide-vue-next';
 import BaseSegmented from '../base/BaseSegmented.vue';
 import BaseEmpty from '../base/BaseEmpty.vue';
@@ -23,51 +21,8 @@ const { t } = useI18n();
 
 const tab = ref<'positions' | 'orders'>('positions');
 
-type VenueFilter = 'all' | 'okx' | 'binance' | 'gate';
-const selectedVenue = ref<VenueFilter>('all');
-
-/** 批 66：场所过滤胶囊的选项表（原为模板内联字面量，无法索引，故上提为 computed）。 */
-const venueTabs = computed<{ key: VenueFilter; label: string }[]>(() => [
-  { key: 'all', label: t('common.all') },
-  { key: 'okx', label: 'OKX' },
-  { key: 'binance', label: 'Binance' },
-  { key: 'gate', label: 'Gate' },
-]);
-
-// 漫游 tabindex + ←/→/Home/End：此前一组 4 个 role="tab" 全在 Tab 键顺序里且方向键无响应。
-const { setRef: setVenueRef, onKeydown: onVenueKey, roving: venueRoving } = useRovingTabs(
-  () => venueTabs.value.length,
-  (i) => { selectedVenue.value = venueTabs.value[i].key; },
-);
-
 const positions = computed(() => store.positions);
 const orders = computed(() => store.pendingOrders);
-
-function getVenueOf(item: any): string {
-  const v = String(item?.venue || item?.exchange || '').toLowerCase();
-  if (v.includes('binance')) return 'binance';
-  if (v.includes('gate')) return 'gate';
-  return 'okx';
-}
-
-function getModeOf(item: any): 'LIVE' | 'DEMO' {
-  if (item?.account_mode) return item.account_mode.toUpperCase() === 'LIVE' ? 'LIVE' : 'DEMO';
-  if (item?.environment) return item.environment.toLowerCase() === 'live' ? 'LIVE' : 'DEMO';
-  if (item?.is_simulated !== undefined) return item.is_simulated ? 'DEMO' : 'LIVE';
-  const storeEnv = (store.data as any)?.environment || (store.account as any)?.environment;
-  if (storeEnv) return String(storeEnv).toLowerCase() === 'live' ? 'LIVE' : 'DEMO';
-  return 'DEMO';
-}
-
-const filteredPositions = computed(() => {
-  if (selectedVenue.value === 'all') return positions.value;
-  return positions.value.filter((p) => getVenueOf(p) === selectedVenue.value);
-});
-
-const filteredOrders = computed(() => {
-  if (selectedVenue.value === 'all') return orders.value;
-  return orders.value.filter((o) => getVenueOf(o) === selectedVenue.value);
-});
 
 function posPnl(p: any): number {
   return Number(p.upl ?? 0);
@@ -116,13 +71,7 @@ function slTriggerType(p: any): string {
   if (v === 'mark') return t('dash.matrix.positions.triggerMark');
   if (v === 'last') return t('dash.matrix.positions.triggerLast');
   if (v === 'index') return t('dash.matrix.positions.triggerIndex');
-  // Binance 的自描述字面量（MARK_PRICE / CONTRACT_PRICE）
-  if (v === 'mark_price') return t('dash.matrix.positions.triggerMarkPrice');
-  if (v === 'contract_price') return t('dash.matrix.positions.triggerContractPrice');
-  // Gate 的数字码翻译（0=最新成交价，1=标记价，2=指数价）
-  if (v === 'price_type:0' || v === '0') return t('dash.matrix.positions.triggerLast');
-  if (v === 'price_type:1' || v === '1') return t('dash.matrix.positions.triggerMark');
-  if (v === 'price_type:2' || v === '2') return t('dash.matrix.positions.triggerIndex');
+  // 认不出的原始码一律原样透传（历史台账遗留的旧场所字面量也在内）——本仓不猜其映射
   if (v.startsWith('price_type:')) return v;
   if (v === 'unknown') return t('dash.matrix.positions.triggerUnknown');
   return '';
@@ -133,11 +82,6 @@ function slTriggerTypeHint(p: any): string {
   if (v === 'mark') return t('dash.matrix.positions.triggerMarkHint');
   if (v === 'last') return t('dash.matrix.positions.triggerLastHint');
   if (v === 'index') return t('dash.matrix.positions.triggerIndexHint');
-  if (v === 'mark_price') return t('dash.matrix.positions.triggerMarkHint');
-  if (v === 'contract_price') return t('dash.matrix.positions.triggerLastHint');
-  if (v === 'price_type:0' || v === '0') return t('dash.matrix.positions.triggerLastHint');
-  if (v === 'price_type:1' || v === '1') return t('dash.matrix.positions.triggerMarkHint');
-  if (v === 'price_type:2' || v === '2') return t('dash.matrix.positions.triggerIndexHint');
   if (v.startsWith('price_type:')) return t('dash.matrix.positions.triggerRawCodeHint');
   if (v === 'unknown') return t('dash.matrix.positions.triggerUnknownHint');
   return '';
@@ -155,31 +99,17 @@ function getTp1(p: any): string | null {
   return m ? m[1] : null;
 }
 
-function orderQtyText(o: any): string {
-  const raw = o?.sz !== undefined ? o.sz : o?.size;
-  const n = Math.abs(Number(raw || 0));
-  if (!Number.isFinite(n) || n === 0) return '--';
-  const v = getVenueOf(o);
-  if (v === 'binance') {
-    return n < 1 ? fmtNum(n, 3) : (n < 10 ? fmtNum(n, 2) : fmtNum(n, 1));
-  }
-  return fmtNum(n, 0);
-}
-
-function orderNativeUnit(o: any): string {
-  const v = getVenueOf(o);
-  return v === 'binance' ? symOf(o) : t('dash.matrix.orders.contractsUnit');
-}
-
 /**
- * 挂单保证金（USDT）——**唯一权威是后端**。
+ * 挂单规模一律用**保证金**（USDT），后端是唯一权威。
  *
- * 后端按各所合约面值（`instrument_pool.ctVal`）与杠杆算好后放进 `margin_usdt`
- * （见 `dashboard_payload/order_view.py` 与 `multi_venue.py`）。前端**绝不**自己
- * 维护面值表：那种表一旦与池子漂移，屏幕上就会显示一个凭空捏造的保证金数字，
- * 而保证金正是交易员判断仓位大小的依据 —— 宁可显示原生张数，也不给假数字。
+ * 后端按 OKX 合约面值与杠杆算好后放进 `margin_usdt`（见
+ * `dashboard_payload/order_view.py`）。前端**绝不**自己维护
+ * 面值表：那种表一旦与池子漂移，屏幕上就会出现凭空捏造的保证金数字。
  *
- * 返回 0 表示"后端没给"（旧数据/字段缺失）→ 调用方回落到原生张数展示。
+ * 2026-09-28 用户拍板：全系统不再用「张」——各币种的合约面值算法都不一样
+ * （BTC 一张 0.01 币、XRP 一张 100 币），原生数量既不能跨币种比，量纲也不统一。
+ * 故**取不到就显示 `--`，不再回落原生数量**
+ * （回落会让同一个面板上不同币种显示不同量纲，正是本次要根治的混乱）。
  */
 function orderMargin(o: any): number {
   const m = Number(o?.margin_usdt);
@@ -188,146 +118,118 @@ function orderMargin(o: any): number {
 
 function orderMarginText(o: any): string {
   const m = orderMargin(o);
-  if (m > 0) {
-    return `${fmtNum(m, 2)}U`;
-  }
-  const raw = orderQtyText(o);
-  return raw !== '--' ? `${raw} ${orderNativeUnit(o)}` : '--';
+  return m > 0 ? `${fmtNum(m, 2)}U` : '--';
 }
 
 function orderTooltipText(o: any): string {
   const m = orderMargin(o);
-  const native = `${orderQtyText(o)} ${orderNativeUnit(o)}`;
-  return m > 0 ? `${t('dash.matrix.orders.col.qty')} ${fmtNum(m, 2)}U (${native})` : native;
+  if (m <= 0) return '--';
+  const n = Number(o?.notional_usdt);
+  const parts = [`${t('dash.matrix.orders.col.qty')} ${fmtNum(m, 2)}U`];
+  if (Number.isFinite(n) && n > 0) {
+    parts.push(`${t('dash.matrix.orders.col.notional')} ${fmtNum(n, 2)}U`);
+  }
+  return parts.join(' · ');
 }
 </script>
 
 <template>
   <div class="dsh-card pop-panel flex h-full max-h-[58dvh] flex-col overflow-hidden xl:max-h-none">
-    <!-- 面板头部：选项卡与场所过滤条 -->
+    <!-- 面板头部：持仓 / 挂单选项卡 -->
     <header class="dsh-card-header flex flex-col sm:flex-row sm:items-center justify-between gap-2">
       <div class="flex items-center gap-2">
         <BaseSegmented
           v-model="tab"
           :label="t('dash.matrix.positionsOrders.tabsAria')"
           :options="[
-            { value: 'positions', label: `${t('dash.matrix.positions.tab')} ${filteredPositions.length}` },
-            { value: 'orders', label: `${t('dash.matrix.orders.tab')} ${filteredOrders.length}` },
+            { value: 'positions', label: `${t('dash.matrix.positions.tab')} ${positions.length}` },
+            { value: 'orders', label: `${t('dash.matrix.orders.tab')} ${orders.length}` },
           ]"
         />
-        <span v-if="tab === 'positions' && !filteredPositions.length" class="text-3xs text-[var(--ink-3)] hidden sm:block">
+        <span v-if="tab === 'positions' && !positions.length" class="text-3xs text-[var(--ink-3)] hidden sm:block">
           {{ t('dash.matrix.positions.aiManaged') }}
         </span>
       </div>
 
-      <!-- 交易所过滤小胶囊 -->
-      <div class="seg w-full sm:w-auto" role="tablist" :aria-label="t('dash.matrix.pop.venueLabel')">
-        <button
-          v-for="(v, vi) in venueTabs"
-          :key="v.key"
-          :ref="setVenueRef(vi)"
-          type="button"
-          role="tab"
-          :aria-selected="selectedVenue === v.key"
-          :tabindex="venueRoving(selectedVenue === v.key)"
-          :class="{ 'seg-on': selectedVenue === v.key }"
-          @click="selectedVenue = v.key"
-          @keydown="onVenueKey($event, vi)"
-        >
-          {{ v.label }}
-        </button>
-      </div>
     </header>
 
     <!-- 持仓列表 -->
     <div v-if="tab === 'positions'" class="scroll-y flex-1 min-h-0 overflow-x-auto">
-      <BaseEmpty v-if="!filteredPositions.length" :text="t('dash.matrix.positions.empty')" />
+      <BaseEmpty v-if="!positions.length" :text="t('dash.matrix.positions.empty')" />
       <div v-else>
         <!-- 窄容器流式卡片（容器 <660px 时启用；永不横向切边，信息层级分明） -->
         <div class="pop-narrow space-y-2 p-2">
           <div
-            v-for="p in filteredPositions"
+            v-for="p in positions"
             :key="'m-' + p.instId + p.side"
-            class="clickable rounded-lg border border-[var(--line-2)] bg-[var(--surface-1)] p-3 transition-colors hover:bg-[var(--surface-2)] hover:border-[var(--line-1)] flex flex-col gap-2"
+            class="clickable rounded-xl border border-[var(--line-2)] bg-[var(--surface-1)] p-3.5 transition-all hover:bg-[var(--surface-2)]/60 hover:border-[var(--line-1)] flex flex-col gap-2.5 shadow-xs"
             :title="t('dash.matrix.chart.pickHint')"
             tabindex="0"
             @click="emit('pick-symbol', p.instId)"
             @keydown.enter="emit('pick-symbol', p.instId)"
             @keydown.space.prevent="emit('pick-symbol', p.instId)"
           >
-            <!-- 头部：标的名称、Logo、方向、杠杆、交易所与模式、保护盾牌 -->
-            <div class="flex items-center justify-between gap-1.5">
+            <!-- 头部：标的名称、Logo、方向、杠杆、交易所与模式、盈亏主视觉 -->
+            <div class="flex items-center justify-between gap-2">
               <div class="flex items-center gap-1.5 flex-wrap">
-                <CryptoLogo :symbol="symOf(p)" :size="18" />
+                <CryptoLogo :symbol="symOf(p)" :size="20" />
                 <span class="num font-mono font-bold text-sm text-[var(--ink-strong)]">{{ symOf(p) }}</span>
                 <DirTag :dir="p.side" />
-                <span class="font-mono text-xs font-bold text-[var(--ink-strong)]">{{ p.lever }}x</span>
-                <span
-                  class="rounded-full px-1.5 py-0.5 text-3xs font-mono font-semibold uppercase border"
-                  :class="venueToneCls(getVenueOf(p))"
-                >
-                  {{ getVenueOf(p).toUpperCase() }}
-                </span>
-                <span
-                  class="rounded-full px-1.5 py-0.5 text-3xs font-mono font-medium border"
-                  :class="getModeOf(p) === 'LIVE' ? 'text-[var(--up)] border-[var(--up-line)] bg-[var(--up-bg)]' : 'text-[var(--warn)] border-[var(--warn-line)] bg-[var(--warn-bg)]'"
-                >
-                  {{ getModeOf(p) }}
-                </span>
+                <span class="font-mono text-xs font-semibold text-[var(--ink-2)]">{{ p.lever }}x</span>
               </div>
-              <div class="flex items-center gap-1 shrink-0">
-                <span
-                  v-if="(p.scaleOutPhase ?? 0) >= 1"
-                  class="rounded-full px-1.5 py-0.5 text-3xs font-mono font-semibold border text-[var(--up)] border-[var(--up-line)] bg-[var(--up-bg)]"
-                  :title="t('dash.matrix.positions.scaleOutTitle')"
-                >
-                  🎯 {{ t('dash.matrix.positions.scaleOutPill') }}
-                </span>
-                <span
-                  v-if="ocoOk(p)"
-                  class="inline-flex items-center text-[var(--up)]"
-                  :title="t('dash.matrix.positions.ocoOk')"
-                >
-                  <ShieldCheck class="h-4 w-4" />
-                </span>
-                <span
-                  v-else
-                  class="inline-flex items-center text-[var(--warn)]"
-                  :title="t('dash.matrix.positions.ocoMissHint')"
-                >
-                  <ShieldAlert class="h-4 w-4" />
-                </span>
-              </div>
-            </div>
-
-            <!-- 数据栏：盈亏、ROI、保证金、均价与现价 -->
-            <div class="grid grid-cols-2 gap-2 pt-1 border-t border-[var(--line-2)]">
-              <div>
-                <span class="text-4xs text-[var(--ink-3)] block">{{ t('dash.matrix.positions.col.pnl') }}</span>
-                <span class="text-sm font-bold font-mono" :class="posPnl(p) >= 0 ? 'text-[var(--up)]' : 'text-[var(--down)]'">
+              <div class="text-right shrink-0">
+                <span class="text-sm font-bold font-mono tracking-tight block" :class="posPnl(p) >= 0 ? 'text-[var(--up)]' : 'text-[var(--down)]'">
                   {{ arrow(posPnl(p)) }} {{ fmtSigned(posPnl(p)) }}
-                  <span class="text-3xs font-medium ml-1">({{ fmtPct(posRoi(p)) }})</span>
                 </span>
-              </div>
-              <div class="text-right">
-                <span class="text-4xs text-[var(--ink-3)] block">{{ t('dash.matrix.positions.col.margin') }} / {{ t('dash.matrix.positions.col.entry') }}</span>
-                <span class="text-xs font-mono text-[var(--ink-strong)] font-semibold">
-                  {{ p.margin_usdt ? `${fmtNum(p.margin_usdt, 2)}U` : '--' }}
-                  <span class="text-3xs font-normal text-[var(--ink-3)] ml-1">@ {{ fmtPrice(p.avgPx) }}</span>
+                <span class="text-3xs font-mono font-medium text-[var(--ink-3)]">
+                  {{ fmtPct(posRoi(p)) }}
                 </span>
               </div>
             </div>
 
-            <!-- 底栏：止损与止盈阶梯（TP1/TP2 左右分布） -->
-            <div class="flex items-center justify-between text-3xs font-mono pt-1 border-t border-[var(--line-2)] text-[var(--ink-2)]">
+            <!-- 数据栏：保证金、均价 -->
+            <div class="flex items-center justify-between text-xs font-mono text-[var(--ink-2)]">
+              <div class="flex items-center gap-1.5">
+                <span class="text-3xs text-[var(--ink-3)]">{{ t('dash.matrix.positions.col.margin') }}</span>
+                <span class="font-medium text-[var(--ink-strong)]">{{ p.margin_usdt ? `${fmtNum(p.margin_usdt, 2)}U` : '--' }}</span>
+              </div>
+              <div class="flex items-center gap-1.5">
+                <span class="text-3xs text-[var(--ink-3)]">{{ t('dash.matrix.positions.col.entry') }}</span>
+                <span class="font-medium text-[var(--ink-strong)]">{{ fmtPrice(p.avgPx) }}</span>
+              </div>
+            </div>
+
+            <!-- 底栏：止损与止盈阶梯、保护状态 -->
+            <div class="flex items-center justify-between text-3xs font-mono text-[var(--ink-2)]">
               <div class="flex items-center gap-1">
                 <span class="text-[var(--down)] font-medium">SL {{ fmtPrice(p.exchangeSl ?? p.displayStop) }}</span>
-                <span v-if="slTriggerType(p)" class="text-4xs text-[var(--ink-3)]">({{ slTriggerType(p) }})</span>
+                <span v-if="slTriggerType(p)" :title="slTriggerTypeHint(p)" class="text-4xs text-[var(--ink-3)]">({{ slTriggerType(p) }})</span>
               </div>
               <div class="flex items-center gap-2">
                 <span v-if="getTp1(p)" class="text-[var(--up)] font-medium">TP1 {{ fmtPrice(getTp1(p)) }}</span>
                 <span class="text-[var(--up)] font-medium">
                   {{ getTp1(p) ? 'TP2' : 'TP' }} {{ fmtPrice(p.exchangeTp ?? p.displayTakeProfit) }}
+                </span>
+                <span
+                  v-if="(p.scaleOutPhase ?? 0) >= 1"
+                  class="rounded px-1.5 py-0.5 text-4xs font-mono font-semibold border text-[var(--up)] border-[var(--up-line)] bg-[var(--up-bg)]"
+                  :title="t('dash.matrix.positions.scaleOutTitle')"
+                >
+                  {{ t('dash.matrix.positions.scaleOutPill') }}
+                </span>
+                <span
+                  v-if="ocoOk(p)"
+                  class="inline-flex items-center text-[var(--up)] ml-0.5"
+                  :title="t('dash.matrix.positions.ocoOk')"
+                >
+                  <ShieldCheck class="h-3.5 w-3.5" />
+                </span>
+                <span
+                  v-else
+                  class="inline-flex items-center text-[var(--warn)] ml-0.5"
+                  :title="t('dash.matrix.positions.ocoMissHint')"
+                >
+                  <ShieldAlert class="h-3.5 w-3.5" />
                 </span>
               </div>
             </div>
@@ -349,7 +251,7 @@ function orderTooltipText(o: any): string {
         </thead>
         <tbody>
           <tr
-            v-for="p in filteredPositions"
+            v-for="p in positions"
             :key="p.instId + p.side"
             class="clickable transition-colors hover:bg-[var(--surface-2)]"
             :title="t('dash.matrix.chart.pickHint')"
@@ -363,18 +265,6 @@ function orderTooltipText(o: any): string {
                 <CryptoLogo :symbol="symOf(p)" :size="16" />
                 <span class="num font-mono font-semibold text-xs text-[var(--ink-strong)]">{{ symOf(p) }}</span>
                 <DirTag :dir="p.side" />
-                <span
-                  class="rounded-full px-1.5 py-0.5 text-3xs font-mono font-semibold uppercase border"
-                  :class="venueToneCls(getVenueOf(p))"
-                >
-                  {{ getVenueOf(p).toUpperCase() }}
-                </span>
-                <span
-                  class="rounded-full px-1.5 py-0.5 text-3xs font-mono font-medium border"
-                  :class="getModeOf(p) === 'LIVE' ? 'text-[var(--up)] border-[var(--up-line)] bg-[var(--up-bg)]' : 'text-[var(--warn)] border-[var(--warn-line)] bg-[var(--warn-bg)]'"
-                >
-                  {{ getModeOf(p) }}
-                </span>
                 <span
                   v-if="(p.scaleOutPhase ?? 0) >= 1"
                   class="rounded-full px-1.5 py-0.5 text-3xs font-mono font-semibold border text-[var(--up)] border-[var(--up-line)] bg-[var(--up-bg)]"
@@ -467,12 +357,12 @@ function orderTooltipText(o: any): string {
 
     <!-- 挂单列表 -->
     <div v-else class="scroll-y flex-1 min-h-0 overflow-x-auto">
-      <BaseEmpty v-if="!filteredOrders.length" :text="t('dash.matrix.orders.empty')" />
+      <BaseEmpty v-if="!orders.length" :text="t('dash.matrix.orders.empty')" />
       <div v-else>
         <!-- 窄容器流式挂单卡片（容器 <660px 时启用） -->
         <div class="pop-narrow space-y-2 p-2">
           <div
-            v-for="o in filteredOrders"
+            v-for="o in orders"
             :key="'mo-' + o.ordId"
             class="clickable rounded-lg border border-[var(--line-2)] bg-[var(--surface-1)] p-3 transition-colors hover:bg-[var(--surface-2)] hover:border-[var(--line-1)] flex flex-col gap-2"
             :title="t('dash.matrix.chart.pickHint')"
@@ -487,18 +377,6 @@ function orderTooltipText(o: any): string {
                 <span class="num font-mono font-bold text-sm text-[var(--ink-strong)]">{{ symOf(o) }}</span>
                 <DirTag :dir="orderDir(o)" />
                 <span class="font-mono text-xs font-bold text-[var(--ink-strong)]">{{ o.lever || '3x' }}</span>
-                <span
-                  class="rounded-full px-1.5 py-0.5 text-3xs font-mono font-semibold uppercase border"
-                  :class="venueToneCls(getVenueOf(o))"
-                >
-                  {{ getVenueOf(o).toUpperCase() }}
-                </span>
-                <span
-                  class="rounded-full px-1.5 py-0.5 text-3xs font-mono font-medium border"
-                  :class="getModeOf(o) === 'LIVE' ? 'text-[var(--up)] border-[var(--up-line)] bg-[var(--up-bg)]' : 'text-[var(--warn)] border-[var(--warn-line)] bg-[var(--warn-bg)]'"
-                >
-                  {{ getModeOf(o) }}
-                </span>
               </div>
               <span class="inline-block whitespace-nowrap rounded px-1.5 py-0.5 text-3xs border border-[var(--line-1)] bg-[var(--surface-2)] text-[var(--ink-2)]">
                 {{ o.state === 'live' ? t('status.waiting') : o.state }}
@@ -542,7 +420,7 @@ function orderTooltipText(o: any): string {
         </thead>
         <tbody>
           <tr
-            v-for="o in filteredOrders"
+            v-for="o in orders"
             :key="o.ordId"
             class="clickable transition-colors hover:bg-[var(--surface-2)]"
             :title="t('dash.matrix.chart.pickHint')"
@@ -556,18 +434,6 @@ function orderTooltipText(o: any): string {
                 <CryptoLogo :symbol="symOf(o)" :size="16" />
                 <span class="num font-mono font-semibold text-xs text-[var(--ink-strong)]">{{ symOf(o) }}</span>
                 <DirTag :dir="orderDir(o)" />
-                <span
-                  class="rounded-full px-1.5 py-0.5 text-3xs font-mono font-semibold uppercase border"
-                  :class="venueToneCls(getVenueOf(o))"
-                >
-                  {{ getVenueOf(o).toUpperCase() }}
-                </span>
-                <span
-                  class="rounded-full px-1.5 py-0.5 text-3xs font-mono font-medium border"
-                  :class="getModeOf(o) === 'LIVE' ? 'text-[var(--up)] border-[var(--up-line)] bg-[var(--up-bg)]' : 'text-[var(--warn)] border-[var(--warn-line)] bg-[var(--warn-bg)]'"
-                >
-                  {{ getModeOf(o) }}
-                </span>
               </div>
             </td>
             <td class="col-num font-mono text-xs font-semibold text-[var(--ink-strong)]">
@@ -596,7 +462,7 @@ function orderTooltipText(o: any): string {
       </table>
         </div>
       </div>
-      <p v-if="filteredOrders.length" class="text-3xs text-[var(--ink-3)] border-t px-3.5 py-2" style="border-color: var(--line-1)">
+      <p v-if="orders.length" class="text-3xs text-[var(--ink-3)] border-t px-3.5 py-2" style="border-color: var(--line-1)">
         {{ t('dash.matrix.orders.aiManaged') }}
       </p>
     </div>

@@ -1,10 +1,10 @@
 <script setup lang="ts">
 /**
- * MatrixView.vue · DeepSeek Harness 风格实盘矩阵主工位
+ * MatrixView.vue · AstraQuant 实盘矩阵核心交易工位
  * 从零重新设计信息层级与工位排布：
  * 1. 顶部紧凑状态与工位模式换挡（标准工作台 / 沉浸工位模式）
  * 2. 核心指标 HUD 区域（低饱和黑白分层卡片）
- * 3. 首屏直达核心工位：左侧主图表 + 右侧持仓挂单与多所账户
+ * 3. 首屏直达核心工位：左侧主图表 + 右侧持仓挂单与 OKX 账户
  * 4. 底部多因子微积分动力学矩阵
  */
 import { computed, ref } from 'vue';
@@ -19,7 +19,6 @@ import {
 } from 'lucide-vue-next';
 
 import KpiRibbon from '../../components/dashboard/KpiRibbon.vue';
-import VenueAccountsPanel from '../../components/dashboard/VenueAccountsPanel.vue';
 import ChartWorkstation from '../../components/dashboard/ChartWorkstation.vue';
 import PositionsOrdersPanel from '../../components/dashboard/PositionsOrdersPanel.vue';
 import FactorMatrix from '../../components/dashboard/FactorMatrix.vue';
@@ -49,30 +48,27 @@ function pick(instId: string) {
     <!-- 工位导航与控制顶栏 -->
     <div class="flex items-center justify-between gap-2 pt-0.5">
       <div class="flex items-center gap-2">
-        <h1 class="text-xs font-bold tracking-tight text-[var(--ink-strong)] flex items-center gap-1.5">
+        <h1 class="text-base sm:text-lg font-semibold tracking-tight text-[var(--ink-strong)] flex items-center gap-2">
           <span class="dsh-status-dot active" aria-hidden="true" />
           {{ t('dash.matrix.title') }}
         </h1>
         <span
-          class="rounded-full px-2 py-0.5 border text-3xs font-mono font-medium"
+          class="rounded-full px-2.5 py-0.5 border text-3xs font-mono font-medium"
           style="background-color: var(--surface-2); border-color: var(--line-1); color: var(--ink-2)"
         >
           {{ t('dash.matrix.hudProdDynamics') }}
-        </span>
-        <span class="hidden md:inline text-3xs text-[var(--ink-3)]">
-          · {{ t('dash.matrix.desc') }}
         </span>
       </div>
 
       <!-- 模式切换控制器 -->
       <button type="button"
-        class="btn btn-ghost h-7 px-3 text-xs font-medium cursor-pointer inline-flex items-center gap-1.5 rounded-full transition-all"
+        class="btn btn-ghost h-8 px-3.5 text-xs font-medium cursor-pointer inline-flex items-center gap-1.5 rounded-full transition-all"
         :class="isFocusMode ? 'btn-primary' : ''"
         :title="isFocusMode ? t('dash.matrix.focusRestoreTip') : t('dash.matrix.focusTip')"
         @click="isFocusMode = !isFocusMode"
       >
-        <Minimize2 v-if="isFocusMode" class="h-3.5 w-3.5" />
-        <Maximize2 v-else class="h-3.5 w-3.5" />
+        <Minimize2 v-if="isFocusMode" class="h-4 w-4" />
+        <Maximize2 v-else class="h-4 w-4" />
         <span>{{ isFocusMode ? t('dash.matrix.focusExit') : t('dash.matrix.focusEnter') }}</span>
       </button>
     </div>
@@ -103,22 +99,19 @@ function pick(instId: string) {
       <!-- 标准工作台布局：首屏直达主图与持仓，分层卡片排布 -->
       <template v-else>
         <!-- 主工位区：图表(8) + 持仓挂单(4) -->
-        <div class="grid grid-cols-1 gap-3 xl:grid-cols-12 items-stretch">
-          <div class="xl:col-span-8 flex flex-col">
+        <div class="grid grid-cols-1 gap-3 xl:grid-cols-12 xl:h-[600px] items-stretch">
+          <div class="xl:col-span-8 flex flex-col h-full min-h-0">
             <ChartWorkstation
               ref="chart"
               :initial-symbol="initialSymbol"
               :fill="true"
-              chart-height="520px"
+              chart-height="100%"
             />
           </div>
-          <div class="xl:col-span-4 flex flex-col gap-3">
-            <PositionsOrdersPanel class="flex-1" @pick-symbol="pick" />
+          <div class="xl:col-span-4 flex flex-col gap-3 h-full min-h-0">
+            <PositionsOrdersPanel class="flex-1 min-h-0" @pick-symbol="pick" />
           </div>
         </div>
-
-        <!-- 三所账户资产与风控占用 -->
-        <VenueAccountsPanel />
 
         <!-- 因子动能微积分动力学矩阵 -->
         <FactorMatrix @pick-symbol="pick" />

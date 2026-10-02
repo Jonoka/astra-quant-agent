@@ -7,7 +7,8 @@
 ## 安全属性（与 trader 域同一套纪律）
 
 - 段体 **AST 逐字**（对拍门 `tests/extraction/test_brain_dispatch_extraction.py`）；
-- 全部自由名（`37` 个）**同名 kw-only 入参** ⇒ 门面调用期解析，
+- 全部自由名（`38` 个：2026-09-30 增 `repair_json_object` 做容错 JSON 解析，
+  修不动仍抛原始错误 ⇒ 行为 fail-closed 不变）**同名 kw-only 入参** ⇒ 门面调用期解析，
   `patch.object(ai_brain_trader, "assemble_decision_cache", ...)` 这类测试缝照常生效；
 - 段内两处 `return` 即函数终返 ⇒ 调用点 `return helper(...)` 直接透传（无哨兵）。
 """
@@ -46,6 +47,7 @@ def dispatch_llm_and_persist_decisions(*,
         policy_summary,
         policy_version,
         prompt,
+        repair_json_object,
         runtime_context,
         safe_float,
         telemetry,
@@ -155,7 +157,18 @@ def dispatch_llm_and_persist_decisions(*,
             if content.startswith("```"): content = content[3:]
             if content.endswith("```"): content = content[:-3]
 
-            brain_output = json.loads(content.strip())
+            try:
+                brain_output = json.loads(content.strip())
+            except ValueError as parse_error:
+                # 容错修复（2026-09-30，与自进化复盘共用 `repair_json_object`）：
+                # 裸控制字符 / 尾逗号 / 前后散文在模型输出里很常见，而这里解析失败会走到
+                # 外层 except ⇒ `_record_cycle_health("failed")` + 返回 None
+                # ⇒ **整个交易周期没有任何决策**。修不动就抛**原始**错误，
+                # 行为与修复前逐字一致（fail-closed，不新增任何决策语义）。
+                try:
+                    brain_output, _repair_report = repair_json_object(content=content)
+                except ValueError:
+                    raise parse_error
             if not isinstance(brain_output, dict):
                 raise ValueError("LLM response root must be an object")
         decisions_dict = brain_output.get("decisions", {})
@@ -223,6 +236,13 @@ def dispatch_llm_and_persist_decisions(*,
 
         history_list.insert(0, history_record)
         history_list = history_list[:50] # Keep recent 50 rounds
+        # 轻量化优化：首条(当前最新轮次)完整保留全景提示词用于排错审计；
+        # 历史较旧轮次(idx >= 1)剔除重复庞大的 40KB prompt，缩减至前缀，大幅削减 90% 存储与反序列化开销
+        for idx, item in enumerate(history_list):
+            if idx > 0 and isinstance(item, dict) and "ai_last_prompt" in item:
+                p_text = str(item["ai_last_prompt"])
+                if len(p_text) > 500:
+                    item["ai_last_prompt"] = p_text[:200] + "...(历史轮次已精简收敛)"
 
         atomic_write_json(AI_DECISION_HISTORY_FILE, history_list)
 

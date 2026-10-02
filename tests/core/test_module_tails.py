@@ -1,4 +1,4 @@
-"""跨域长尾收口 —— 12 个模块各 1–3 行的残余分支 —— 第 316 刀。
+"""跨域长尾收口 —— 11 个模块各 1–3 行的残余分支 —— 第 316 刀。
 
 这批都是"每个模块只剩最后两三行"的零头，散落在 5 个域里，单独成刀会让每刀成本
 远高于收益，故合并为**一刀清扫**：
@@ -7,8 +7,8 @@
 |---|---|---|
 | `brain/cycle_parts.py` | `brain/account_text.py` | `brain/runtime.py` |
 | `brain/snapshots.py` | `trader/scale_out.py` | `trader/reservation_reconcile.py` |
-| `trader/signal_snapshot.py` | `trader/venue_evidence.py` | `calculus/regime.py` |
-| `news/importance.py` | `ledger/okx_history.py` | `backtest/lifecycle.py` |
+| `trader/signal_snapshot.py` | `calculus/regime.py` | `news/importance.py` |
+| `ledger/okx_history.py` | `backtest/lifecycle.py` | |
 
 它们的共同性质：**只在失败/未知/低波这类"不好走"的路上跑**，所以既有用例
 （多为正常路径的集成测试）碰不到。
@@ -32,11 +32,10 @@ for _p in (str(ROOT), str(ROOT / "scripts")):
 
 from scripts.backtest import lifecycle  # noqa: E402
 from scripts.brain import account_text, cycle_parts, runtime, snapshots  # noqa: E402
-from scripts.calculus import regime  # noqa: E402
 from scripts.ledger import okx_history  # noqa: E402
 from scripts.news import importance  # noqa: E402
 from scripts.trader import (reservation_reconcile, scale_out,  # noqa: E402
-                            signal_snapshot, venue_evidence)
+                            signal_snapshot)
 
 
 # ───────────────────────── brain/cycle_parts.py ─────────────────────────
@@ -419,113 +418,6 @@ class SignalSnapshotTests(unittest.TestCase):
         self.assertEqual(snap["composite_alpha_score"], 0.77)
 
 
-# ───────────────────── trader/venue_evidence.py ─────────────────────
-class VenueEvidenceFallbackTests(unittest.TestCase):
-    """候选所清单来自能力表；表不可用时**回落 OKX 单候选**（不硬编码）。"""
-
-    def _candidates(self, registry):
-        return venue_evidence.build_venue_candidates(
-            "BTC-USDT-SWAP", "live", venue_health_stamp=lambda: ("stamp", {}),
-            venue_registry=registry, load_preferred_venue=lambda: "auto",
-            venue_execution_ready=lambda name, env: True,
-            MAKER_FEE_RATE=0.0002, VENUE_HEALTH_MAX_AGE_S=900.0)
-
-    def test_registry_venues_are_used_when_available(self):
-        class _Reg:
-            def registered_venues(self):
-                return ["okx", "gate"]
-        names = [c["venue"] for c in self._candidates(_Reg())]
-        self.assertEqual(names, ["okx", "gate"])
-
-    def test_registry_failure_falls_back_to_okx_only(self):
-        # ★ 第 47 行
-        class _Reg:
-            def registered_venues(self):
-                raise RuntimeError("registry 表损坏")
-        names = [c["venue"] for c in self._candidates(_Reg())]
-        self.assertEqual(names, ["okx"], "表读不出来只能退回唯一确定能下单的所")
-
-    def test_empty_registry_yields_no_candidates(self):
-        class _Reg:
-            def registered_venues(self):
-                return []
-        self.assertEqual(self._candidates(_Reg()), [])
-
-
-class PersistVenueDecisionTests(unittest.TestCase):
-    """选所证据落盘：**best-effort**，失败只打警告不许影响本轮交易。"""
-
-    def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self.tmp.cleanup)
-        self.cache = os.path.join(self.tmp.name, "cache.json")
-        # 缓存是**扁平**的 `{instId: 决策}` —— 不是 `{"symbols": {...}}`
-        Path(self.cache).write_text(
-            json.dumps({"BTC-USDT-SWAP": {"action": "WAIT"}}), encoding="utf-8")
-
-    def _run(self):
-        from contextlib import contextmanager
-        import astra_backend.file_locks as file_locks
-
-        @contextmanager
-        def _no_lock(path):
-            yield
-        with patch.object(venue_evidence, "print", lambda *a, **k: None), \
-             patch.object(file_locks, "file_lock", _no_lock):
-            return venue_evidence.persist_venue_decision(
-                "BTC-USDT-SWAP", {"venue": "okx"}, AI_DECISION_CACHE_FILE=self.cache)
-
-    def test_missing_symbol_is_refused_rather_than_invented(self):
-        # 缓存里没有该标的 ⇒ 不伪造决策，直接 False
-        Path(self.cache).write_text(json.dumps({"ETH-USDT-SWAP": {}}), encoding="utf-8")
-        self.assertFalse(self._run())
-
-    def test_successful_persist_returns_true_and_merges(self):
-        self.assertTrue(self._run())
-        merged = json.loads(Path(self.cache).read_text(encoding="utf-8"))
-        self.assertEqual(merged["BTC-USDT-SWAP"]["action"], "WAIT", "既有字段逐键保留")
-        self.assertEqual(merged["BTC-USDT-SWAP"]["venue_decision"], {"venue": "okx"})
-
-    def test_failure_returns_false_instead_of_raising(self):
-        # ★ 第 123 行
-        with patch.object(venue_evidence.os, "replace",
-                          lambda src, dst: (_ for _ in ()).throw(OSError("busy"))):
-            self.assertFalse(self._run())
-
-
-# ───────────────────────── calculus/regime.py ─────────────────────────
-class LowVolChoppyRegimeTests(unittest.TestCase):
-    """体制判定的**兜底档**：既不冲击、也不趋势、也不宽幅震荡 ⇒ 窄幅低波整理。"""
-
-    def _pkg(self, name="BTC-USDT-SWAP"):
-        return {"instId": name, "price": 100.0, "atr_1h": 0.2, "adx_1h": 12.0,
-                "calculus": {"velocity_1h": 0.0, "accel_1h": 0.0, "jerk_1h": 0.0,
-                             "kinematic_regime": "STABLE"},
-                "macro_4h": "NEUTRAL"}
-
-    def test_quiet_market_lands_in_low_vol_choppy(self):
-        # ★ 第 165/166 行
-        out = regime.detect_macro_market_regime([self._pkg()])
-        self.assertEqual(out["regime_id"], regime.REGIME_LOW_VOL_CHOPPY)
-        self.assertIn("窄幅低波整理", out["recommended_action"])
-        self.assertIn("等待放量破位", out["recommended_action"])
-
-    def test_action_text_warns_against_overtrading(self):
-        out = regime.detect_macro_market_regime([self._pkg()])
-        self.assertIn("磨损手续费", out["recommended_action"])
-
-    def test_regime_name_tag_and_profile_come_from_the_tables(self):
-        out = regime.detect_macro_market_regime([self._pkg()])
-        self.assertEqual(out["regime_name"], regime._REGIME_NAMES[regime.REGIME_LOW_VOL_CHOPPY])
-        self.assertEqual(out["regime_tag"], regime._REGIME_TAGS[regime.REGIME_LOW_VOL_CHOPPY])
-
-    def test_high_adx_and_one_sided_flow_is_trend_expansion(self):
-        # 对照：同夹具但 ADX 高 + 全体同向 ⇒ 不该落到兜底档
-        pkgs = [dict(self._pkg(), adx_1h=45.0, macro_4h="BULL") for _ in range(3)]
-        self.assertEqual(regime.detect_macro_market_regime(pkgs)["regime_id"],
-                         regime.REGIME_TREND_EXPANSION)
-
-
 # ───────────────────────── news/importance.py ─────────────────────────
 class CryptoMacroRelevanceTests(unittest.TestCase):
     def test_crypto_keyword_in_title_is_relevant(self):
@@ -582,8 +474,10 @@ class OkxExitReasonTests(unittest.TestCase):
         return o
 
     def test_fallback_branch_classifies_by_pnl(self):
-        # ★ 第 122 行 —— 既无 algoId、clOrdId 也不以 "O" 开头、tag 里没有 "CLI"
-        self.assertIn("目标止盈达成", self._run(close_orders=[self._order()])["exit_reason"])
+        # ★ 第 122 行 —— 既无 algoId、clOrdId 也不以 "O"/"SO" 开头、tag 里没有 "CLI"。
+        # 2026-09-29：这里**查不到平仓单**，只能按盈亏推定，故标签显式写"推定（未匹配）"——
+        # 旧实现直接写"目标止盈达成"，把"查不到"伪装成"止盈成功"。
+        self.assertIn("止盈推定（未匹配平仓单）", self._run(close_orders=[self._order()])["exit_reason"])
 
     def test_fallback_branch_reports_a_loss(self):
         h = self._h(pnl="-50.0")
@@ -604,8 +498,16 @@ class OkxExitReasonTests(unittest.TestCase):
         self.assertIn("移动止损保本出场", self._run(h, [order])["exit_reason"])
 
     def test_algo_prefixed_client_order_id_uses_the_strategy_wording(self):
+        # 2026-09-29 改口径：`O` 前缀 = **AI 主动整仓止盈**（不是云端 TP 成交）。
+        # 旧实现把它与分批止盈、云端止盈都写成"目标止盈达成"，用户看不出谁干的。
         order = self._order(clOrdId="O12345")
-        self.assertIn("移动止盈锁利", self._run(close_orders=[order])["exit_reason"])
+        self.assertIn("AI 主动止盈平仓", self._run(close_orders=[order])["exit_reason"])
+
+    def test_scale_out_prefixed_client_order_id_is_labelled_as_partial_close(self):
+        """clOrdId 前缀 `SO`（分批止盈平仓单）必须与"目标止盈达成"分开 ——
+        这正是"分批止盈是否生效"看得见的关键（旧实现按盈亏金额猜原因）。"""
+        order = self._order(clOrdId="SO1790674346")
+        self.assertIn("首批分批止盈", self._run(close_orders=[order])["exit_reason"])
 
     def test_cli_tag_is_recognised(self):
         order = self._order(clOrdId="x", tag="CLI")

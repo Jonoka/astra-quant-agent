@@ -1,14 +1,26 @@
 """Unit tests for Scale-Out Execution Engine (scripts/trader/scale_out.py)."""
 from __future__ import annotations
 
+import tempfile
 import unittest
-from unittest.mock import MagicMock, patch
+from pathlib import Path
+from unittest.mock import ANY, MagicMock, patch
 
 from scripts.trader.scale_out import execute_scale_out_if_eligible
 
 
 class ScaleOutExecutionTests(unittest.TestCase):
     def setUp(self):
+        # ⚠️ 2026-09-29：分批止盈新增了**事件流水**（`data/scale_out_events.jsonl`）。
+        # 本用例走真实的成功路径 ⇒ 若不重定向落点，跑到哪里就把夹具行灌进**生产**流水。
+        # 实测事故：一份"第一手证据"里混进 50 行假记录（entry 80000/exit 82000 之类）。
+        import scripts.trader.scale_out as _so
+        self._events_tmp = tempfile.TemporaryDirectory(prefix="astra-scaleout-events-")
+        self.addCleanup(self._events_tmp.cleanup)
+        _p = patch.object(_so, "SCALE_OUT_EVENTS_FILE",
+                          Path(self._events_tmp.name) / "scale_out_events.jsonl")
+        _p.start()
+        self.addCleanup(_p.stop)
         self.mock_okx = MagicMock()
         self.mock_record_trade = MagicMock()
         self.mock_notify = MagicMock()
@@ -59,7 +71,9 @@ class ScaleOutExecutionTests(unittest.TestCase):
             self.mock_okx.place_order.assert_not_called()
 
     def test_profit_below_trigger_threshold(self):
-        # cur_px = 80500, entry = 80000 -> profit = 500 < 1.2 * 1000 (1200)
+        # cur_px = 80500, entry = 80000 -> profit = 500 < 2.0 * 1000 (2000)
+        # ⚠️ 阈值来自**代码基线**（测试环境由 pin_baseline_risk_env 钉住，不读用户 .env），
+        #    2026-09-30 起基线 = 2.0×ATR 落袋 35%（用户拍板的盈亏比矫正）
         f_low_profit = dict(self.sample_f_long, price=80500.0)
         actions = []
         ok, reason = execute_scale_out_if_eligible(
@@ -72,8 +86,9 @@ class ScaleOutExecutionTests(unittest.TestCase):
         self.mock_okx.place_order.assert_not_called()
         # 验证未达标时已为操盘手和主脑计算并存入首批止盈位 TP1
         t = self.sample_trackers["BTC-USDT-SWAP_long"]
-        self.assertEqual(t.get("scale_out_tp"), 81200.0)
-        self.assertIn("首批止盈目标 TP1: 81200", t.get("stage_desc", ""))
+        self.assertEqual(t.get("scale_out_tp"), 82000.0)
+        self.assertIn("首批止盈目标 TP1: 82000", t.get("stage_desc", ""))
+        self.assertIn("达标平35%保本", t.get("stage_desc", ""), "文案必须跟着比例走，不许写死 50%")
 
     def test_insufficient_size_graceful_degrade(self):
         # pos = 0.01, minSz = 0.01 -> 0.01 < 2 * 0.01, cannot split
@@ -85,13 +100,16 @@ class ScaleOutExecutionTests(unittest.TestCase):
             okx_rest=self.mock_okx,
         )
         self.assertFalse(ok)
-        self.assertEqual(reason, "张数不足以切分")
+        self.assertEqual(reason, "保证金不足以切分")
         self.assertIn("降级为全仓追踪", actions[0])
         self.mock_okx.place_order.assert_not_called()
 
     def test_notification_failure_does_not_change_the_outcome(self):
-        """**通知是 best-effort**：平仓单已经打到交易所 ⇒ 通知（Telegram/邮件等）失败
-        只吞掉，返回值仍是成功。否则上层会误以为平仓失败而重试。
+        """**本路径不再发布金额通知**（2026-09-30 通知单一事实源）。
+
+        打桩一个"必炸"的通知通道，结果必须**完全不变**：平仓单照打、返回值仍是成功。
+        这同时钉住两件事：① 通知不是本路径的职责（改由台账路径发布 —— 它握有交易所
+        真实成交价与手续费）；② 就算有人把调用加回来，通知故障也绝不能影响钱路。
         """
         self.mock_okx.place_order.return_value = [{"ordId": "12345"}]
         self.mock_okx.pending_algo_orders.return_value = [
@@ -111,7 +129,8 @@ class ScaleOutExecutionTests(unittest.TestCase):
         )
         self.assertTrue(ok, f"通知失败不得改变平仓结果：{reason}")
         self.assertEqual(reason, "首批分批平仓成功")
-        boom.assert_called()
+        boom.assert_not_called()
+        self.mock_record_trade.assert_called_once()
 
     def test_trade_recording_failure_currently_propagates(self):
         """⚠️ **实测边界（如实钉住现状，未擅自改）**：与「通知」不同，**台账记账是裸调用**
@@ -162,30 +181,34 @@ class ScaleOutExecutionTests(unittest.TestCase):
         self.assertTrue(ok)
         self.assertEqual(reason, "首批分批平仓成功")
         
-        # 验证下达平仓市价单（reduceOnly=True，卖出 5 张）
+        # 验证下达平仓市价单（reduceOnly=True，卖出 3.5 张 = 10 × 35%）
+        # 2026-09-29：平仓单带 clOrdId 前缀 `SO`（Scale-Out）—— 台账侧据此把
+        # "首批分批止盈"与"AI 主动止盈平仓"分开（旧实现按盈亏金额猜原因，
+        # 于是分批止盈在台账里一直显示成"目标止盈达成"）。
         self.mock_okx.place_order.assert_called_once_with(
-            "BTC-USDT-SWAP", "sell", "5",
-            pos_side="long", td_mode="cross", ord_type="market", reduce_only=True
+            "BTC-USDT-SWAP", "sell", "3.5",
+            pos_side="long", td_mode="cross", ord_type="market", reduce_only=True,
+            cl_ord_id=ANY,
         )
 
         # 验证旧 OCO 被撤销
         self.mock_okx.cancel_algo_orders.assert_called_once_with(["algo_1"], inst_id="BTC-USDT-SWAP")
 
-        # 验证新 OCO 重挂：剩余 5 张，保本止损价 80200 (80000 + 0.25%)
+        # 验证新 OCO 重挂：剩余 6.5 张，保本止损价 80200 (80000 + 0.25%)
         self.mock_ensure_oco.assert_called_once_with(
-            "BTC-USDT-SWAP", "long", 5.0, 85000.0, 80200.0
+            "BTC-USDT-SWAP", "long", 6.5, 85000.0, 80200.0
         )
 
         # 验证 tracker 状态变更与金字塔加仓互斥锁定
         t = self.sample_trackers["BTC-USDT-SWAP_long"]
         self.assertEqual(t["scale_out_phase"], 1)
-        self.assertEqual(t["currentSz"], 5.0)
+        self.assertEqual(t["currentSz"], 6.5)
         self.assertEqual(t["scale_count"], 999)
         self.assertEqual(t["trailingStopPx"], 80200.0)
 
-        # 验证台账双写与通知触发
+        # 验证台账写入；金额通知**不再**由本路径发布（改由台账路径，见其 docstring）
         self.mock_record_trade.assert_called_once()
-        self.mock_notify.assert_called_once()
+        self.mock_notify.assert_not_called()
 
     def test_idempotent_no_duplicate_scale_out(self):
         # scale_out_phase 已为 1 时，再次调用直接拒绝，绝不重复平仓
@@ -241,11 +264,6 @@ class ScaleOutExecutionTests(unittest.TestCase):
         self.assertEqual(row["scale_out_phase"], 1)
 
     def test_binance_scale_out_cancels_old_protective_and_sets_reduce_only(self):
-        mock_venue_registry = MagicMock()
-        mock_bn_adapter = MagicMock()
-        mock_venue_registry.get_adapter.return_value = mock_bn_adapter
-        mock_bn_adapter.place_order.return_value = {"id": "bn_order_1"}
-
         pos_bn = {
             "side": "long",
             "avgPx": 80000.0,
@@ -267,31 +285,15 @@ class ScaleOutExecutionTests(unittest.TestCase):
         ok, reason = execute_scale_out_if_eligible(
             self.sample_f_long, pos_bn, trackers,
             "2026-09-20 12:00:00", actions,
-            venue_registry=mock_venue_registry,
             record_trade=self.mock_record_trade,
             notify_trade_close=self.mock_notify,
             close_fee=self.mock_close_fee,
             close_trade_payload=self.mock_payload,
         )
-        self.assertTrue(ok)
-        self.assertEqual(reason, "首批分批平仓成功")
-        # 验证 Binance 减仓传递 reduce_only=True
-        mock_bn_adapter.place_order.assert_called_once_with(
-            "BTC", "sell", 5.0, reduce_only=True
-        )
-        # 验证 Binance 撤销了旧保护单
-        mock_bn_adapter.cancel_protective_orders.assert_called_once_with("BTC")
-        # 验证 Binance 为余仓挂载了新保护单
-        mock_bn_adapter.attach_protective_orders.assert_called_once_with(
-            "BTC", "long", tp_px=85000.0, sl_px=80200.0, contracts=5.0
-        )
+        self.assertFalse(ok)
+        self.assertIn("非 OKX 场所", reason)
 
     def test_gate_scale_out_cancels_old_protective_and_sets_reduce_only(self):
-        mock_venue_registry = MagicMock()
-        mock_gate_adapter = MagicMock()
-        mock_venue_registry.get_adapter.return_value = mock_gate_adapter
-        mock_gate_adapter.place_order.return_value = {"id": "gt_order_1"}
-
         pos_gate = {
             "side": "long",
             "avgPx": 80000.0,
@@ -312,35 +314,24 @@ class ScaleOutExecutionTests(unittest.TestCase):
         ok, reason = execute_scale_out_if_eligible(
             self.sample_f_long, pos_gate, trackers,
             "2026-09-20 12:00:00", actions,
-            venue_registry=mock_venue_registry,
             record_trade=self.mock_record_trade,
             notify_trade_close=self.mock_notify,
             close_fee=self.mock_close_fee,
             close_trade_payload=self.mock_payload,
         )
-        self.assertTrue(ok)
-        self.assertEqual(reason, "首批分批平仓成功")
-        # 验证 Gate 减仓传递 reduce_only=True
-        mock_gate_adapter.place_order.assert_called_once_with(
-            "BTC", "sell", 5.0, reduce_only=True
-        )
-        # 验证 Gate 撤销了旧保护单
-        mock_gate_adapter.cancel_protective_orders.assert_called_once_with("BTC")
-        # 验证 Gate 为余仓挂载了新保护单
-        mock_gate_adapter.attach_protective_orders.assert_called_once_with(
-            "BTC", "long", tp_px=85000.0, sl_px=80200.0, contracts=5.0
-        )
+        self.assertFalse(ok)
+        self.assertIn("非 OKX 场所", reason)
 
     def test_cycle_parts_scale_out_tp_derivation(self):
         from scripts.brain.cycle_parts import _calculate_scale_out_tp, build_history_record
 
-        # 多头：80000 + 1.2 * 1000 = 81200
+        # 多头：80000 + 2.0 * 1000 = 82000（基线 2.0×ATR，见 risk_constants）
         tp_long = _calculate_scale_out_tp(80000.0, "BUY_LONG", 1000.0, precision=2)
-        self.assertEqual(tp_long, 81200.0)
+        self.assertEqual(tp_long, 82000.0)
 
-        # 空头：80000 - 1.2 * 1000 = 78800
+        # 空头：80000 - 2.0 * 1000 = 78000
         tp_short = _calculate_scale_out_tp(80000.0, "SELL_SHORT", 1000.0, precision=2)
-        self.assertEqual(tp_short, 78800.0)
+        self.assertEqual(tp_short, 78000.0)
 
         # WAIT 或无价格返回 None
         self.assertIsNone(_calculate_scale_out_tp(0.0, "WAIT", 1000.0))
@@ -378,8 +369,98 @@ class ScaleOutExecutionTests(unittest.TestCase):
         )
         self.assertEqual(len(rec["top_opportunities"]), 1)
         opp = rec["top_opportunities"][0]
-        self.assertEqual(opp["scale_out_tp"], 81200.0)
+        self.assertEqual(opp["scale_out_tp"], 82000.0)
         self.assertEqual(opp["take_profit_price"], 85000.0)
+
+
+class CrossVenueUnitScaleTests(unittest.TestCase):
+    """外所分批止盈必须用**该所自己的**合约面值与最小步长。
+
+    三所持仓接管时新增（用户报「币安/Gate 的仓一直挂在那、也不会被平」）：
+    `f["ctVal"]` / `f["minSz"]` 来自 **OKX 合约池**（DOGE = 1000 张面值），
+    而 Binance 的 `pos` 是**币数**、Gate 的是**自家张数**（DOGE 面值 10）。
+    沿用 OKX 口径 ⇒ 名义额与平仓手续费错 1000 倍，切片量也按错误步长对齐
+    （真下单就是按错的数量平仓）。持仓记录上的值必须优先。
+    """
+
+    def _f(self):
+        # 现价 0.101：越过基线门槛 2.0×ATR（0.09615 + 2.0×0.002 = 0.10015）
+        return {"instId": "DOGE-USDT-SWAP", "name": "DOGE", "price": 0.101,
+                "atr": 0.002, "precision": 4, "ctVal": 1000.0, "minSz": 0.01,
+                "market_data_valid": True}
+
+    def _run(self, pos):
+        adapter = MagicMock()
+        adapter.place_order.return_value = {"id": "x"}
+        registry = MagicMock()
+        registry.get_adapter.return_value = adapter
+        fee = MagicMock(return_value=0.0)
+        trackers = {"DOGE-USDT-SWAP_long": {"scale_out_phase": 0}}
+        ok, reason = execute_scale_out_if_eligible(
+            self._f(), pos, trackers, "2026-09-28 12:00:00", [],
+            venue_registry=registry, record_trade=MagicMock(),
+            notify_trade_close=MagicMock(), close_fee=fee,
+            close_trade_payload=MagicMock(return_value={}))
+        return ok, reason, adapter, fee
+
+    def test_gate_uses_its_own_contract_value_not_the_okx_pool_value(self):
+        pos = {"side": "long", "avgPx": 0.09615, "pos": 861.0, "venue": "gate",
+               "ctVal": 10.0, "minSz": 10.0, "precision": 0}
+        ok, reason, adapter, fee = self._run(pos)
+        self.assertFalse(ok)
+        self.assertIn("非 OKX 场所", reason)
+
+    def test_binance_uses_coin_units_with_a_contract_value_of_one(self):
+        pos = {"side": "long", "avgPx": 0.09615, "pos": 861.0, "venue": "binance",
+               "ctVal": 1.0, "minSz": 1.0, "precision": 0}
+        ok, reason, adapter, fee = self._run(pos)
+        self.assertFalse(ok)
+        self.assertIn("非 OKX 场所", reason)
+
+    def test_an_okx_position_still_falls_back_to_the_pool_values(self):
+        """没有持仓级覆盖时逐位回落 OKX 口径 —— 不许改变 OKX 路径的行为。"""
+        pos = {"side": "long", "avgPx": 0.09615, "pos": 861.0, "venue": "okx"}
+        fee = MagicMock(return_value=0.0)
+        okx_rest = MagicMock()
+        okx_rest.place_order.return_value = {"ordId": "1"}
+        registry = MagicMock()
+        registry.get_adapter.return_value = MagicMock()
+        ok, reason = execute_scale_out_if_eligible(
+            self._f(), pos, {"DOGE-USDT-SWAP_long": {"scale_out_phase": 0}},
+            "2026-09-28 12:00:00", [],
+            okx_rest=okx_rest, venue_registry=registry,
+            record_trade=MagicMock(), notify_trade_close=MagicMock(),
+            close_fee=fee, close_trade_payload=MagicMock(return_value={}))
+        self.assertTrue(ok, reason)
+        self.assertEqual(fee.call_args[0][1], 1000.0,
+                         "OKX 无覆盖值 ⇒ 沿用合约池面值")
+
+    def test_btc_small_position_scale_out_size_precision_not_zero(self):
+        """BTC 价格精度为 1 (tickSz=0.1) 而张数精度为 2 (minSz=0.01)；分批平仓不得被抹为 0。"""
+        f = {
+            "instId": "BTC-USDT-SWAP", "name": "BTC", "price": 90000.0, "atr": 1000.0,
+            "precision": 1, "ctVal": 0.01, "minSz": 0.01, "market_data_valid": True,
+        }
+        # entry_sz = 0.03, 剩余 0.01 (已成交 0.02)
+        pos = {"side": "long", "avgPx": 85000.0, "pos": 0.01, "venue": "okx", "minSz": 0.01}
+        tracker = {
+            "scale_out_phase": 0, "entry_sz": 0.03, "scale_out_tp": 87000.0,
+            "takeProfitPx": 95000.0, "trailingStopPx": 80000.0,
+        }
+        record_trade = MagicMock()
+        close_payload = MagicMock(return_value={})
+        ok, reason = execute_scale_out_if_eligible(
+            f, pos, {"BTC-USDT-SWAP_long": tracker},
+            "2026-10-01 12:00:00", [],
+            okx_rest=MagicMock(),
+            record_trade=record_trade,
+            close_trade_payload=close_payload,
+            close_fee=MagicMock(return_value=0.5),
+        )
+        self.assertTrue(ok, reason)
+        self.assertEqual(tracker["scale_out_phase"], 1)
+        # 验证 record_trade 里的 pos_sz 是 0.01 或 0.02，绝非 0.0
+        self.assertGreater(close_payload.call_args[1]["pos_sz"], 0.0)
 
 
 if __name__ == "__main__":

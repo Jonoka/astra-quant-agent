@@ -2,7 +2,7 @@
 /**
  * AdminLayout.vue · ASTRA 开发者工作台外壳
  * ---------------------------------------------------------------------------
- * 视觉语言：DeepSeek Harness 侧边导航工作台
+ * 视觉语言：AstraQuant 极简工作台布局架构
  *   · 画布与侧栏同底（#0a0a0a），靠 6% 发丝描边分区，不用独立侧栏底色
  *   · 导航项 30px 基线；选中态 = 白色 alpha 分层 + 品牌蓝图标，不做加粗染色
  *   · 顶栏 48px 与画布同底 + 底描边；面包屑弱化，动作区右对齐
@@ -23,11 +23,13 @@ import {
   MonitorPlay,
   Sun,
   Moon,
+  ArrowUpCircle,
 } from 'lucide-vue-next';
 import { useAuthStore } from '../stores/auth';
 import { useI18n } from '../composables/useI18n';
 import { useTheme } from '../composables/useTheme';
 import { useLocalStorage } from '../composables/useLocalStorage';
+import { useUpdateNotice } from '../composables/useUpdateNotice';
 import { adminGroups } from '../config/nav';
 import { APP_VERSION } from '../config/version';
 import BeijingClock from '../components/base/BeijingClock.vue';
@@ -41,6 +43,7 @@ const router = useRouter();
 const auth = useAuthStore();
 const { t } = useI18n();
 const { theme, toggleTheme } = useTheme();
+const { updateAvailable, behindCount } = useUpdateNotice();
 
 const collapsed = useLocalStorage('astra_admin_sidebar', false);
 const drawerOpen = ref(false);
@@ -64,31 +67,25 @@ function logout() {
   router.push('/admin/login');
 }
 
-/* 后台 chunk 空闲预取 */
+/* 后台 chunk 空闲预取（2026-09-30：组件名改由 `config/nav.ts` 单一来源提供，
+   删除本文件原先手写的 key → 组件名映射 —— 那份副本在页面增删后必然漂移） */
 onMounted(() => {
-  const prefetch = () => adminGroups.flatMap((g) => g.items).forEach((i) => import(`../views/admin/${pageFile(i.key)}.vue`).catch(() => {}));
+  const prefetch = () =>
+    adminGroups
+      .flatMap((g) => g.items)
+      .forEach((i) => {
+        if (i.component) import(`../views/admin/${i.component}.vue`).catch(() => {});
+      });
   if ('requestIdleCallback' in window) (window as any).requestIdleCallback(prefetch);
   else setTimeout(prefetch, 400);
 });
-
-function pageFile(key: string): string {
-  const map: Record<string, string> = {
-    'admin-overview': 'OverviewPage', 'admin-decisions': 'DecisionsPage', 'admin-gateway': 'GatewayPage',
-    'admin-council': 'CouncilPage', 'admin-promptlib': 'PromptStudioPage', 'admin-evolution': 'EvolutionPage',
-    'admin-policy': 'PolicySnapshotPage', 'admin-risk': 'RiskPage', 'admin-interceptors': 'InterceptorsPage',
-    'admin-plugins': 'PluginsPage', 'admin-security': 'SecurityPage', 'admin-llm': 'LlmPage',
-    'admin-notify': 'NotifyPage', 'admin-agents': 'AgentsPage', 'admin-backup': 'BackupPage',
-    'admin-audit': 'AuditPage', 'admin-adminsys': 'AdminSysPage', 'admin-about': 'AboutPage',
-  };
-  return map[key] || 'OverviewPage';
-}
 
 watch(() => route.path, () => (drawerOpen.value = false));
 </script>
 
 <template>
   <div class="wb">
-    <!-- 键盘用户的第一个 Tab 落点：跳过 18 项侧边导航直达正文（批 45） -->
+    <!-- 键盘用户的第一个 Tab 落点：跳过侧边导航直达正文（批 45；2026-09-30 起 11 项） -->
     <SkipLink />
 
     <!-- ═══ 侧边导航 ═══ -->
@@ -180,6 +177,19 @@ watch(() => route.path, () => (drawerOpen.value = false));
         </nav>
 
         <div class="wb-topbar-right">
+          <!-- 远端新版本更新提醒 -->
+          <button
+            v-if="updateAvailable"
+            type="button"
+            class="btn btn-quiet h-7 px-2 text-3xs font-semibold gap-1.5 cursor-pointer text-amber-400 bg-amber-500/10 border border-amber-500/30 hover:bg-amber-500/20 rounded-lg inline-flex items-center"
+            :title="t('dash.shell.updateTooltip', undefined, { n: behindCount })"
+            @click="router.push('/admin/backup?tab=version')"
+          >
+            <ArrowUpCircle :size="14" class="text-amber-400 animate-pulse" />
+            <span class="hidden sm:inline">{{ t('dash.shell.updateAvailable') }}</span>
+            <span class="num text-4xs bg-amber-500/20 px-1 py-0.5 rounded font-mono">{{ behindCount }}</span>
+          </button>
+
           <BeijingClock class="wb-clock" />
 
           <button type="button" class="wb-icon-btn" :title="t('nav.actions.theme')" :aria-label="t('nav.actions.theme')" @click="toggleTheme">
@@ -369,7 +379,7 @@ watch(() => route.path, () => (drawerOpen.value = false));
   color: var(--ds-color-text-primary);
 }
 .wb-item.is-active {
-  background: linear-gradient(90deg, rgba(59, 130, 246, 0.12) 0%, rgba(59, 130, 246, 0.02) 100%);
+  background: linear-gradient(90deg, rgba(16, 185, 129, 0.12) 0%, rgba(16, 185, 129, 0.02) 100%);
   color: var(--ds-color-text-primary);
   font-weight: 600;
   border: 1px solid var(--accent-line);

@@ -116,9 +116,7 @@ test('关键通报点逐一落位（回归锚点）', () => {
     ['views/admin/OverviewPage.vue', /v-if="loadError"\s+role="alert"\s+class="ov-error-banner"/, '整页加载失败横幅'],
     ['views/admin/PromptStudioPage.vue', /v-if="importFileError"\s+role="alert"/, '策略包导入解析失败'],
     ['views/admin/CouncilPage.vue', /v-if="importFileError"\s+role="alert"/, '委员会配置导入失败'],
-    ['views/admin/InterceptorsPage.vue', /v-if="createError"\s+role="alert"/, '新建插件提交失败'],
     ['views/admin/GatewayPage.vue', /v-if="error"\s+role="status"\s+aria-live="polite"/, '网关陈旧数据提示'],
-    ['components/dashboard/VenueAccountsPanel.vue', /v-if="store\.error && !store\.needsAuth"\s+role="status"\s+aria-live="polite"/, '资金面板拉取失败'],
   ];
 
   for (const [rel, re, label] of cases) {
@@ -127,7 +125,7 @@ test('关键通报点逐一落位（回归锚点）', () => {
   }
 });
 
-test('批 67 修复过的 16 个控件逐一具备 :aria-label（回归锚点）', () => {
+test('批 67 修复过的控件逐一具备 :aria-label（回归锚点）', () => {
   const anchors = [
     ['views/admin/AboutPage.vue', 'v-model="confirmPhrase"', "admin.about.phrasePlaceholder"],
     ['views/admin/CouncilPage.vue', 'v-model="selectedRole.name"', "admin.council.seatNamePlaceholder"],
@@ -135,14 +133,9 @@ test('批 67 修复过的 16 个控件逐一具备 :aria-label（回归锚点）
     ['views/admin/CouncilPage.vue', 'v-model="importRawJson"', "admin.council.importJsonAria"],
     ['views/admin/EvolutionPage.vue', 'v-model="newMemoryText"', "admin.evolution.memoryInputAria"],
     ['views/admin/EvolutionPage.vue', 'v-model="mod.content"', "admin.evolution.moduleContentAria"],
-    ['views/admin/InterceptorsPage.vue', 'v-model="newFilename"', "admin.interceptors.filenameLabel"],
     ['views/admin/PromptStudioPage.vue', 'v-model="selectedModule.title"', "admin.promptStudio.modules.titlePlaceholder"],
     ['views/admin/PromptStudioPage.vue', 'v-model="selectedModule.content"', "admin.promptStudio.moduleEditor"],
     ['views/admin/PromptStudioPage.vue', 'v-model="importNameOverride"', "admin.promptStudio.import.nameLabel"],
-    ['views/admin/SecurityPage.vue', 'v-model="mxForm.binance_api_key"', "admin.security.binanceKeyAria"],
-    ['views/admin/SecurityPage.vue', 'v-model="mxForm.binance_secret_key"', "admin.security.binanceSecretAria"],
-    ['views/admin/SecurityPage.vue', 'v-model="mxForm.gate_api_key"', "admin.security.gateKeyAria"],
-    ['views/admin/SecurityPage.vue', 'v-model="mxForm.gate_secret_key"', "admin.security.gateSecretAria"],
     ['views/admin/SecurityPage.vue', 'v-model="keys.live_key"', "admin.security.liveKeyAria"],
     ['views/admin/SecurityPage.vue', 'v-model="newInstId"', "admin.security.instAria"],
   ];

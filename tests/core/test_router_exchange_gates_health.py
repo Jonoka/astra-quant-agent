@@ -1,15 +1,4 @@
-"""多所路由：**确认短语门禁**、健康度解析、账户面三态（第二百四十七刀）。
-
-先打印目标行再动笔。三组语义：
-
-| 组 | 语义 |
-|---|---|
-| ★ **写开关的确认短语** | `PUT /api/v1/admin/multi-exchange` 里，`gate_execution` / `binance_execution` 等开关**必须**配一句**精确**短语（`confirmation.strip().upper()` 全等比较）⇒ 差一个字符就 **400**，且 detail 里写明该用哪句 |
-| **健康度落盘解析** | `venue_health.json` 读不动 ⇒ `health = {}`（不炸）；有 okx 段时**补齐** `testnet`（取 `okx_env.simulated`）与 `avg_ms`（缺失时现场 `diagnose_venue_connection` 兜一次，再失败就 `pass`）|
-| ★ **账户面三态** | Gate 解析失败 ⇒ **`degraded`**；Binance 的 `ExchangeCapabilityError` ⇒ **`unavailable`**（能力缺失 ≠ 读失败）、其它异常 ⇒ `degraded`、解析失败 ⇒ `degraded` |
-
-后两组的意义：状态字是**给运维看的**，把「所不支持」与「读失败」混成一个字，等于把
-「不可判定」说成「安全」。
+"""交易所路由：健康度落盘解析。
 """
 
 import json
@@ -17,8 +6,6 @@ import tempfile
 import types
 import unittest
 from unittest import mock
-
-from fastapi import HTTPException
 
 from astra_backend.routers import exchanges as R
 
@@ -28,53 +15,6 @@ def _auth_off(test):
         patcher = mock.patch.object(R, name, mock.Mock(), create=True)
         patcher.start()
         test.addCleanup(patcher.stop)
-
-
-class _Payload:
-    """宽容载荷：处理器会读**很多**字段（实测：缺 `binance_api_key` 直接 AttributeError），
-    这里对未列出的字段一律给 `None`，避免"我要知道每一个字段名"这种脆弱前提。"""
-
-    def __init__(self, **kw):
-        object.__setattr__(self, "_kw", kw)
-
-    def __getattr__(self, name):
-        return self._kw.get(name, None)
-
-
-def _payload(**kw):
-    base = {"okx_execution": None, "gate_execution": None, "binance_execution": None,
-            "okx_testnet": None, "gate_testnet": None, "binance_testnet": None,
-            "confirmation": ""}
-    base.update(kw)
-    return _Payload(**base)
-
-
-class ConfirmationPhraseTest(unittest.TestCase):
-    def setUp(self):
-        _auth_off(self)   # 认证在函数体内做（实测：不关就是 401/403，不是 400）
-
-    def _call(self, **kw):
-        try:
-            R.admin_multi_exchange_update(_payload(**kw))
-        except HTTPException as exc:
-            return exc
-        return None
-
-    def test_gate_execution_requires_the_exact_phrase(self):
-        exc = self._call(gate_execution=True, confirmation="OPEN GATE EXECUTION 的")
-        self.assertIsNotNone(exc, "短语不精确 ⇒ 必须拒绝")
-        self.assertEqual(exc.status_code, 400)
-        self.assertIn("OPEN GATE EXECUTION", exc.detail)
-
-    def test_binance_execution_requires_the_exact_phrase(self):
-        exc = self._call(binance_execution=True, confirmation="open binance execution!")
-        self.assertIsNotNone(exc)
-        self.assertEqual(exc.status_code, 400)
-        self.assertIn("OPEN BINANCE EXECUTION", exc.detail)
-
-    # ⚠️ **故意不测正例**：短语正确时处理器会继续走到"落盘写配置"那一步，
-    # 而本刀还没确认写入函数名（要先读 274-310 的收尾）⇒ 宁可**不驱动**，
-    # 也不在生产配置上做实验。拒绝分支是安全的：它 `raise` 在任何写入之前。
 
 
 class VenueHealthTest(unittest.TestCase):
@@ -94,7 +34,7 @@ class VenueHealthTest(unittest.TestCase):
         return R.admin_multi_exchange_status(x_astra_admin_token="t")
 
     def _write_health(self, payload):
-        ( __import__("pathlib").Path(self.tmp.name) / "venue_health.json").write_text(
+        (__import__("pathlib").Path(self.tmp.name) / "venue_health.json").write_text(
             payload if isinstance(payload, str) else json.dumps(payload), encoding="utf-8")
 
     def test_corrupt_health_file_degrades_to_empty(self):
@@ -119,86 +59,110 @@ class VenueHealthTest(unittest.TestCase):
         self.assertIsInstance(out, dict, "诊断失败不影响整体响应")
 
 
-class _JunkAccount(dict):
-    """任何键都返回一个**不能 float()** 的值 ⇒ 逼出"返回解析失败"那条分支。"""
-
-    def get(self, key, default=None):
-        return "不是数字"
+def _roster(*names):
+    return [{"instId": f"{n}-USDT-SWAP", "name": n} for n in names]
 
 
-class _PermissiveAdapter:
-    def __init__(self, *, account=None, capability_error=None, generic_error=None):
-        self._account = {} if account is None else account
-        self._capability_error = capability_error
-        self._generic_error = generic_error
-
-    def account_snapshot(self):
-        if self._capability_error is not None:
-            raise self._capability_error
-        if self._generic_error is not None:
-            raise self._generic_error
-        return self._account
-
-    def __getattr__(self, name):
-        def _stub(*a, **k):
-            if self._generic_error is not None:
-                raise self._generic_error
-            return [] if name != "signed_request" else []
-        return _stub
+def _cache(names, age=3.0, price=1.0):
+    return {"data_health": {"cache_age_seconds": age},
+            "factors": [{"name": n, "instId": f"{n}-USDT-SWAP", "price": price} for n in names]}
 
 
-class VenueAccountFallbackTest(unittest.TestCase):
-    """★ 三态：`unavailable`（所不支持）≠ `degraded`（读失败/解析失败）。"""
+class PoolHealthProjectionTest(unittest.TestCase):
+    """健康名单**只**来自「标的池 × 实时行情证据」（2026-09-30 真机事故回归）。
 
-    def _creds(self):
-        return mock.patch("astra_backend.exchanges.venue_credentials",
-                          return_value=("k", "s"))
+    事故原样：写 `venue_health.json` 里 `venues.okx.ok` 的 `scripts/brain/xvenue.py`
+    在 OKX 专用化提交里被删除，但两个路由只把 `avg_ms/testnet/updated_utc` 叠写在旧
+    blob 上 ⇒ 名单冻结在 9 个标的（含早已移除的 UNI），面板整天显示 `9/9 币`全绿。
+    因此本组用例的牙齿是：**遗留名单里出现的标的，若不在池内，绝不许进入响应。**
+    """
 
-    def _run(self, fn, adapter):
-        with self._creds(), \
-                mock.patch.object(R, "get_adapter", return_value=adapter, create=True), \
-                mock.patch("astra_backend.exchanges.get_adapter", return_value=adapter):
-            return fn("demo")
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        p = mock.patch.object(R, "DATA_DIR", __import__("pathlib").Path(self.tmp.name))
+        p.start()
+        self.addCleanup(p.stop)
+        p2 = mock.patch.object(R, "okx_env", types.SimpleNamespace(simulated=True), create=True)
+        p2.start()
+        self.addCleanup(p2.stop)
+        _auth_off(self)
+        # 离线测试缝：绝不读生产池/生产缓存
+        self._patch_seam(_roster("BTC", "ETH", "SOL"), _cache(["BTC", "ETH", "SOL"]))
 
-    def test_gate_parse_failure_is_degraded(self):
-        out = self._run(R._venue_accounts_gate, _PermissiveAdapter(account=_JunkAccount()))
-        self.assertEqual(out["status"], "degraded")
-        self.assertIn("Gate 返回解析失败", out["reason"])
+    def _patch_seam(self, roster, cache):
+        for name, value in (("_pool_roster", roster), ("_market_cache", cache)):
+            patcher = mock.patch.object(R, name, mock.Mock(return_value=value), create=True)
+            patcher.start()
+            self.addCleanup(patcher.stop)
 
-    def test_gate_generic_failure_is_degraded(self):
-        out = self._run(R._venue_accounts_gate,
-                        _PermissiveAdapter(generic_error=RuntimeError("网络断了")))
-        self.assertEqual(out["status"], "degraded")
-        self.assertIn("Gate 账户读取失败", out["reason"])
+    def _okx(self):
+        out = R.admin_multi_exchange_status(x_astra_admin_token="t")
+        return out["health"]["venues"]["okx"]
 
-    def test_binance_capability_error_is_unavailable_not_degraded(self):
-        """★ 所能力缺失 ⇒ `unavailable`（**不可判定 ≠ 安全**，它与"读失败"是两回事）。"""
-        from astra_backend.exchanges import ExchangeCapabilityError
-        out = self._run(R._venue_accounts_binance,
-                        _PermissiveAdapter(capability_error=ExchangeCapabilityError("不支持逐仓")))
-        self.assertEqual(out["status"], "unavailable")
-        self.assertIn("Binance 账户面不可用", out["reason"])
+    def _write_health(self, payload):
+        (__import__("pathlib").Path(self.tmp.name) / "venue_health.json").write_text(
+            json.dumps(payload), encoding="utf-8")
 
-    def test_binance_generic_failure_is_degraded(self):
-        out = self._run(R._venue_accounts_binance,
-                        _PermissiveAdapter(generic_error=RuntimeError("网络断了")))
-        self.assertEqual(out["status"], "degraded")
-        self.assertIn("Binance 账户读取失败", out["reason"])
+    def test_legacy_roster_cannot_leak_into_the_card(self):
+        """僵尸快照里写着 UNI（不在池内）⇒ 响应里**不得**出现 UNI（本 bug 的牙齿）。"""
+        self._write_health({"updated_utc": "2026-09-30 10:00:00",
+                            "venues": {"okx": {"ok": ["ADA", "UNI", "XRP"], "failed": {},
+                                               "avg_ms": 120}}})
+        h = self._okx()
+        self.assertEqual(h["ok"], ["BTC", "ETH", "SOL"])
+        self.assertEqual(h["total"], 3, "total 必须等于池容量，而不是遗留名单长度")
+        self.assertNotIn("UNI", json.dumps(h, ensure_ascii=False), "遗留名单漏进了面板")
 
-    def test_binance_parse_failure_is_degraded(self):
-        out = self._run(R._venue_accounts_binance, _PermissiveAdapter(account=_JunkAccount()))
-        self.assertEqual(out["status"], "degraded")
-        self.assertIn("Binance 返回解析失败", out["reason"])
+    def test_total_follows_the_pool_not_the_snapshot(self):
+        self._patch_seam(_roster("BTC", "ETH", "SOL", "XRP", "DOGE", "ARB"),
+                         _cache(["BTC", "ETH", "SOL", "XRP", "DOGE", "ARB"]))
+        h = self._okx()
+        self.assertEqual(h["total"], 6)
+        self.assertEqual(len(h["ok"]), 6)
+        self.assertEqual(h["unknown"], [])
+        self.assertTrue(set(h["ok"]) <= {"BTC", "ETH", "SOL", "XRP", "DOGE", "ARB"})
 
-    def test_missing_credentials_say_unavailable_without_any_request(self):
-        """★ 凭证没配 ⇒ `unavailable` 且**明确写"未发起任何请求"**（不谎称试过了）。"""
-        with mock.patch("astra_backend.exchanges.venue_credentials",
-                        return_value=("", "")), \
-                mock.patch.object(R, "get_adapter", create=True) as getter:
-            out = R._venue_accounts_gate("demo")
-        self.assertEqual(out["status"], "unavailable")
-        self.assertIn("未发起任何请求", out["reason"])
-        getter.assert_not_called()
+    def test_stale_or_missing_snapshot_is_unverified_never_green(self):
+        for cache in (_cache(["BTC", "ETH", "SOL"], age=5000.0),
+                      {"data_health": {}, "factors": [{"name": "BTC", "price": 1.0}]},
+                      None):
+            with self.subTest(cache=str(cache)[:40]):
+                self._patch_seam(_roster("BTC", "ETH", "SOL"), cache)
+                h = self._okx()
+                self.assertEqual(h["ok"], [], "读不到/过期不得算作可用")
+                self.assertEqual(sorted(h["unknown"]), ["BTC", "ETH", "SOL"])
+                self.assertEqual(h["total"], 3, "未核实时 total 仍是池容量（前端显示 n/3）")
+
+    def test_untrusted_pool_shows_no_roster_at_all(self):
+        self._patch_seam([], _cache(["BTC"]))
+        h = self._okx()
+        self.assertEqual(h["total"], 0)
+        self.assertEqual((h["ok"], h["failed"], h["unknown"]), ([], [], []))
+        self.assertIn("标的池不可信", h["note"])
+
+    def test_missing_symbol_row_is_failed_not_ok(self):
+        self._patch_seam(_roster("BTC", "ETH", "SOL"), _cache(["BTC", "ETH"]))
+        h = self._okx()
+        self.assertEqual(h["ok"], ["BTC", "ETH"])
+        self.assertEqual(h["failed"], ["SOL"], "池内有名、行情无据 ⇒ 必须单列")
+        self.assertEqual(h["total"], 3)
+
+    def test_zero_price_is_not_health(self):
+        self._patch_seam(_roster("BTC", "ETH"), _cache(["BTC"], price=0.0))
+        h = self._okx()
+        self.assertEqual(h["ok"], [])
+        self.assertEqual(sorted(h["failed"]), ["BTC", "ETH"])
+
+    def test_projection_failure_hides_the_roster_instead_of_falling_back(self):
+        patcher = mock.patch.object(R, "_pool_roster",
+                                    mock.Mock(side_effect=RuntimeError("boom")), create=True)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self._write_health({"venues": {"okx": {"ok": ["UNI"], "avg_ms": 100}}})
+        h = self._okx()
+        self.assertEqual(h["total"], 0)
+        self.assertNotIn("UNI", json.dumps(h, ensure_ascii=False))
 
 
 if __name__ == "__main__":

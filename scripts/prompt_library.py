@@ -52,6 +52,8 @@ try:  # repo 根在 sys.path
         base_template_modules as _tpl_base_template_modules,
         base_template_text as _tpl_base_template_text,
         align_pipeline_sources as _tpl_align_pipeline_sources,
+        normalize_base_modules as _tpl_normalize_base_modules,
+        demote_edited_base_modules as _tpl_demote_edited_base_modules,
         _inherit_module_tags as _tpl__inherit_module_tags,
         pipeline_view as _tpl_pipeline_view,
         append_layer as _tpl_append_layer,
@@ -65,6 +67,8 @@ except ImportError:  # scripts/ 在 sys.path
         base_template_modules as _tpl_base_template_modules,
         base_template_text as _tpl_base_template_text,
         align_pipeline_sources as _tpl_align_pipeline_sources,
+        normalize_base_modules as _tpl_normalize_base_modules,
+        demote_edited_base_modules as _tpl_demote_edited_base_modules,
         _inherit_module_tags as _tpl__inherit_module_tags,
         pipeline_view as _tpl_pipeline_view,
         append_layer as _tpl_append_layer,
@@ -115,31 +119,35 @@ TEMPLATE_VARIABLES_METADATA = [
     },
     {
         "key": "market_regime",
-        "label": "全市场宏观体制",
+        "label": "全市场宏观体制（已退役·恒为空）",
         "category": "行情数据",
-        "description": "注入全市场宏观体制自适应识别结果（单边趋势/宽幅震荡/窄幅低波/极端冲击、趋势强度、波动与震荡指数、操盘指导建议）",
-        "sample": "【市场体制自适应识别】: 当前全市场宏观体制为【宽幅上下震荡】(高波动箱体 · 逆势防扫)。\n- 核心量化指标: 趋势强度=38.5/100 | 波动指数=76.2/100 | 震荡指数=82.0/100 | 主导方向=NEUTRAL\n- 操盘指导建议: 处于宽幅上下震荡箱体，建议箱体边界高抛低吸，拉宽止损至 2.0x ATR 防插针扫损，浮盈达 1.5R 及时保本或锁利。",
+        "description": ("**2026-10 起已退役**：该插槽恒为空，不再注入实盘值。原因：其数据源是已退役的"
+                        "数理引擎（`calculus_engine`→`calculus/regime.py`），且缺数据时会凭空编出"
+                        "体制结论与量化分（函数内写死 `atr_pct=1.5`/`adx=20.0` 兜底，实盘 `calculus` "
+                        "块已不存在 ⇒ 震荡/冲击分源自假零）。方向证据改由每个标的的真实 4H 宏观结构"
+                        "（`4H_MACRO_*`）、ADX、ATR 与 T4 动量承载；跨标的总括可由模型自行汇总。"),
+        "sample": "",
     },
     {
         "key": "market_matrix",
-        "label": "标的行情数理矩阵",
+        "label": "标的7梯队量化因子矩阵",
         "category": "行情数据",
-        "description": "注入标的池全部币种K线、现价、盘口买卖价、聪明钱流向、1H三大数理基石硬证据(v/a/j/I/E/A/VaR)",
-        "sample": "【BTC (BTC-USDT-SWAP)】| 现价: 77575 | 4H宏观大势=4H_MACRO_BULL\n- 1H三大数理基石硬证据: 1H:v=+0.08,a=+0.42...",
+        "description": "实时注入标的池全部币种的7梯队可观测量化因子（T0衍生品费率与OI象限、T0.5订单流CVD与Taker买卖比、T1盘口OBI与点差、T1.5期权偏度、T2期限基差、T3筹码VWAP与POC、T4动量MACD与RSI）。数据缺失时明示说明，绝不用0冒充。",
+        "sample": "【BTC (BTC-USDT-SWAP)】| 现价: 68500.0 | 4H宏观大势=4H_MACRO_BULL\n- T0 衍生品: 费率=0.0042% (正常), OI=12.5亿U (+2.8%), 四象限=增仓上行, 精英多空比=1.42\n- T0.5 订单流: 1H CVD=+850万U, Taker买卖比=1.28, 量价背离=无\n- T1 盘口: OBI=+32.5%, 深度比Top20=1.45, 点差=0.01%\n- T3 筹码: 24H VWAP=68120 (+0.56%), VAH=68900 / VAL=67800, POC=68250\n- T4 动量: 1H MACD柱=+48.2 (加速度+12.5), RSI(14)=62.4, ADX=28.5 (强趋势)",
     },
     {
         "key": "account_positions",
         "label": "账户当前持仓",
         "category": "账户敞口",
-        "description": "注入系统持仓概况、在途持仓方向、均价、标记价、持仓张数、未结浮盈ROI与动态止损线",
+        "description": "注入系统持仓概况、在途持仓方向、均价、标记价、持仓保证金与杠杆、未结浮盈ROI与动态止损线",
         "sample": "【账户持仓概况】: 当前系统总持仓 1/6\n- 标的: SOL-USDT-SWAP | 方向: long 3x | 开仓均价: 103.55 | 未结浮盈: +9.00 U",
     },
     {
         "key": "pending_orders",
         "label": "在途未成交挂单",
         "category": "账户敞口",
-        "description": "注入当前在途未成交的 Maker 限价挂单、买卖方向、价格、数量及附带的云端OCO止盈止损",
-        "sample": "- [挂单ID: 38790...] LINK-USDT-SWAP | 限价买多 5张 @ 10.85 | 附带云端止盈: 12.00 / 止损: 10.30",
+        "description": "注入当前在途未成交的 Maker 限价挂单、买卖方向、价格、保证金及附带的云端OCO止盈止损",
+        "sample": "- [挂单ID: 38790...] ETH-USDT-SWAP | 限价买多 保证金 120.00U @ 3250.0 | 附带云端止盈: 3450.0 / 止损: 3180.0",
     },
     {
         "key": "account_balance",
@@ -167,7 +175,7 @@ TEMPLATE_VARIABLES_METADATA = [
         "label": "监控标的列表",
         "category": "系统环境",
         "description": "注入当前系统跟踪并推演的加密货币标的列表",
-        "sample": "BTC,ETH,SOL,DOGE,SUI,LINK",
+        "sample": "BTC,ETH,SOL,XRP,DOGE,ARB",
     },
     {
         "key": "strategy_version",
@@ -175,6 +183,20 @@ TEMPLATE_VARIABLES_METADATA = [
         "category": "系统环境",
         "description": "当前 AstraQuant 交易引擎版本",
         "sample": "6.8.1",
+    },
+    {
+        "key": "policy_version",
+        "label": "策略快照版本",
+        "category": "系统环境",
+        "description": "当前决策周期的策略版本快照标签",
+        "sample": "v8.0.0@prod",
+    },
+    {
+        "key": "policy_hash",
+        "label": "策略快照哈希",
+        "category": "系统环境",
+        "description": "当前决策周期的策略配置不可变哈希指纹",
+        "sample": "a1b2c3d4e5f6",
     },
     {
         "key": "timezone",
@@ -253,6 +275,27 @@ TEMPLATE_VARIABLES_METADATA = [
         "description": "复盘窗口内逐笔已平仓交易明细的 JSON 序列化文本",
         "sample": '[{"symbol":"BTC","net_pnl":12.3,"fee":0.4}]',
     },
+    {
+        "key": "snapshot_observability_summary",
+        "label": "可观测性审计摘要",
+        "category": "交易台账",
+        "description": "历史成交快照可观测性审计简报",
+        "sample": "全量可观测 10 笔 / 部分可观测 2 笔",
+    },
+    {
+        "key": "dynamics_observable_trades",
+        "label": "因子可观测成交笔数",
+        "category": "交易台账",
+        "description": "具备完整因子快照的已平仓交易笔数",
+        "sample": "10",
+    },
+    {
+        "key": "unobservable_trades",
+        "label": "因子不可观测成交笔数",
+        "category": "交易台账",
+        "description": "缺失入场因子快照的已平仓交易笔数",
+        "sample": "2",
+    },
 ]
 
 ALLOWED_VARIABLES = {item["key"] for item in TEMPLATE_VARIABLES_METADATA} | {"profile_name", "timestamp"}
@@ -269,132 +312,45 @@ MAX_PROFILE_CHARS = 32_000
 MAX_REVISIONS = 100
 MAX_MODULES_PER_PIPELINE = 40
 
+# ── 代码侧预设：**只有结构，没有提示词正文**（2026-09-30 重构，用户批准）──────────
+# 正文的事实源是 `data/prompt_library.json`（出厂基线，git 跟踪）。
+#
+# ⚠️ 这里曾经是**第三份**文案副本（trading_system 1356 / trading_user 3022 /
+# evolution_* 199 / 790 字符），与 `SYSTEM_PROMPT`、基线文件三方各存一份 ——
+# 改一处另两处不动，表现就是"工坊里改了、实发却没变"。三方副本已收敛为一方。
+#
+# 为什么保留这个 stub 而不是整个删掉：`PRESETS` 的**键集**是"出厂方案 id"的
+# 事实源，被 `all_profiles` / `rollback_profile` / `create_profile` /
+# `save_library` 的 `in PRESETS` 判定使用。留空 pipelines 让它只承担"身份"职责，
+# 不再提供任何文本；文本一律由基线供给（基线缺失时宁可报错，也不静默发空提示词）。
 PRESETS: dict[str, dict[str, Any]] = {
-    "stable": {
-        "id": "stable", "name": "全维度波段强化版", "description": "基于 1H~4H 宏观多空趋势、因果微积分、定积分能量、概率论高权重定价与智能加仓的量化决策方案（系统唯一主策略）。", "editable": True,
-        "editor_mode": "modules",
-        "pipelines": {
-            "trading_system": [
-                {"id": "custom-ts-style", "title": "全维度波段强化交易风格", "locked": False, "enabled": True, "source": "custom",
-                 "content": "【交易风格：全维度波段强化（概率论权重提升·强开单·高胜率·高盈亏比·波段奔跑）】\n所有 P0 硬约束保持不变，不得把“稳健”解释为长期空仓。核心裁决由【概率论与期望值】优先定性：当条件延续/击穿概率具有优势且 R:R 达执行层底线时果断进场！杜绝频繁随意割肉与微利早跑：止损给足 1.8~2.2x ATR 彻底隔绝杂波插针扫损；三阶利润棘轮给足波段展开空间，浮盈达 1.5R 稳固波段才启动保本移损锁死胜率，杜绝浮盈变亏损；峰值回撤与动能耗散避免在正常微幅回踩中恐慌 CLOSE_MARKET，坚决让主升浪波段充分奔跑以兑现高盈亏比。多空对称顺势，形态契合时自信评定 78%~88% 积极开单进场！"},
-            ],
-            "trading_user": [
-                {"id": "base-ts-time", "title": "当前决策时间戳与市场时效", "locked": True, "enabled": True, "source": "base",
-                 # 审计 P1-1(2026-09-13)：代码预设此前漏了 {{risk_budget}}（线上库里有），
-                 # 一旦 load_library 回退到预设，模型就完全收不到【本周期风险预算】小节，
-                 # 而 SYSTEM PROMPT 却要求"一切金额类参数以该小节为准"——金额口径直接失锚。
-                 "content": "======================= 【当前决策时间戳与市场时效】 =======================\n{{decision_timestamp}}\n{{account_balance}}\n{{risk_budget}}"},
-                {"id": "base-ts-news", "title": "全网实时重大快讯与宏观情报", "locked": True, "enabled": True, "source": "base",
-                 "content": "======================= 【全网实时重大快讯与宏观情报】 =======================\n{{news_intelligence}}"},
-                {"id": "base-ts-pos", "title": "账户当前持仓与风险敞口全景", "locked": True, "enabled": True, "source": "base",
-                 "content": "======================= 【账户当前持仓与风险敞口全景】 =======================\n{{account_positions}}"},
-                {"id": "base-ts-pending", "title": "在途未成交限价挂单 (Pending Maker Orders)", "locked": True, "enabled": True, "source": "base",
-                 "content": "======================= 【在途未成交限价挂单 (Pending Maker Orders)】 =======================\n{{pending_orders}}"},
-                {"id": "base-ts-memory", "title": "AstraQuant 启发式实战认知与长期记忆", "locked": True, "enabled": True, "source": "base",
-                 "content": "======================= 【AstraQuant 启发式实战认知与长期记忆】 =======================\n{{trading_memory}}"},
-                {"id": "base-ts-matrix", "title": "全标的池原生行情、技术指标与筹码矩阵", "locked": True, "enabled": True, "source": "base",
-                 "content": "======================= 【全标的池原生行情、技术指标与筹码矩阵】 =======================\n{{market_matrix}}"},
-                {"id": "base-ts-task", "title": "推演与决策任务", "locked": False, "enabled": True, "source": "base", "content": ""},
-                {"id": "custom-tu-style", "title": "全维度波段强化裁决偏好（概率论高权重·多空对称·高胜率·防割肉体系）", "locked": False, "enabled": True, "source": "custom",
-                 "content": "【全维度波段强化裁决偏好（概率论高权重·多空对称·高盈亏比·波段奔跑体系）】\n1. 概率期望优先：P续/P破 差值 ≥ 15% 即方向定论，只做概率优势一侧的回踩/承压入场，逆势一侧一律放弃；\n2. 强开单欲望：拒绝机械空仓。4H/1H 顺势多头找回踩低吸挂多，顺势空头找反弹承压挂空，箱体边界双向高抛低吸，半山腰坚决 WAIT；\n3. 盈亏比与防割肉平衡：止损一律给足 1.8~2.2x 1H ATR 呼吸空间；浮盈达 1.5R 稳固波段才执行 UPDATE_SL 移损保本，杜绝微利被 15M 杂波过早扫出；走势未破坏前坚决 HOLD，让大波段主升浪充分奔跑，严禁在正常微幅回调中恐慌砸盘；\n4. 敞口自律防踩踏：同向持仓达到 2 笔时自律收紧开仓门禁，杜绝在强相关币种上无节制同向堆叠单边敞口；\n5. 置信度标定：形态达标且空间充足果断给出 78~88，确保通过执行层门禁进场；仅当全部候选触发硬否决或优势不足时才全体 WAIT。"},
-            ],
-            "evolution_system": [
-                {"id": "custom-es-style", "title": "全维度波段复盘风格", "locked": False, "enabled": True, "source": "custom",
-                 "content": "【全维度波段复盘风格】\n优先识别回撤、过度交易、追价和低质量入场，但只使用真实可观测证据。小样本、数理快照缺失或因果不可辨时 NO_CHANGE；任何记忆都不得成为绕过硬风控的新阈值。"},
-            ],
-            "evolution_user": [
-                {"id": "base-eu-time-hdr", "title": "当前认知复盘基准时间", "locked": True, "enabled": True, "source": "base",
-                 "content": "======================= 【当前认知复盘基准时间】 ======================="},
-                {"id": "base-eu-time", "title": "复盘基准时间", "locked": False, "enabled": True, "source": "base",
-                 "content": "【复盘基准时间】: {{timestamp_beijing}}"},
-                {"id": "base-eu-mem", "title": "当前系统已有的历史长期记忆库", "locked": True, "enabled": True, "source": "base",
-                 "content": "======================= 【当前系统已有的历史长期记忆库】 =======================\n{{existing_memory_markdown}}"},
-                {"id": "base-eu-ledger-hdr", "title": "AstraQuant 加密量化实盘战绩与历史交易台账", "locked": True, "enabled": True, "source": "base",
-                 "content": "======================= 【AstraQuant 加密量化实盘战绩与历史交易台账】 ======================="},
-                {"id": "base-eu-stats", "title": "统计汇总", "locked": False, "enabled": True, "source": "base",
-                 "content": "【统计汇总】:\n- 总平仓笔数: {{total}} 笔（胜 {{wins}} / 负 {{losses}} | 胜率 {{win_rate}}%）\n- 累计净盈亏: {{total_net}} USDT | 累计手续费: {{total_fees}} USDT\n- 当前聚焦标的池: {{target_instruments}}"},
-                {"id": "base-eu-trades", "title": "逐笔历史交易明细 (按时间排序)", "locked": False, "enabled": True, "source": "base",
-                 "content": "【逐笔历史交易明细】:\n{{closed_trades_json}}"},
-                {"id": "base-eu-task", "title": "复盘与长期记忆进化任务", "locked": False, "enabled": True, "source": "base",
-                 "content": "【复盘与长期记忆进化任务】:\n严格基于可观测台账证据复盘；没有交易发生时的微积分、定积分、概率与 VaR/CVaR 快照时，必须标记“数理快照不可观测”，不得事后编造。证据不足时输出 NO_CHANGE 并保留现有记忆。输出 change_status、diagnosis_insights、evolution_actions、ai_long_term_memory、memory_overwrites_reason 的严格 JSON。"},
-                {"id": "custom-eu-task", "title": "全维度波段进化任务", "locked": False, "enabled": True, "source": "custom",
-                 "content": "【全维度波段进化任务】\n评估信号一致性、风险预算、手续费、入场与退出质量；只有多个独立样本支持时才沉淀新经验，否则保留旧记忆并提出需要补充的证据。"},
-            ],
+    'allpattern_swing': {
+        'id': 'allpattern_swing',
+        'name': '全形态波段策略',
+        'description': '面向全形态的波段样板：招式由模型自选，但每单必须自证三件套'
+                       '（形态命名 · 触发条件 · 失效位）。提示词正文见 data/prompt_library.json。',
+        'editable': True,
+        'enabled': True,
+        'editor_mode': 'modules',
+        'simple_policy': {
+            'strategy': '',
+            'review_focus': '',
+            'participation': 'balanced',
+            'evidence': 'strict',
+            'risk_budget': 'middle',
         },
-        "trading_system": """【交易风格：全维度波段强化（概率论权重提升·强开单·高胜率·高盈亏比·波段奔跑）】\n所有 P0 硬约束保持不变，不得把“稳健”解释为长期空仓。核心裁决由【概率论与期望值】优先定性：当条件延续/击穿概率具有优势且 R:R≥2.0 时果断进场！杜绝频繁随意割肉与微利早跑：止损给足 1.8~2.2x ATR 彻底隔绝杂波插针扫损；三阶利润棘轮给足波段展开空间，浮盈达 1.5R 稳固波段才启动保本移损锁死胜率，杜绝浮盈变亏损；峰值回撤与动能耗散避免在正常微幅回踩中恐慌 CLOSE_MARKET，坚决让主升浪波段充分奔跑以兑现高盈亏比。多空对称顺势，形态契合时自信评定 78%~88% 积极开单进场！""",
-        "trading_user": """【全维度波段强化裁决偏好（概率论高权重·多空对称·高盈亏比·波段奔跑体系）】
-1. 概率论最高权重决策：优先根据条件延续概率 P续 与击穿概率 P破 的数学期望定价；P续 占优专注做多回踩，P破 占优专注承压做空；
-2. 强烈开单欲望：拒绝机械空仓观望，普通回抽优先作为限价入场定位，4H/1H 顺势多头找回踩低吸挂多，4H/1H 顺势空头找反弹承压挂空，箱体震荡边界双向高抛低吸；
-3. 彻底拒绝随意割肉：止损距离外扩给足 1.8x~2.2x 1H ATR 呼吸空间，隔绝 15M/5M 噪音假动作；
-4. 科学波段锁利：浮盈达 1.5R 稳固波段主动输出 UPDATE_SL 移至保本位，未破坏前坚决 HOLD 让主浪充分奔跑，杜绝微利恐慌早跑；
-5. 严守同向敞口：同向已有 2 笔时审慎克制，防范单边系统性踩踏；
-6. 形态确立且 R:R≥2.0 时，自信给出 78%~88% 置信度果断开单！""",
-        "evolution_system": """【全维度波段复盘风格】\n优先识别回撤、过度交易、追价和低质量入场，但只使用真实可观测证据。小样本、数理快照缺失或因果不可辨时 NO_CHANGE；任何记忆都不得成为绕过硬风控的新阈值。""",
-        "evolution_user": """【全维度波段进化任务】\n评估信号一致性、风险预算、手续费、入场与退出质量；只有多个独立样本支持时才沉淀新经验，否则保留旧记忆并提出需要补充的证据。""",
-    },
-    "wide_oscillation": {
-        "id": "wide_oscillation", "name": "宽幅震荡箱体收割版", "description": "专为宽幅上下震荡与高波动无序箱体量身定制：箱体边际高抛低吸、拉宽止损隔绝假突破与插针扫损、严禁半山腰追价、浮盈1.5R稳固即保本锁定。", "editable": True,
-        "editor_mode": "modules",
-        "pipelines": {
-            "trading_system": [
-                {"id": "custom-ts-wide-style", "title": "宽幅震荡箱体收割风格", "locked": False, "enabled": True, "source": "custom",
-                 "content": "【交易风格：宽幅震荡箱体收割（高波动箱体·边际高抛低吸·2.2x宽止损防插针·1.5R快锁保本）】\n所有 P0 硬约束保持不变。宽幅震荡行情核心在于箱体边际定价与防插针保护：严禁在箱体正中间（半山腰）追涨杀跌！开仓仅限于 1H/4H 箱体上轨阻力位承压做空，或箱体下轨支撑位企稳做多；止损给足 2.0~2.5x 1H ATR 宽阔空间并置于近期箱体摆动极值外，彻底杜绝日内假突破影线插针频繁扫损；箱体行情主浪空间受限，浮盈达 1.5R 稳固波段必须果断输出 UPDATE_SL 移至开仓成本保本位，锁死胜率，触及箱体对边或动能衰竭时主动锁利，杜绝浮盈变亏损；多空双向平权，形态触及箱体边际且盈亏比合规时，自信评定 78%~86% 果断挂单！"},
-            ],
-            "trading_user": [
-                {"id": "base-ts-time", "title": "当前决策时间戳与市场时效", "locked": True, "enabled": True, "source": "base",
-                 "content": "======================= 【当前决策时间戳与市场时效】 =======================\n{{decision_timestamp}}\n{{account_balance}}\n{{risk_budget}}"},
-                {"id": "base-ts-regime", "title": "全市场宏观体制自适应识别", "locked": True, "enabled": True, "source": "base",
-                 "content": "======================= 【全市场宏观体制自适应识别】 =======================\n{{market_regime}}"},
-                {"id": "base-ts-news", "title": "全网实时重大快讯与宏观情报", "locked": True, "enabled": True, "source": "base",
-                 "content": "======================= 【全网实时重大快讯与宏观情报】 =======================\n{{news_intelligence}}"},
-                {"id": "base-ts-pos", "title": "账户当前持仓与风险敞口全景", "locked": True, "enabled": True, "source": "base",
-                 "content": "======================= 【账户当前持仓与风险敞口全景】 =======================\n{{account_positions}}"},
-                {"id": "base-ts-pending", "title": "在途未成交限价挂单 (Pending Maker Orders)", "locked": True, "enabled": True, "source": "base",
-                 "content": "======================= 【在途未成交限价挂单 (Pending Maker Orders)】 =======================\n{{pending_orders}}"},
-                {"id": "base-ts-memory", "title": "AstraQuant 启发式实战认知与长期记忆", "locked": True, "enabled": True, "source": "base",
-                 "content": "======================= 【AstraQuant 启发式实战认知与长期记忆】 =======================\n{{trading_memory}}"},
-                {"id": "base-ts-matrix", "title": "全标的池原生行情、技术指标与筹码矩阵", "locked": True, "enabled": True, "source": "base",
-                 "content": "======================= 【全标的池原生行情、技术指标与筹码矩阵】 =======================\n{{market_matrix}}"},
-                {"id": "base-ts-task", "title": "推演与决策任务", "locked": False, "enabled": True, "source": "base", "content": ""},
-                {"id": "custom-tu-wide-style", "title": "宽幅震荡箱体裁决偏好（箱体边界定位·动能耗散逆转·拉宽呼吸·快锁胜率）", "locked": False, "enabled": True, "source": "custom",
-                 "content": "【宽幅震荡箱体裁决偏好（箱体边界定位·动能耗散逆转·拉宽呼吸·快锁胜率）】\n1. 箱体边缘入场原则：坚决拒绝在震荡区间正中央追多或追空。唯有当价格触及 4H/1H 箱体上轨承压（v 减速且 a < 0）挂限价做空，触及箱体下轨企稳（v 企稳且 a > 0）挂限价做多；\n2. 防插针宽止损体系：止损距离必须给足 2.0~2.5x 1H ATR，严密挂在近期箱体摆动极值点外侧，绝不在正常箱体震荡回抽中惊慌割肉；\n3. 阶梯式锁利防坐过山车：浮盈达 1.5R 稳固波段立即输出 UPDATE_SL 提损保本；价格接近箱体反向阻力位/支撑位时果断分批止盈退出，拒绝利润回吐；\n4. 动能反转微积分硬验证：重点参考一阶速度减速与加速度符号变向（如冲顶出现 v > 0 但 a < -0.10，探底出现 v < 0 但 a > 0.10），确认箱体动力学反转确立；\n5. 敞口自律防假突破：全账户同向在管持仓限制在 2 笔以内，防范假突破演变为单边异动踩踏；\n6. 边际形态达标且盈亏比满足要求时，自信给出 78%~86% 置信度果断开单！"},
-            ],
-            "evolution_system": [
-                {"id": "custom-es-wide-style", "title": "宽幅震荡复盘风格", "locked": False, "enabled": True, "source": "custom",
-                 "content": "【宽幅震荡复盘风格】\n重点排查半山腰盲目追价、止损空间过窄导致的假动作插针扫损、以及盈利后未及时移损导致的利润回吐。小样本、数理快照缺失或因果不可辨时 NO_CHANGE；任何记忆都不得成为绕过硬风控的新阈值。"},
-            ],
-            "evolution_user": [
-                {"id": "base-eu-time-hdr", "title": "当前认知复盘基准时间", "locked": True, "enabled": True, "source": "base",
-                 "content": "======================= 【当前认知复盘基准时间】 ======================="},
-                {"id": "base-eu-time", "title": "复盘基准时间", "locked": False, "enabled": True, "source": "base",
-                 "content": "【复盘基准时间】: {{timestamp_beijing}}"},
-                {"id": "base-eu-mem", "title": "当前系统已有的历史长期记忆库", "locked": True, "enabled": True, "source": "base",
-                 "content": "======================= 【当前系统已有的历史长期记忆库】 =======================\n{{existing_memory_markdown}}"},
-                {"id": "base-eu-ledger-hdr", "title": "AstraQuant 加密量化实盘战绩与历史交易台账", "locked": True, "enabled": True, "source": "base",
-                 "content": "======================= 【AstraQuant 加密量化实盘战绩与历史交易台账】 ======================="},
-                {"id": "base-eu-stats", "title": "统计汇总", "locked": False, "enabled": True, "source": "base",
-                 "content": "【统计汇总】:\n- 总平仓笔数: {{total}} 笔（胜 {{wins}} / 负 {{losses}} | 胜率 {{win_rate}}%）\n- 累计净盈亏: {{total_net}} USDT | 累计手续费: {{total_fees}} USDT\n- 当前聚焦标的池: {{target_instruments}}"},
-                {"id": "base-eu-trades", "title": "逐笔历史交易明细 (按时间排序)", "locked": False, "enabled": True, "source": "base",
-                 "content": "【逐笔历史交易明细】:\n{{closed_trades_json}}"},
-                {"id": "base-eu-task", "title": "复盘与长期记忆进化任务", "locked": False, "enabled": True, "source": "base",
-                 "content": "【复盘与长期记忆进化任务】:\n严格基于可观测台账证据复盘；没有交易发生时的微积分、定积分、概率与 VaR/CVaR 快照时，必须标记“数理快照不可观测”，不得事后编造。证据不足时输出 NO_CHANGE 并保留现有记忆。输出 change_status、diagnosis_insights、evolution_actions、ai_long_term_memory、memory_overwrites_reason 的严格 JSON。"},
-                {"id": "custom-eu-wide-task", "title": "宽幅震荡进化任务", "locked": False, "enabled": True, "source": "custom",
-                 "content": "【宽幅震荡进化任务】\n评估震荡区间识别准确度、箱体边际入场质量、止损抗插针有效性与手续费磨损；只有多个独立样本支持时才沉淀新经验，否则保留旧记忆并提出需要补充的证据。"},
-            ],
+        'trading_system': '',
+        'trading_user': '',
+        'evolution_system': '',
+        'evolution_user': '',
+        'pipelines': {
+            'trading_system': [],
+            'trading_user': [],
+            'evolution_system': [],
+            'evolution_user': [],
         },
-        "trading_system": """【交易风格：宽幅震荡箱体收割（高波动箱体·边际高抛低吸·2.2x宽止损防插针·1.5R快锁保本）】\n所有 P0 硬约束保持不变。宽幅震荡行情核心在于箱体边际定价与防插针保护：严禁在箱体正中间（半山腰）追涨杀跌！开仓仅限于 1H/4H 箱体上轨阻力位承压做空，或箱体下轨支撑位企稳做多；止损给足 2.0~2.5x 1H ATR 宽阔空间并置于近期箱体摆动极值外，彻底杜绝日内假突破影线插针频繁扫损；箱体行情主浪空间受限，浮盈达 1.5R 稳固波段必须果断输出 UPDATE_SL 移至开仓成本保本位，锁死胜率，触及箱体对边或动能衰竭时主动锁利，杜绝浮盈变亏损；多空双向平权，形态触及箱体边际且盈亏比合规时，自信评定 78%~86% 果断挂单！""",
-        "trading_user": """【宽幅震荡箱体裁决偏好（箱体边界定位·动能耗散逆转·拉宽呼吸·快锁胜率）】
-1. 箱体边缘入场原则：坚决拒绝在震荡区间正中央追多或追空。唯有当价格触及 4H/1H 箱体上轨承压（v 减速且 a < 0）挂限价做空，触及箱体下轨企稳（v 企稳且 a > 0）挂限价做多；
-2. 防插针宽止损体系：止损距离必须给足 2.0~2.5x 1H ATR，严密挂在近期箱体摆动极值点外侧，绝不在正常箱体震荡回抽中惊慌割肉；
-3. 阶梯式锁利防坐过山车：浮盈达 1.5R 稳固波段立即输出 UPDATE_SL 提损保本；价格接近箱体反向阻力位/支撑位时果断分批止盈退出，拒绝利润回吐；
-4. 动能反转微积分硬验证：重点参考一阶速度减速与加速度符号变向（如冲顶出现 v > 0 但 a < -0.10，探底出现 v < 0 但 a > 0.10），确认箱体动力学反转确立；
-5. 敞口自律防假突破：全账户同向在管持仓限制在 2 笔以内，防范假突破演变为单边异动踩踏；
-6. 边际形态达标且盈亏比满足要求时，自信给出 78%~86% 置信度果断开单！""",
-        "evolution_system": """【宽幅震荡复盘风格】\n重点排查半山腰盲目追价、止损空间过窄导致的假动作插针扫损、以及盈利后未及时移损导致的利润回吐。小样本、数理快照缺失或因果不可辨时 NO_CHANGE；任何记忆都不得成为绕过硬风控的新阈值。""",
-        "evolution_user": """【宽幅震荡进化任务】\n评估震荡区间识别准确度、箱体边际入场质量、止损抗插针有效性与手续费磨损；只有多个独立样本支持时才沉淀新经验，否则保留旧记忆并提出需要补充的证据。""",
     },
 }
-
 EMPTY_CUSTOM = {
     "id": "custom-default", "name": "自定义方案", "description": "用自然语言调整策略，硬风控始终由系统锁定。", "editable": True,
     "enabled": True, "created_at": "", "updated_at": "", "editor_mode": "simple",
@@ -451,7 +407,7 @@ def _atomic_write(path: Path, payload: dict[str, Any]) -> None:
 
 
 def _default() -> dict[str, Any]:
-    return {"version": 2, "active_profile_id": "stable", "profiles": {}, "revisions": []}
+    return {"version": 2, "active_profile_id": "allpattern_swing", "profiles": {}, "revisions": []}
 
 
 def stable_base_module_id(title: str) -> str:
@@ -477,11 +433,18 @@ def _module(module: dict[str, Any], index: int=0) -> dict[str, Any]:
 # 同一份代码在两种导入形态下都存在（`scripts.X` 与裸 `X`，见 risk_constants 的同族问题），
 # 这里按「已导入的实例优先 → 点号形态 → 裸名」依次尝试，避免再引入第三份副本。
 _BASE_TEMPLATE_SOURCES: dict[str, tuple[str, tuple[str, ...]]] = {
-    "trading_system": ("SYSTEM_PROMPT", ("scripts.ai_brain_trader", "ai_brain_trader")),
-    "trading_user": ("TRADING_USER_TEMPLATE", ("astra_backend.prompt_views",)),
-    "evolution_system": ("EVOLUTION_SYSTEM_PROMPT",
-                         ("scripts.self_improvement_engine", "self_improvement_engine")),
-    "evolution_user": ("EVOLUTION_USER_TEMPLATE", ("astra_backend.prompt_views",)),
+    # 2026-09-30 提示词体系重构（用户批准）：**只有输出 JSON Schema 还是代码基座**，
+    # 其余正文全部搬到 `data/prompt_library.json`（可在工坊编辑）。
+    #
+    # 为什么这里只剩一条：Schema 是模型输出的**机器契约**，字段名/取值枚举必须与
+    # 解析器逐字对齐 —— 让用户在工坊里改它等于把"整轮决策解析失败"变成一次误操作。
+    # 故它由代码所有、工坊里只读（`locked=True`），并由 `validate_profile` 拒绝改动。
+    #
+    # ⚠️ 另外三条管线**刻意没有代码基座**：查不到条目时 `base_template_text` 返回空串
+    # ⇒ `apply_module_layout` 直接按 JSON 里的方案模块编排，不再有"代码基座覆盖存档"
+    # 这条静默路径（那正是旧体系"工坊所见 ≠ 实发"的根源）。
+    "trading_system": ("READONLY_OUTPUT_SCHEMA",
+                       ("scripts.ai_brain_trader", "ai_brain_trader")),
 }
 _BASE_TEMPLATE_CACHE: dict[str, str] = {}
 
@@ -556,6 +519,24 @@ def _inherit_module_tags(submitted: list[Any], stored: Any) -> list[Any]:
     return _tpl__inherit_module_tags(submitted, stored)
 
 
+def normalize_base_modules(modules: list[dict[str, Any]], base_text: str, pipeline: str,
+                           canonical_modules: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
+    """基座归一薄壳：把方案里的基座与**现网代码基座**对齐（基座只读 + 缺失回插）。
+
+    `MAX_TEMPLATE_CHARS` 在**调用时**作为实参传入（与 `_module` / `pipeline_view` 同款：
+    它留在门面以便 patch）。
+    """
+    return _tpl_normalize_base_modules(modules, base_text, pipeline,
+                                       max_template_chars=MAX_TEMPLATE_CHARS,
+                                       canonical_modules=canonical_modules)
+
+
+def demote_edited_base_modules(modules: list[dict[str, Any]], base_text: str, pipeline: str) -> list[dict[str, Any]]:
+    """**保存路径**薄壳：把"被改过的基座模块"降级为 `legacy` 覆盖层（改动才真正生效）。"""
+    return _tpl_demote_edited_base_modules(modules, base_text, pipeline,
+                                           max_template_chars=MAX_TEMPLATE_CHARS)
+
+
 def _clean_pipelines(raw: Any, legacy: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
     source=raw if isinstance(raw,dict) else {}
     # 审计 P1-2(2026-09-13)：本次提交**没提到**的管线必须原样保留已存定义。
@@ -572,6 +553,14 @@ def _clean_pipelines(raw: Any, legacy: dict[str, Any]) -> dict[str, list[dict[st
             modules = stored_pipelines[key]
         else:
             modules=align_pipeline_sources(text_to_modules(str(legacy.get(key) or ""),"legacy"), key)
+        # ⚠️ 基座归**不在**这里做（2026-09-30 实测踩坑）：本条函数是**存储形状**的
+        # 清理器，`import_profile` / `save_library` / 扁平文本重建都经过它。若在此回插
+        # 基座，会把"扁平文本派生的管线"改写成"含基座模块的管线"，
+        # `pipelines[key][0]` 不再是用户那段文本、`resolve_profile` 也改走
+        # compile_modules 重建 ⇒ 用户写的扁平文本被丢弃
+        # （实测 test_custom_profile_roundtrip / test_import_* / test_legacy_storage_* 全红）。
+        # 正解：归一放在**渲染/预览边界**（`apply_module_layout` 与 `pipeline_view`），
+        # 那里拿到的 `base` 就是该管线真正的基座文本。见两处调用点的注释。
         result[key]=[_module(item,i) for i,item in enumerate(modules[:MAX_MODULES_PER_PIPELINE]) if isinstance(item,dict)]
     return result
 
@@ -618,7 +607,7 @@ def _migrate(raw: dict[str, Any]) -> dict[str, Any]:
         payload["revisions"] = list(raw.get("revisions", []))[-MAX_REVISIONS:]
         return payload
     custom = _clean_profile(raw.get("custom") or {}, "custom-default")
-    active_style = str(raw.get("active_style") or "stable")
+    active_style = str(raw.get("active_style") or "allpattern_swing")
     return {"version": 2, "active_profile_id": active_style if active_style in PRESETS else custom["id"], "profiles": {custom["id"]: custom}, "revisions": []}
 
 
@@ -713,9 +702,9 @@ def load_library() -> dict[str, Any]:
     行为与双文件改造前逐位相同。
     """
     payload = _merge_libraries(_read_json_dict(BASELINE_FILE), _read_json_dict(LOCAL_FILE))
-    active = str(payload.get("active_profile_id") or "stable")
+    active = str(payload.get("active_profile_id") or "allpattern_swing")
     if active not in PRESETS and active not in payload["profiles"]:
-        active = "stable"
+        active = "allpattern_swing"
     payload["active_profile_id"] = active
     # Backward compatibility for old API/tests.
     payload["active_style"] = active if active in PRESETS else "custom"
@@ -808,6 +797,19 @@ def resolve_profile(profile: dict[str, Any]) -> dict[str, Any]:
     return resolved
 
 
+def _canonical_locked_modules(pipeline: str) -> dict[str, str]:
+    """代码基座里**只读**模块的 `{标题: 逐字正文}`（当前 = 输出 JSON Schema）。
+
+    只读的判据是"由代码基座文本解析出来"，而不是方案里自称的 `locked` 字段 ——
+    否则用户把任意模块标个 `locked` 就能免检。
+    """
+    text = base_template_text(pipeline)
+    if not str(text or "").strip():
+        return {}
+    return {str(m["title"]): str(m["content"])
+            for m in text_to_modules(text, "base", locked=True)}
+
+
 def validate_profile(profile: dict[str, Any]) -> dict[str, Any]:
     errors: list[str] = []
     warnings: list[str] = []
@@ -842,6 +844,36 @@ def validate_profile(profile: dict[str, Any]) -> dict[str, Any]:
                 continue
             for hit in scan_forbidden(value):
                 errors.append(f"{pipeline}/{module.get('title', '模块')}：{hit}")
+        # ── 只读契约模块的**强制一致性**（2026-09-30 重构）────────────────────
+        # 代码基座（= 输出 JSON Schema）在工坊里是只读的：内容不许改、不许禁用。
+        #
+        # ⚠️ 判据是「**标题命中代码基座**」，不是方案里自称的 `locked` 字段 ——
+        # 后者在旧数据里另有含义（"跳过 scan_forbidden 扫描"的豁免位，旧 PRESETS 的
+        # trading_user 插槽载体就带着 locked=True），拿它当只读判据会误伤历史方案。
+        # 代码基座是唯一事实源：命中即只读。
+        #
+        # ⚠️ **缺席不算错**：`normalize_base_modules` 在渲染边界会把缺登记的基座模块
+        # 按规范顺序回插，所以"方案里没有它"最终仍会出现在实发提示词里。若这里要求
+        # 必须提交，新建方案（POST /prompt-profiles）与所有只关心业务模块的导入
+        # 都会被一刀拒绝 —— 那是把"防篡改"做成了"防使用"。
+        #
+        # 为什么必须在**保存路径**校验而不是只靠前端禁用控件：前端只是"不给你点"，
+        # 直接调 API、导入方案、回滚历史都能绕过。Schema 是模型输出的机器契约 ——
+        # 改一个字段名就可能让整轮决策解析失败，这类改动必须在写盘前 fail-closed。
+        canonical_locked = _canonical_locked_modules(pipeline)
+        if canonical_locked:
+            for module in modules:
+                if not isinstance(module, dict):
+                    continue
+                title = str(module.get("title") or "")
+                if title not in canonical_locked:
+                    continue
+                if str(module.get("content") or "") != canonical_locked[title]:
+                    errors.append(
+                        f"{pipeline}/「{title}」是**只读**契约模块（输出 JSON Schema），"
+                        f"内容不可修改；如需调整输出契约请改代码并走发版")
+                if not module.get("enabled", True):
+                    errors.append(f"{pipeline}/「{title}」是只读契约模块，不得禁用")
     policy = profile.get("simple_policy") if isinstance(profile.get("simple_policy"), dict) else {}
     if profile.get("editor_mode") == "simple":
         strategy = str(policy.get("strategy") or "")
@@ -884,7 +916,7 @@ def _revision(profile: dict[str, Any], action: str, note: str = "") -> dict[str,
 
 
 @_locked_library
-def create_profile(name: str, description: str = "", source_id: str = "stable", note: str = "创建方案") -> dict[str, Any]:
+def create_profile(name: str, description: str = "", source_id: str = "allpattern_swing", note: str = "创建方案") -> dict[str, Any]:
     library = load_library()
     source = get_profile(source_id)
     profile_data = copy.deepcopy(source)
@@ -910,7 +942,11 @@ def create_profile(name: str, description: str = "", source_id: str = "stable", 
 def update_profile(profile_id: str, changes: dict[str, Any], note: str = "更新方案") -> dict[str, Any]:
     library = load_library()
     if profile_id in PRESETS and profile_id not in library["profiles"]:
-        current = copy.deepcopy(PRESETS[profile_id])
+        # ⚠️ 必须走 `_clean_profile`（与 `get_profile` 同款）：出厂预设是**裸结构**，
+        # 未经读路径归一。若这里直接拿裸预设当 `current`，下面的「未提交管线逐字节
+        # 不变」硬闸会把两侧不同形（裸 vs 归一）判成"静默改写其他管线"当场报错
+        # （2026-09-30 实测：保存 trading_system 时被 trading_user 拦下）。
+        current = _clean_profile(copy.deepcopy(PRESETS[profile_id]), profile_id)
         current["editable"] = True
     elif profile_id in library["profiles"]:
         current = library["profiles"][profile_id]
@@ -927,7 +963,12 @@ def update_profile(profile_id: str, changes: dict[str, Any], note: str = "更新
         merged = copy.deepcopy(stored_pipelines)
         for key in submitted_keys:
             # 提交里漏了 source/locked 时从已存同 id/同标题模块继承（见 _inherit_module_tags）
-            merged[key] = _inherit_module_tags(accepted["pipelines"][key], stored_pipelines.get(key))
+            submitted = _inherit_module_tags(accepted["pipelines"][key], stored_pipelines.get(key))
+            # 基座只读 + 改动落覆盖层（2026-09-30）：读路径的 normalize_base_modules 会把
+            # source=="base" 的内容**无条件治愈成现网基座**，故用户改过的基座必须先在这里
+            # 降级为 legacy；否则改动会在下一次读到时被静默抹掉（问题只是从"运行期丢弃"
+            # 换成"读路径抹除"）。逐字相同/带独有插槽的不降级，照旧跟随发版。
+            merged[key] = demote_edited_base_modules(submitted, _base_text_resolver(key), key)
         accepted["pipelines"] = merged
     flat_updates = [key for key in TEMPLATE_KEYS if key in accepted]
     submitted_keys |= set(flat_updates)
@@ -1111,7 +1152,7 @@ def all_profiles() -> list[dict[str, Any]]:
     library = load_library()
     profiles_map = copy.deepcopy(library["profiles"])
     result = []
-    for pid in ("stable", "wide_oscillation"):
+    for pid in ("allpattern_swing",):
         if pid in profiles_map:
             result.append(profiles_map.pop(pid))
         elif pid in PRESETS:
@@ -1171,6 +1212,14 @@ def apply_module_layout(base: str, profile: dict[str, Any], pipeline: str, label
     """
     base_modules = base_template_modules(base, pipeline)
     layout = ((profile.get("pipelines") or {}).get(pipeline) if isinstance(profile.get("pipelines"), dict) else None)
+    # 基座归一（2026-09-30）：把方案里的基座与**本条 base** 对齐后再编排。
+    # 这是"工坊所见 = 实发所见"的**渲染侧**保证：
+    #   · 少了基座登记 ⇒ 按规范顺序回插（不再走下面那条"整段基座前置"的兜底，
+    #     也就不会让工坊看不到整段系统提示词、不会让排序/启停对那几条管线失效）；
+    #   · 陈旧基座快照 ⇒ 治愈为本条 base 的正文（否则工坊显示存档、运行期用现网）。
+    # 放在渲染边界而非存储清理器里：`base` 在这里才是该管线**真正的**基座文本。
+    if isinstance(layout, list):
+        layout = normalize_base_modules(layout, base, pipeline, canonical_modules=base_modules)
     if not isinstance(layout, list) or not any(item.get("source") == "base" for item in layout):
         custom = layout if isinstance(layout, list) else text_to_modules(str(profile.get(pipeline) or ""), "custom")
         return render_variables(compile_modules(base_modules + custom), context)
@@ -1203,6 +1252,18 @@ def apply_module_layout(base: str, profile: dict[str, Any], pipeline: str, label
             continue
 
         if pipeline == "trading_user":
+            # ⚠️ 这条"内容不含 {{变量}} 就用基座组"的规则**刻意保留**（2026-09-30 复核）：
+            # 它当初被怀疑是"工坊改动没生效"的元凶，但真正的元凶是**上游**缺少基座登记与
+            # 保存路径不落覆盖层。本规则本身是必需的：`trading_user` 的基座是
+            # `scripts/brain/prompt.py` 逐周期生成的 f-string，一个编辑器可见分节下面
+            # 可能挂着若干**嵌套**的实时值分节（`_trading_user_parent_groups` 把它们并进
+            # `group`）；只有"这一段就是插槽载体"时才该用 `raw_content`，否则会丢掉那些
+            # 嵌套实时值。曾试过改成"存档内容 != 基座组 ⇒ 用存档内容"，
+            # 那会让带嵌套分节的父节只剩父节正文（实测会丢实时值），故**不可**这样改。
+            #
+            # 至于"用户改了这段却没生效"：现在由**保存路径** `demote_edited_base_modules`
+            # 把改动降级为 `legacy`（见上面 1281 分支：非 base 项按自己的正文发出）⇒
+            # 改动照常到达模型，且与本规则不冲突。
             raw_content = str(item.get("content") or "")
             if _VAR_RE.search(raw_content):
                 content = raw_content

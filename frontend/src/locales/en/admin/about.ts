@@ -1,5 +1,6 @@
 /** About & update page copy */
 export const enAdminAbout = {
+  title: 'Version & updates',
   intro: "Verify the version status and run a safe fast-forward update.",
   badge: "Governance · 3/3",
   loading: "Loading component and version data...",
@@ -19,6 +20,11 @@ export const enAdminAbout = {
   behind: "{n} commits behind",
   upToDate: "Up to date",
   ahead: "(ahead {n})",
+  statusDirty: "Working Tree Modified",
+  dirtyFoot: "HEAD {commit} (Uncommitted)",
+  uncommittedChanges: "(Uncommitted changes)",
+  dirtyAlertTitle: "Local Working Tree Has Uncommitted Changes (Dirty)",
+  dirtyAlertDesc: "Detected modified files in the working directory. To protect local changes, remote auto-update is locked. Version tracking reflects the current HEAD commit; please commit your changes to advance the local version.",
   connecting: "Connecting to remote...",
   checkUpdate: "Check remote updates",
   runUpdate: "Run safe update",
@@ -36,13 +42,16 @@ export const enAdminAbout = {
   checkUpToDate: "Local code is already up to date and in sync with the remote main branch.",
   updateSuccess: "System updated successfully!",
   updateNoop: "The current branch is already up to date.",
+  commitsTitle: "Pending Updates (Latest Commits):",
 
   // ── added by the rebuild (batch 8) ──
-  productTitle: 'Product',
+  productTitle: 'Enterprise Product Profile',
+  pitchTitle: 'Core Engineering Positioning',
+  pitchBody: 'Institutional-grade autonomous OKX perpetual trading OS powered by multi-model adversarial council debate, 7-tier microstructure calculus verification, and deterministic physical risk control.',
   bandVersion: 'System version',
   bandControlPlane: 'Gateway control plane',
   bandRuntime: 'Runtime',
-  bandSyncGap: 'Sync gap',  // ── batch 41: localize the update-check failure message ──
+  bandSyncGap: 'Sync gap',
   updateCheckFailed: 'Update check failed: {msg} (cannot tell whether this build is behind; security patches may silently fall out of sync)',
 
   // ── exchange sign-up channels (2026-09) ──

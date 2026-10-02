@@ -1,5 +1,11 @@
 <script setup lang="ts">
 /**
+ * `embedded`（2026-09-30 后台精简）：本页被吸收为宿主页的一个页签时为真。
+ * 宿主页负责大标题与页签标签，本页 PageHeader 降级为紧凑行（说明收起），
+ * 但 #actions 里的按钮原样渲染 —— 被吸收页的按钮一个都不能丢。
+ */
+const props = withDefaults(defineProps<{ embedded?: boolean }>(), { embedded: false })
+/**
  * AboutPage.vue · 版本与安全更新工位
  * ---------------------------------------------------------------------------
  * 骨架（推倒重来）：
@@ -35,7 +41,7 @@ import PageHeader from '../../components/admin/PageHeader.vue';
 import BaseDialog from '../../components/base/BaseDialog.vue';
 import BaseEmpty from '../../components/base/BaseEmpty.vue';
 import { Info, GitBranch, Download, RefreshCw, CheckCircle2, AlertTriangle,
-  ShieldCheck, Terminal, Loader2, ArrowUpRight, Link2, ExternalLink } from 'lucide-vue-next';
+  ShieldCheck, Terminal, Loader2, ArrowUpRight, Link2, ExternalLink, Sparkles } from 'lucide-vue-next';
 import BaseLoadingAnnounce from '../../components/base/BaseLoadingAnnounce.vue';
 import CopyButton from '../../components/base/CopyButton.vue';
 
@@ -104,8 +110,9 @@ const { run: executeUpdate, busy: updateRunning } = useAsyncAction(async () => {
 const phaseOk = computed(() => confirmPhrase.value.trim().toUpperCase() === 'UPDATE ASTRA');
 
 /** 注册通道：后端 `/api/v1/admin/about` 的 `channels`（链接与 OKX 经纪商 code 都来自接口）。
- *  顺序固定为 OKX → Gate → Binance，缺失项由后端省略时优雅跳过。 */
-const CHANNEL_ORDER = ['okx', 'gate', 'binance'] as const;
+ *  系统已收敛为 OKX 单交易所：这里只渲染 OKX 通道；后端 payload 若仍夹带已下线
+ *  交易所的旧条目，按白名单过滤后静默跳过，不抛错。 */
+const CHANNEL_ORDER = ['okx'] as const;
 const channelRows = computed(() => {
   const ch = about.value?.channels || {};
   return CHANNEL_ORDER
@@ -118,6 +125,8 @@ const bandFacts = computed(() => {
   const a = about.value
   if (!a) return []
   const behind = a.update?.behind || 0
+  const dirty = Boolean(a.update?.dirty)
+  const ahead = a.update?.ahead || 0
   return [
     {
       icon: Info,
@@ -141,15 +150,19 @@ const bandFacts = computed(() => {
       tone: '',
     },
     {
-      icon: behind > 0 ? ArrowUpRight : CheckCircle2,
+      icon: dirty ? AlertTriangle : behind > 0 ? ArrowUpRight : CheckCircle2,
       label: t('admin.about.bandSyncGap'),
-      value: behind > 0
-        ? t('admin.about.behind', undefined, { n: behind })
-        : t('admin.about.upToDate'),
-      foot: a.update?.ahead
-        ? t('admin.about.ahead', undefined, { n: a.update.ahead })
-        : (a.update?.local || '--'),
-      tone: behind > 0 ? 'is-warn' : 'is-up',
+      value: dirty
+        ? t('admin.about.statusDirty')
+        : behind > 0
+          ? t('admin.about.behind', undefined, { n: behind })
+          : t('admin.about.upToDate'),
+      foot: dirty
+        ? t('admin.about.dirtyFoot', undefined, { commit: a.update?.local || '--' })
+        : ahead
+          ? t('admin.about.ahead', undefined, { n: ahead })
+          : (a.update?.local || '--'),
+      tone: dirty || behind > 0 ? 'is-warn' : 'is-up',
     },
   ]
 })
@@ -157,7 +170,7 @@ const bandFacts = computed(() => {
 
 <template>
   <div class="ab">
-    <PageHeader :title="t('nav.admin.about')" :description="t('admin.about.intro')">
+    <PageHeader :embedded="props.embedded" :title="t('admin.about.title')">
       <template #actions>
         <span class="badge badge-accent mono">{{ t('admin.about.badge') }}</span>
         <button type="button" class="btn btn-ghost btn-sm" :disabled="loading" @click="load">
@@ -228,9 +241,18 @@ const bandFacts = computed(() => {
               </div>
             </div>
 
+            <!-- 核心一句话定调 -->
+            <div class="mx-4 mt-3 p-3 rounded-lg border border-emerald-500/30 bg-emerald-500/5 text-xs text-[var(--ink-1)] leading-relaxed">
+              <p class="font-medium text-emerald-400 mb-1 flex items-center gap-1.5">
+                <Sparkles :size="13" />
+                <span>{{ t('admin.about.pitchTitle') }}</span>
+              </p>
+              <p>{{ t('admin.about.pitchBody') }}</p>
+            </div>
+
             <footer class="ab-block-foot">
               <a
-                href="https://github.com/555cute/astra-quant-agent"
+                href="https://github.com/0xethanq/astra-quant-agent"
                 target="_blank"
                 rel="noopener noreferrer"
                 class="btn btn-primary btn-sm"
@@ -317,16 +339,52 @@ const bandFacts = computed(() => {
               <span class="label-caps">{{ t('admin.about.syncGap') }}</span>
               <span
                 class="ab-tel-v"
-                :class="(about.update?.behind || 0) > 0 ? 'is-warn' : 'is-up'"
+                :class="about.update?.dirty || (about.update?.behind || 0) > 0 ? 'is-warn' : 'is-up'"
               >
-                {{ (about.update?.behind || 0) > 0
-                  ? t('admin.about.behind', undefined, { n: about.update?.behind })
-                  : t('admin.about.upToDate') }}
-                <span v-if="about.update?.ahead" class="ab-ahead">
+                {{ about.update?.dirty
+                  ? t('admin.about.statusDirty')
+                  : (about.update?.behind || 0) > 0
+                    ? t('admin.about.behind', undefined, { n: about.update?.behind })
+                    : t('admin.about.upToDate') }}
+                <span v-if="about.update?.ahead && !about.update?.dirty" class="ab-ahead">
                   {{ t('admin.about.ahead', undefined, { n: about.update.ahead }) }}
+                </span>
+                <span v-else-if="about.update?.dirty" class="ab-ahead text-amber-400 font-normal">
+                  {{ t('admin.about.uncommittedChanges') }}
                 </span>
               </span>
             </div>
+          </div>
+
+          <!-- 工作区未提交状态警示 -->
+          <div
+            v-if="about.update?.dirty"
+            role="status"
+            aria-live="polite"
+            class="mx-4 mb-3 p-3 rounded-lg border border-amber-500/20 bg-amber-500/5 flex items-start gap-2.5 text-xs text-amber-300/90 leading-relaxed"
+          >
+            <AlertTriangle :size="15" class="shrink-0 text-amber-400 mt-0.5" />
+            <div>
+              <p class="font-medium text-amber-200">{{ t('admin.about.dirtyAlertTitle') }}</p>
+              <p class="text-3xs text-amber-300/70 mt-0.5">{{ t('admin.about.dirtyAlertDesc') }}</p>
+            </div>
+          </div>
+
+          <!-- 待更新提交清单（有差额且有 commit 摘要时展示） -->
+          <div
+            v-if="(about.update?.behind || 0) > 0 && about.update?.commits?.length"
+            class="mx-4 mb-3 p-3 rounded-lg border border-emerald-500/20 bg-emerald-500/5 text-xs"
+          >
+            <p class="font-medium text-emerald-300 mb-1.5 flex items-center gap-1.5">
+              <ArrowUpRight :size="14" class="text-emerald-400" />
+              <span>{{ t('admin.about.commitsTitle') }}</span>
+            </p>
+            <ul class="space-y-1 font-mono text-3xs text-[var(--ink-2)]">
+              <li v-for="(c, i) in about.update.commits" :key="i" class="truncate flex items-center gap-1.5">
+                <span class="text-emerald-400/80">•</span>
+                <span>{{ c }}</span>
+              </li>
+            </ul>
           </div>
 
           <!-- 动作 -->
@@ -466,8 +524,10 @@ const bandFacts = computed(() => {
   gap: var(--ds-space-3);
 }
 @media (min-width: 760px) {
+  /* OKX-only：现在只有一条通道，用 auto-fit 让卡片按可用宽度铺开，
+     不再固定三列、白白留下两条空位。 */
   .ab-channels-grid {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
+    grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
   }
 }
 .ab-channel {

@@ -64,6 +64,8 @@ if MIN_LEVERAGE > MAX_LEVERAGE:
 # ── 组2 · 单笔风险 ────────────────────────────────────────────────
 # 单笔 1R 风险额占可用余额比例（与池内绝对值取小）。
 RISK_PER_TRADE_EQUITY_RATIO = _env_float("ASTRA_RISK_PER_TRADE_RATIO", 0.02)
+# 单笔风险额绝对封顶（USDT；0 = 不设绝对硬顶，纯按可用余额×单笔风险额占比动态推导）。
+MAX_RISK_PER_TRADE_USDT = _env_float("ASTRA_MAX_RISK_PER_TRADE_USDT", 0.0)
 # 最小盈亏比 R:R 硬底线，低于该值的报价被 order_risk 物理拦截。
 MIN_RISK_REWARD_RATIO = _env_float("ASTRA_MIN_RISK_REWARD", 2.0)
 # 最大盈亏比 R:R 上限（防把止盈画到天际线导致无法止盈，须 >= MIN_RISK_REWARD）。
@@ -98,10 +100,15 @@ MIN_SCALE_IN_CONFIDENCE = _env_float("ASTRA_MIN_SCALE_IN_CONFIDENCE", 75.0)
 # ── 组5 · 持仓退出与分批止盈 ─────────────────────────────────────
 # 是否启用分批平仓止盈机制（1 = 开启，0 = 关闭）。
 SCALE_OUT_ENABLED = bool(_env_int("ASTRA_SCALE_OUT_ENABLED", 1) > 0)
-# 分批平仓比例（默认 0.50 即平仓 50%，锁定本金利润，剩余仓位博大波段）。
-SCALE_OUT_RATIO = _env_float("ASTRA_SCALE_OUT_RATIO", 0.50)
-# 分批平仓触发浮盈门槛（×ATR，达到该门槛时触发分批落袋，默认 1.2x ATR）。
-SCALE_OUT_TRIGGER_ATR = _env_float("ASTRA_SCALE_OUT_TRIGGER_ATR", 1.20)
+# 分批平仓比例（默认 0.35 即先落袋 35%，锁定部分利润，剩余仓位博大波段）。
+# 2026-09-30 盈亏比矫正：旧默认 0.50 与下面的触发门槛组合出"赢小输大"结构。
+SCALE_OUT_RATIO = _env_float("ASTRA_SCALE_OUT_RATIO", 0.35)
+# 分批平仓触发浮盈门槛（×ATR，默认 2.00x ATR）。
+# ⚠️ 必须与止损的 ATR 倍数同量级（池内 `sl_atr_mult`：主流币 1.8、其余 2.2）——
+#    低于止损倍数意味着"首批止盈在止损之前落袋"，锁定的 R 小于 1（旧默认 1.20×ATR
+#    对 2.0×ATR 止损只锁 0.6R，用户实测当日 18 笔均盈 23.87U 对均亏 48.01U）。
+#    `tests/trading/test_risk_reward_structure.py` 是本条的常驻护栏。
+SCALE_OUT_TRIGGER_ATR = _env_float("ASTRA_SCALE_OUT_TRIGGER_ATR", 2.00)
 # 单笔最大止盈 ATR 宽度（× 1H ATR，超出此倍数的止盈单会被执行层平滑收窄钳制，防止止盈过远）。
 MAX_TAKE_PROFIT_ATR = _env_float("ASTRA_MAX_TAKE_PROFIT_ATR", 3.50)
 
@@ -114,8 +121,9 @@ PORTFOLIO_RISK_BUDGET_USDT = _env_float("ASTRA_PORTFOLIO_RISK_BUDGET_USDT", 0.0)
 # 跨所同向合并敞口上限（USDT；0 = 不限制）。
 # 审计 P2-1(2026-09-13)：该键自 US-005 起就写在 settings_store.MANAGED_KEYS（后台可写、
 # 可落 .env），但**全仓 0 个读者** —— 设了等于没设，UI 却把它当风控项。现落地为
-# execution_router 发送前判定：同向（base 相同且方向一致）已开仓名义额 + 本单名义额
-# 超过本上限即拒开（不夹取——敞口超限意味着这笔根本不该发）。
+# 下单前判定（`scripts/trader/order_submit.py` 的入场闸门）：同向（base 相同且方向
+# 一致）已开仓名义额 + 本单名义额超过本上限即拒开（不夹取——敞口超限意味着这笔
+# 根本不该发）。
 MAX_TOTAL_EXPOSURE_USDT = _env_float("ASTRA_MAX_TOTAL_EXPOSURE_USDT", 0.0)
 
 # ── 默认值表（供后台风控管理页 schema 引用，键 = 环境变量名） ────
@@ -133,7 +141,8 @@ DEFAULTS = {
     "ASTRA_MIN_LEVERAGE": 2.0,
     "ASTRA_MAX_LEVERAGE": 5.0,
     "ASTRA_RISK_PER_TRADE_RATIO": 0.02,
-    "ASTRA_MIN_RISK_REWARD": 2.0,
+    "ASTRA_MAX_RISK_PER_TRADE_USDT": 0.0,
+    "ASTRA_MIN_RISK_REWARD": 1.6,
     "ASTRA_MAX_RISK_REWARD": 3.5,
     "ASTRA_MIN_ENTRY_CONFIDENCE": 80.0,
     "ASTRA_STOP_LOSS_ATR_MULT": 2.0,
@@ -146,8 +155,8 @@ DEFAULTS = {
     "ASTRA_MIN_SCALE_IN_PROFIT_RATIO": 0.008,
     "ASTRA_MIN_SCALE_IN_CONFIDENCE": 75.0,
     "ASTRA_SCALE_OUT_ENABLED": 1,
-    "ASTRA_SCALE_OUT_RATIO": 0.50,
-    "ASTRA_SCALE_OUT_TRIGGER_ATR": 1.20,
+    "ASTRA_SCALE_OUT_RATIO": 0.35,
+    "ASTRA_SCALE_OUT_TRIGGER_ATR": 2.00,
     "ASTRA_MAX_TAKE_PROFIT_ATR": 3.50,
 }
 
@@ -178,11 +187,20 @@ def effective_daily_loss_limit(usdt_available: float = None) -> float:
 
 
 def effective_single_asset_margin(usdt_available: float = None) -> float:
-    """单标的累计保证金上限 = min(绝对封顶, 可用余额 30%)，与提示词风险预算同口径。"""
-    cap = MAX_SINGLE_ASSET_MARGIN
-    if usdt_available and usdt_available > 0:
-        cap = min(cap, max(round(float(usdt_available) * SINGLE_ASSET_EQUITY_RATIO, 2), 1.0))
-    return cap
+    """单标的累计保证金上限 = min(绝对封顶, 可用余额 × 比例)；0=不设绝对硬顶，纯按比例。"""
+    ratio_cap = max(round(float(usdt_available or 0.0) * SINGLE_ASSET_EQUITY_RATIO, 2), 1.0) if (usdt_available and usdt_available > 0) else 0.0
+    if MAX_SINGLE_ASSET_MARGIN and MAX_SINGLE_ASSET_MARGIN > 0:
+        return min(MAX_SINGLE_ASSET_MARGIN, ratio_cap) if ratio_cap > 0 else MAX_SINGLE_ASSET_MARGIN
+    return ratio_cap
+
+
+def effective_risk_per_trade(pool_risk_usd: float = 0.0, usdt_available: float = None) -> float:
+    """单笔基准风险额 = min(绝对封顶, 可用余额 × 比例)；0=不设绝对硬顶，纯按比例。"""
+    ratio_cap = max(round(float(usdt_available or 0.0) * RISK_PER_TRADE_EQUITY_RATIO, 4), 0.05) if (usdt_available and usdt_available > 0) else 0.0
+    caps = [c for c in (float(pool_risk_usd or 0.0), float(MAX_RISK_PER_TRADE_USDT or 0.0)) if c > 0]
+    if ratio_cap > 0:
+        return round(min(min(caps), ratio_cap), 4) if caps else ratio_cap
+    return min(caps) if caps else 0.0
 
 
 # ── 单一实例（审计批6）─────────────────────────────────────────────────

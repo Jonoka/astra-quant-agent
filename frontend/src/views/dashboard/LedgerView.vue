@@ -1,15 +1,14 @@
 <script setup lang="ts">
 /**
- * LedgerView.vue · DeepSeek Harness 风格交易台账与订单生命周期中枢
+ * LedgerView.vue · AstraQuant 交易台账与订单生命周期中枢
  * 包含：汇总指标 HUD、多维实时筛选工具栏、高密度等宽订单流表格、生命周期穿透抽屉与底层巡检日志
  */
-import { computed, ref, watch } from 'vue';
-import { Download, ScrollText, History, Landmark, Zap } from 'lucide-vue-next';
+import { computed, ref, watch, onMounted } from 'vue';
+import { Download, ScrollText, History, Landmark, Zap, Database } from 'lucide-vue-next';
 import { useDashboardStore } from '../../stores/dashboard';
 import DataGate from '../../components/dashboard/DataGate.vue';
 import { useI18n } from '../../composables/useI18n';
 import { fmtNum, fmtSigned, fmtPct, fmtPrice, arrow, dirClass, cleanReason, fmtDate, fmtDateTime } from '../../utils/format';
-import { venueToneCls } from '../../utils/venueMeta';
 import BaseStat from '../../components/base/BaseStat.vue';
 import BaseEmpty from '../../components/base/BaseEmpty.vue';
 import BaseSegmented from '../../components/base/BaseSegmented.vue';
@@ -24,23 +23,63 @@ const store = useDashboardStore();
 const { t } = useI18n();
 const toast = useToast();
 
-const all = computed<any[]>(() => (store.data as any)?.trades || []);
+const fullTrades = ref<any[]>([]);
+const loadingFull = ref<boolean>(false);
+const allTimeScope = ref<boolean>(false);
+const isUserToggle = ref<boolean>(false);
+
+async function loadFullLedger() {
+  loadingFull.value = true;
+  try {
+    const res = await fetch(`/api/v1/public/ledger?all_time=${allTimeScope.value ? 1 : 0}`);
+    if (res.ok) {
+      const json = await res.json();
+      if (Array.isArray(json?.trades) && json.trades.length > 0) {
+        fullTrades.value = json.trades;
+        if (isUserToggle.value) {
+          const count = json.closed_count || fullTrades.value.length;
+          toast.ok(allTimeScope.value
+            ? t('dash.ledger.loadedAll', undefined, { n: count })
+            : t('dash.ledger.loadedCycle', undefined, { n: count }));
+          isUserToggle.value = false;
+        }
+      }
+    } else if (isUserToggle.value) {
+      toast.err(t('dash.ledger.loadFailed'));
+      isUserToggle.value = false;
+    }
+  } catch {
+    if (isUserToggle.value) {
+      toast.err(t('dash.ledger.loadNetworkError'));
+      isUserToggle.value = false;
+    }
+  } finally {
+    loadingFull.value = false;
+  }
+}
+
+function toggleScope() {
+  isUserToggle.value = true;
+  allTimeScope.value = !allTimeScope.value;
+}
+
+onMounted(() => {
+  loadFullLedger();
+});
+
+watch(allTimeScope, () => {
+  loadFullLedger();
+});
+
+const all = computed<any[]>(() => (fullTrades.value.length ? fullTrades.value : ((store.data as any)?.trades || [])));
 const perf = computed<any>(() => (store.data as any)?.performance || {});
 
 /* —— 筛选状态 —— */
-const fVenue = ref<string>('all');
 const fMode = ref<'all' | 'live' | 'demo'>('all');
 const fStatus = ref<'all' | 'closed' | 'holding'>('closed');
 const fSide = ref<'all' | 'long' | 'short'>('all');
 const fResult = ref<'all' | 'win' | 'loss'>('all');
 const fInst = ref('all');
-
-const venueOptions = [
-  { value: 'all', label: t('dash.ledger.venueAll') },
-  { value: 'okx', label: t('dash.ledger.venueOkx') },
-  { value: 'binance', label: t('dash.ledger.venueBinance') },
-  { value: 'gate', label: 'Gate.io' },
-];
 
 const modeOptions = [
   { value: 'all', label: t('dash.ledger.modeAll') },
@@ -62,10 +101,6 @@ function sideNorm(s: unknown): 'long' | 'short' | 'flat' {
 
 const filtered = computed(() =>
   all.value.filter((x) => {
-    if (fVenue.value !== 'all') {
-      const v = String(x.venue || 'okx').toLowerCase();
-      if (v !== fVenue.value) return false;
-    }
     if (fMode.value !== 'all') {
       const m = String(x.account_mode || x.environment || 'live').toLowerCase();
       if (fMode.value === 'live' && !m.includes('live')) return false;
@@ -86,7 +121,7 @@ const page = ref(1);
 const PAGE = 20;
 const pageCount = computed(() => Math.max(1, Math.ceil(filtered.value.length / PAGE)));
 
-watch([fVenue, fMode, fStatus, fSide, fResult, fInst], () => { page.value = 1; });
+watch([fMode, fStatus, fSide, fResult, fInst], () => { page.value = 1; });
 watch(filtered, () => { if (page.value > pageCount.value) page.value = pageCount.value; });
 const rows = computed(() => filtered.value.slice((page.value - 1) * PAGE, page.value * PAGE));
 
@@ -100,6 +135,24 @@ const wins = computed(() => filtered.value.filter((x) => Number(x.net_pnl) > 0).
 const winRate = computed(() => (filtered.value.length ? Math.round((wins.value / filtered.value.length) * 1000) / 10 : null));
 
 const detail = ref<any>(null);
+
+function formatExitReason(row: any): string {
+  if (!row) return '--';
+  const cause = String(row.exit_cause || '');
+  if (cause === 'time_stop' || cause.includes('时间止损')) return t('dash.ledger.exitReasons.timeout');
+  if (cause === 'ratchet_lock' || cause.includes('阶梯锁利')) return t('dash.ledger.exitReasons.ratchetLock');
+  if (cause === 'momentum_tp' || cause.includes('移动止盈')) return t('dash.ledger.exitReasons.momentumTp');
+  if (cause === 'scale_out' || cause.includes('分批止盈')) return t('dash.ledger.exitReasons.scaleOut');
+  if (cause === 'hard_stop' || cause.includes('硬止损')) return t('dash.ledger.exitReasons.sl');
+  if (cause === 'breakeven' || cause.includes('保本平仓')) return t('dash.ledger.exitReasons.be');
+  if (cause === 'ai_close' || cause.includes('AI 主动')) return t('dash.ledger.exitReasons.aiClose');
+  if (cause === 'protection_fail' || cause.includes('保护失效')) return t('dash.ledger.exitReasons.protectionFail');
+  if (cause === 'exchange_closed') return Number(row.net_pnl || 0) > 0 ? t('dash.ledger.exitReasons.tp') : t('dash.ledger.exitReasons.sl');
+  const raw = cleanReason(row.exit_reason);
+  if (raw === '止盈推定' || raw.includes('止盈推定')) return t('dash.ledger.exitReasons.inferredTp');
+  if (raw === '止损推定' || raw.includes('止损推定')) return t('dash.ledger.exitReasons.inferredSl');
+  return raw;
+}
 
 function exportCsv() {
   const head = ['inst', 'venue', 'account_mode', 'side', 'lever', 'open_time', 'open_px', 'close_time', 'close_px', 'margin', 'fee', 'funding_fee', 'net_pnl', 'roi_pct', 'duration', 'exit_reason', 'strategy'];
@@ -116,9 +169,13 @@ function exportCsv() {
   toast.ok(t('dash.ledger.exported'));
 }
 
-const VENUE_LABELS: Record<string, string> = { okx: 'OKX', gate: 'Gate', binance: 'Binance' };
+/* 历史台账行的场所字段（只读降级）。
+ * 系统已收口为 OKX 专用：台账**不再提供场所筛选**，也不维护所名表。
+ * 但历史行里可能留有早期场所的原始值 —— 一律原样透出、绝不抛错、绝不删除。 */
 function venueLabel(v: unknown): string {
-  return VENUE_LABELS[String(v || '').toLowerCase()] ?? String(v || '');
+  const raw = String(v ?? '').trim();
+  if (!raw) return '';
+  return raw.toLowerCase() === 'okx' ? 'OKX' : raw;
 }
 
 /* —— 数理快照可观测性（证据纪律） ——
@@ -191,8 +248,8 @@ const truncation = computed<{ kept: number; total: number } | null>(() => {
     <!-- 页头：标题与工位状态 -->
     <div class="flex items-center justify-between gap-2 pt-0.5">
       <div class="flex items-center gap-2">
-        <h1 class="text-xs font-bold tracking-tight text-[var(--ink-strong)] flex items-center gap-1.5">
-          <History class="h-3.5 w-3.5 text-[var(--accent)]" />
+        <h1 class="text-sm font-semibold tracking-tight text-[var(--ink-strong)] flex items-center gap-2">
+          <History class="h-4 w-4 text-[var(--accent)]" />
           {{ t('dash.ledger.title') }}
         </h1>
         <span
@@ -201,30 +258,39 @@ const truncation = computed<{ kept: number; total: number } | null>(() => {
         >
           {{ t('dash.ledger.countRecords', undefined, { a: filtered.length, b: all.length }) }}
         </span>
-        <span class="hidden md:inline text-3xs text-[var(--ink-3)]">
-          · {{ t('dash.ledger.desc') }}
-        </span>
       </div>
 
-      <!-- 快速导出 CSV -->
-      <button type="button"
-        class="btn btn-ghost h-7 px-3 text-xs font-medium cursor-pointer inline-flex items-center gap-1.5 rounded-full transition-all"
-        :disabled="!filtered.length"
-        @click="exportCsv"
-      >
-        <Download class="h-3.5 w-3.5 text-[var(--accent)]" />
-        <span>{{ t('dash.ledger.exportCsv') }}</span>
-      </button>
+      <!-- 范围切换与快速导出 CSV -->
+      <div class="flex items-center gap-1.5">
+        <button
+          type="button"
+          class="btn btn-quiet h-7 px-2.5 text-xs font-medium cursor-pointer inline-flex items-center gap-1 rounded-full transition-all"
+          :title="allTimeScope ? t('dash.ledger.loadCycleHistory') : t('dash.ledger.loadAllHistory')"
+          @click="toggleScope"
+        >
+          <Database class="h-3 w-3 text-[var(--accent)]" :class="{ 'animate-spin': loadingFull }" />
+          <span>{{ allTimeScope ? t('dash.ledger.loadCycleHistory') : t('dash.ledger.loadAllHistory') }}</span>
+        </button>
+
+        <button type="button"
+          class="btn btn-ghost h-7 px-3 text-xs font-medium cursor-pointer inline-flex items-center gap-1.5 rounded-full transition-all"
+          :disabled="!filtered.length"
+          @click="exportCsv"
+        >
+          <Download class="h-3.5 w-3.5 text-[var(--accent)]" />
+          <span>{{ t('dash.ledger.exportCsv') }}</span>
+        </button>
+      </div>
     </div>
 
     <DataGate>
       <!-- 汇总指标 HUD -->
       <div class="dsh-card">
-        <div class="grid grid-cols-2 gap-px bg-[var(--line-1)] sm:grid-cols-3 xl:grid-cols-6">
-          <div class="bg-[var(--surface-1)] hover:bg-[var(--surface-2)] transition-colors">
+        <div class="grid grid-cols-2 gap-2 p-2 sm:grid-cols-3 xl:grid-cols-6 bg-[var(--surface-1)]">
+          <div class="rounded-lg bg-[var(--surface-2)]/30 hover:bg-[var(--surface-2)]/70 transition-colors">
             <BaseStat :label="t('dash.ledger.summary.total')" :value="fmtNum(filtered.length, 0)" />
           </div>
-          <div class="bg-[var(--surface-1)] hover:bg-[var(--surface-2)] transition-colors">
+          <div class="rounded-lg bg-[var(--surface-2)]/30 hover:bg-[var(--surface-2)]/70 transition-colors">
             <BaseStat
               :label="t('dash.ledger.summary.winRate')"
               :value="winRate != null ? fmtNum(winRate, 1) + '%' : '--'"
@@ -232,13 +298,13 @@ const truncation = computed<{ kept: number; total: number } | null>(() => {
               delta-tone="muted"
             />
           </div>
-          <div class="bg-[var(--surface-1)] hover:bg-[var(--surface-2)] transition-colors">
+          <div class="rounded-lg bg-[var(--surface-2)]/30 hover:bg-[var(--surface-2)]/70 transition-colors">
             <BaseStat :label="t('dash.ledger.summary.net')" :value="fmtSigned(netSum)" />
           </div>
-          <div class="bg-[var(--surface-1)] hover:bg-[var(--surface-2)] transition-colors">
+          <div class="rounded-lg bg-[var(--surface-2)]/30 hover:bg-[var(--surface-2)]/70 transition-colors">
             <BaseStat :label="t('dash.ledger.summary.fees')" :value="feeSum ? `-${fmtNum(feeSum, 2)}` : fmtNum(0, 2)" />
           </div>
-          <div class="bg-[var(--surface-1)] hover:bg-[var(--surface-2)] transition-colors">
+          <div class="rounded-lg bg-[var(--surface-2)]/30 hover:bg-[var(--surface-2)]/70 transition-colors">
             <BaseStat
               :label="t('dash.ledger.summary.fundingNet')"
               :value="fmtSigned(fundingSum)"
@@ -247,7 +313,7 @@ const truncation = computed<{ kept: number; total: number } | null>(() => {
               :hint="t('dash.ledger.summary.fundingNetHint')"
             />
           </div>
-          <div class="bg-[var(--surface-1)] hover:bg-[var(--surface-2)] transition-colors">
+          <div class="rounded-lg bg-[var(--surface-2)]/30 hover:bg-[var(--surface-2)]/70 transition-colors">
             <BaseStat
               :label="t('dash.ledger.summary.pf')"
               :value="perf.profit_factor != null ? fmtNum(perf.profit_factor, 2) : '--'"
@@ -259,22 +325,11 @@ const truncation = computed<{ kept: number; total: number } | null>(() => {
         </div>
       </div>
 
-      <!-- 数理快照可观测性审计带（证据纪律：缺失即不可观测，绝不倒推编造） -->
+      <!-- 数理快照异常或截断提示：仅在有截断或不可观测时展示，正常时不干扰视线 -->
       <div
-        v-if="snapshotAudit.total"
-        class="dsh-card-sub flex flex-wrap items-center gap-x-3 gap-y-1 px-3 py-2 text-3xs"
-        :title="t('dash.ledger.observability.noBackfill')"
+        v-if="truncation || snapshotAudit.unobservable > 0"
+        class="dsh-card-sub flex flex-wrap items-center gap-x-3 gap-y-1 px-3 py-1.5 text-3xs"
       >
-        <span class="font-semibold text-[var(--ink-2)]">{{ t('dash.ledger.observability.title') }}</span>
-        <span class="font-mono text-[var(--ink-3)]">
-          {{ t('dash.ledger.observability.auditLine', undefined, {
-            observed: snapshotAudit.DYNAMICS_OBSERVED,
-            partial: snapshotAudit.PARTIAL,
-            price: snapshotAudit.PRICE_ONLY,
-            none: snapshotAudit.NONE,
-            total: snapshotAudit.total,
-          }) }}
-        </span>
         <span
           v-if="truncation"
           class="rounded border px-1.5 py-0.5 font-medium"
@@ -327,16 +382,6 @@ const truncation = computed<{ kept: number; total: number } | null>(() => {
           </div>
 
           <div class="flex flex-wrap items-center gap-2 ms-auto">
-            <select
-              v-model="fVenue"
-              :aria-label="t('dash.ledger.filters.venue')" 
-              class="h-7 rounded border border-[var(--line-1)] px-2 text-3xs transition-colors focus:outline-none focus:border-[var(--ds-color-border-input-focus)] focus:ring-1 focus:ring-[var(--ds-color-border-input-focus)]"
-              style="background-color: var(--surface-2); color: var(--ink-1)"
-              @change="page = 1"
-            >
-              <option v-for="vo in venueOptions" :key="vo.value" :value="vo.value">{{ vo.label }}</option>
-            </select>
-
             <select
               v-model="fMode"
               :aria-label="t('dash.ledger.filters.mode')" 
@@ -400,16 +445,10 @@ const truncation = computed<{ kept: number; total: number } | null>(() => {
                       </span>
                       <span
                         v-if="x.venue"
-                        class="rounded px-1 py-0.5 text-3xs font-mono font-semibold uppercase border"
-                        :class="venueToneCls(x.venue)"
+                        class="rounded px-1 py-0.5 text-3xs font-mono font-semibold border"
+                        style="background-color: var(--surface-2); border-color: var(--line-1); color: var(--ink-3)"
                       >
                         {{ venueLabel(x.venue) }}
-                      </span>
-                      <span
-                        class="rounded px-1 py-0.5 text-3xs font-mono font-medium border"
-                        :class="String(x.account_mode || x.environment || 'live').toUpperCase() === 'LIVE' ? 'text-[var(--up)] border-[var(--up-line)] bg-[var(--up-bg)]' : 'text-[var(--warn)] border-[var(--warn-line)] bg-[var(--warn-bg)]'"
-                      >
-                        {{ String(x.account_mode || x.environment || 'live').toUpperCase() }}
                       </span>
                       <span
                         v-if="x.council?.ran"
@@ -425,9 +464,10 @@ const truncation = computed<{ kept: number; total: number } | null>(() => {
                       >
                         <Zap class="w-3 h-3" />
                       </span>
-                      <!-- 数理快照可观测性：紧凑徽章 -->
+                      <!-- 数理快照异常标记：仅在快照不完整时提示，全部观测到时保持行面干净 -->
                       <span
-                        class="rounded px-1 py-0.5 text-3xs font-medium border"
+                        v-if="obsTag(x) !== 'DYNAMICS_OBSERVED'"
+                        class="rounded px-1.5 py-0.5 text-3xs font-medium border"
                         :class="obsToneCls(x)"
                         :title="`${obsLabel(x)} · ${t('dash.ledger.observability.missingFields')} ${t('dash.ledger.observability.noBackfill')}`"
                       >
@@ -436,10 +476,10 @@ const truncation = computed<{ kept: number; total: number } | null>(() => {
                       <!-- 分批止盈状态徽章 -->
                       <span
                         v-if="isScaleOutRow(x)"
-                        class="rounded px-1 py-0.5 text-3xs font-mono font-medium border text-[var(--accent)] border-[var(--accent-line)] bg-[var(--accent-bg)]"
+                        class="rounded px-1.5 py-0.5 text-3xs font-mono font-medium border text-[var(--accent)] border-[var(--accent-line)] bg-[var(--accent-bg)]"
                         :title="t('dash.ledger.scaleOutTitle')"
                       >
-                        🎯 {{ t('dash.ledger.scaleOutShort') }}
+                        {{ t('dash.ledger.scaleOutShort') }}
                       </span>
                     </div>
                   </td>
@@ -464,8 +504,8 @@ const truncation = computed<{ kept: number; total: number } | null>(() => {
                     </span>
                   </td>
                   <td class="num font-mono text-3xs text-[var(--ink-2)]">{{ x.duration || '--' }}</td>
-                  <td class="text-3xs text-[var(--ink-2)] max-w-48 truncate" :title="cleanReason(x.exit_reason)">
-                    {{ cleanReason(x.exit_reason) }}
+                  <td class="text-3xs text-[var(--ink-2)] max-w-48 truncate" :title="formatExitReason(x)">
+                    {{ formatExitReason(x) }}
                   </td>
                   <td class="num font-mono text-3xs text-right text-[var(--ink-3)]">
                     {{ fmtDateTime(x.close_time).slice(5, 16) }}
@@ -487,7 +527,6 @@ const truncation = computed<{ kept: number; total: number } | null>(() => {
           <span class="flex items-center gap-2 text-xs font-semibold text-[var(--ink-strong)]">
             <ScrollText class="h-3.5 w-3.5 text-[var(--accent)]" />
             {{ t('dash.ledger.logs.title') }}
-            <span class="text-3xs text-[var(--ink-3)] font-normal">{{ t('dash.ledger.logs.desc') }}</span>
           </span>
         </template>
         <div class="scroll-y max-h-80 p-2">

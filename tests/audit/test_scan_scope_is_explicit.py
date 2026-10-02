@@ -6,6 +6,9 @@
 而仓里还有 `astra_gateway/`（网关：凭证库/发布器/任务存储）与 `plugins/` ⇒
 那些地方的违规**门看不见**（既可能是假绿，也可能是假警报）。
 
+⚠️ 2026-10：`plugins/`（决策插件）随策略插件系统整套裁撤，已不再是代码根；
+下方豁免理由里提到它的那句属历史记录，判据本身是**动态推导**的，无需改。
+
 本门把"扫描范围"本身变成受检对象：**任何**声明了 `SCAN_DIRS`/`SCAN_ROOTS`/`SOURCE_ROOTS`
 的测试，只要它扫了**至少一个代码根**，就必须扫**全部代码根** —— 否则必须登记豁免并写明理由。
 
@@ -31,8 +34,14 @@ NON_CODE_DIRS = {
 #: 根变量名（本仓三种写法）
 ROOT_VARS = ("SCAN_DIRS", "SCAN_ROOTS", "SOURCE_ROOTS")
 
-#: 允许"只扫部分代码根"的门（附理由）。**当前为空**：全部扫描门都已覆盖四个根。
-EXEMPT_SCOPE: dict[str, str] = {}
+#: 允许"只扫部分代码根"的门（附理由）。
+EXEMPT_SCOPE: dict[str, str] = {
+    "tests/audit/test_no_removed_venues_in_source.py":
+        "该反向门只扫**运行时代码根** `astra_backend/` 与 `scripts/`（任务显式指定的范围）："
+        "它守的是「交易所适配器/执行/路由源码不得回潮」。`astra_gateway/` 与 `plugins/` 属网关"
+        "与插件面，且网关的密文库**刻意保留**已下架场所的凭证槽位（数据面，非源码面，"
+        "见 `test_config_tables_are_consumed` 的保留登记）—— 纳入扫描只会制造假警报。",
+}
 
 
 def code_roots() -> set:

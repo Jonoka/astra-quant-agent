@@ -1,88 +1,85 @@
 <script setup lang="ts">
 /**
- * SecurityPage.vue · 交易场所与安全配置工位
+ * SecurityPage.vue · OKX 专向账户与标的配置工位
  * ---------------------------------------------------------------------------
- * 骨架（推倒重来）：
- *   旧 = 页头内联 chip + 4 张总览小卡 + 下划线 Tab 条
- *        + 页签1：路由卡（**7 个手写 radio 卡，每个 6 行内联 :style 三元**）+ 三所凭证卡 + 健康 chip
- *        + 页签2：本金卡 + 标的池 DataTable
- *        + 页签3：手动平仓 checkbox + 持仓 DataTable + **手写 fixed 遮罩平仓弹窗**
- *   新 = 共享 PageHeader（路由态移入状态带）
- *        → **接入状态带**（OKX / Binance / Gate / 标的池）
- *        → **共享 `.seg` 三页签**
- *        → venues：路由策略（**radio 组全部数据驱动**）+ 三所凭证 + 跨所健康
- *        → pool：本金基线 + 标的池行式清单
- *        → emergency：手动平仓总闸（BaseSwitch）+ 持仓行式清单 + **BaseDialog 平仓双确认**
+ * 架构：
+ *   PageHeader（环境标识与当前委托执行模式）
+ *   → 顶部指标概览带（OKX V5 接入 / 活跃标的池 / 订单模式 / 初始本金基线）
+ *   → 纯净三页签导航：
+ *     1. venues：OKX 账户与配置（统一资金环境 + API 凭证管理 + 委托订单模式 + 行情健康 + 策略广场）
+ *     2. pool：交易标的池（初始本金基线 + 在管 USDT 永续合约池与安全移出）
+ *     3. emergency：应急风控与持仓（手动平仓总闸 + 实时持仓挂单快照 + 安全平仓双确认弹窗）
  *
- * 后端契约（逐字未改）：
+ * 后端契约：
  *   GET  /api/v1/admin/config · /api/v1/admin/okx/runtime?refresh=1 · /api/v1/admin/instruments
- *   GET  /api/v1/admin/multi-exchange · /api/v1/admin/okx/account-snapshot
+ *   GET  /api/v1/admin/multi-exchange · /api/v1/admin/okx/account-snapshot · /api/v1/referral-channels
  *   PUT  /api/v1/admin/config · /api/v1/admin/account-baseline · /api/v1/admin/multi-exchange
  *   POST /api/v1/admin/instruments · /api/v1/admin/multi-exchange/test-connection
  *        /api/v1/admin/positions/close
  *   DELETE /api/v1/admin/instruments/{instId}
  *
- * ⚠️ 高风险门禁逐字保留：切 LIVE 需逐字 `LIVE`；改本金需超管 + 逐字 `UPDATE CAPITAL`；
- *    删标的需逐字 `REMOVE <instId>`；Gate 开闸需短语；平仓需管理员密码 + 令牌短语。
- * ⚠️ 派生逻辑仍全部来自 `./securityLogic.ts`（未触碰）。
+ * ⚠️ 高风险门禁严格保留：
+ *    - 切 LIVE 需逐字确认 `LIVE`；
+ *    - 改本金需超级管理员 + 逐字短语 `UPDATE CAPITAL`；
+ *    - 删标的需逐字短语 `REMOVE <instId>`；
+ *    - 应急平仓需管理员密码 + 90秒动态令牌确认短语 + 防重入闭锁。
  */
 import { useToast } from '../../composables/useToast'
 import { useConfirm } from '../../composables/useConfirm'
-const toast = useToast()
-const { ask } = useConfirm()
 import { ref, computed, onMounted } from 'vue'
 import PageHeader from '../../components/admin/PageHeader.vue'
 import SettingsSection from '../../components/admin/page-parts/SettingsSection.vue'
 import { useI18n } from '../../composables/useI18n'
-import { useRovingTabs } from '../../composables/useRovingTabs';
+import { useRovingTabs } from '../../composables/useRovingTabs'
 import { useApi } from '../../composables/useApi'
 import { useAuthStore } from '../../stores/auth'
 import { fmtDateTime } from '../../utils/format'
 import {
-  deriveOkxLinked, deriveMxHealthChips, deriveGateExecDirty,
-  venueStatus, envTextOf, okxEnvText as okxEnvTextOf, envBadge,
+  deriveOkxLinked, deriveMxHealthChips, okxEnvText as okxEnvTextOf, envBadge,
 } from './securityLogic'
-import VenueCredentialCard from '../../components/admin/page-parts/VenueCredentialCard.vue'
 import BaseSwitch from '../../components/base/BaseSwitch.vue'
 import BaseDialog from '../../components/base/BaseDialog.vue'
 import BaseEmpty from '../../components/base/BaseEmpty.vue'
-import { Save, RefreshCw, Layers, Trash2, Zap, ShieldCheck, Route, KeyRound,
-  Wallet, Activity, AlertTriangle, Loader2, Radar } from 'lucide-vue-next'
-import BaseLoadingAnnounce from '../../components/base/BaseLoadingAnnounce.vue';
+import {
+  Save, RefreshCw, Layers, Trash2, Zap, ShieldCheck, KeyRound,
+  Wallet, Activity, AlertTriangle, Loader2, Radar, Share2, Copy, Eye,
+  TrendingUp, ArrowRight,
+} from 'lucide-vue-next'
+import BaseLoadingAnnounce from '../../components/base/BaseLoadingAnnounce.vue'
 
+const toast = useToast()
+const { ask } = useConfirm()
 const { api } = useApi()
 const auth = useAuthStore()
 const { t } = useI18n()
+
 const config = ref<any>(null)
 const runtime = ref<any>(null)
-/**
- * 注册/返佣通道：**由后端出值**（`/api/v1/admin/referral-channels`，管理员版）。
- * 本页此前把经纪商 code 与两条链接**硬编码在模板里** —— 那是继 `okx_rest.py`、
- * `config.py`、`AboutModal.vue` 之后的第三份副本：分发副本的人用环境变量换掉
- * 自己的通道后，这一页照旧显示原作者的链接与 code，用户就会注册到别人名下。
- */
 const channels = ref<any[]>([])
 const channelOf = (key: string) => channels.value.find((c) => c.key === key) || null
-// 注：**不**显示经纪商 code（2026-09 仓库所有者拍板）—— 它是随订单发出去的归属标识，
-// 摆到界面上等于邀请别人照着改。本页只用通道链接（公开接口，无需管理员权限）。
+
 async function loadChannels() {
   try {
     const res = await api<any>('/api/v1/referral-channels')
     channels.value = Array.isArray(res?.channels) ? res.channels : []
   } catch {
-    // 取不到就整块不渲染注册入口（**不回落到写死的旧链接** —— 那正是本次要消灭的东西）
     channels.value = []
   }
 }
+
 const loading = ref(true)
-/** 批 24：首屏加载失败的原因（留在页面上，配重试按钮；不再只靠一闪而过的 toast） */
 const loadError = ref('')
 
 type TabKey = 'venues' | 'pool' | 'emergency'
 const activeTab = ref<TabKey>('venues')
 const positionsLoadedOnce = ref(false)
 
-/* 批 66：页签栏的漫游 tabindex 与方向键导航。 */
+const TABS = computed<Array<{ key: TabKey; label: string; icon: any }>>(() => [
+  { key: 'venues', label: t('admin.security.tabVenues'), icon: KeyRound },
+  { key: 'pool', label: t('admin.security.tabPool'), icon: Layers },
+  { key: 'emergency', label: t('admin.security.tabEmergency'), icon: Zap },
+])
+
 const { setRef: setSecTabRef, onKeydown: onSecTabKey, roving: secTabRoving } = useRovingTabs(
   () => TABS.value.length,
   (i) => { switchTab(TABS.value[i].key) },
@@ -121,9 +118,6 @@ const newInstId = ref('')
 // ---- positions & close ----
 const snapshot = ref<any>(null)
 const snapshotState = ref('')
-/** 批 70：区分「正在加载」与「加载失败」—— 此前两者共用一个字符串，
- *  模板无条件渲染旋转图标，失败时用户看到的是「转圈 + 报错」，
- *  视觉上像是在继续加载（而不是已经失败），读屏器也收不到任何通报。 */
 const snapshotError = ref(false)
 const manualClose = ref(false)
 const closePassword = ref('')
@@ -139,20 +133,64 @@ const closeReady = computed(() => {
   return !!closePassword.value && closePhraseOk.value
 })
 
-// ---- 多所凭证与档位（Binance / Gate 独立保存） ----
+// ---- 交易环境与健康状态 ----
 const mx = ref<any>(null)
-const mxForm = ref({ binance_api_key: '', binance_secret_key: '', gate_api_key: '', gate_secret_key: '' })
-const mxTestnet = ref({ binance: false, gate: false })
-const preferredVenue = ref('auto')
-const routingMode = ref('auto')
 const okxCredViewLive = ref(false)
-const orderMode = ref<'limit' | 'market'>('limit')
+const orderMode = ref<'limit' | 'market'>('market')
 const savingOrderMode = ref(false)
+const scaleOutEnabled = ref(true)
+const savingScaleOut = ref(false)
 const venueLatencies = ref<Record<string, number>>({})
-const savingMx = ref(false)
 const savingOkx = ref(false)
-const savingVenue = ref<'binance' | 'gate' | ''>('')
-const probingVenue = ref<'binance' | 'gate' | 'okx' | ''>('')
+const probingVenue = ref<'' | 'okx'>('')
+const savingUnifiedEnv = ref(false)
+const isUnifiedLive = computed(() => config.value?.editable?.okx_environment === 'live')
+
+async function requestUnifiedEnvSwitch(targetEnv: 'demo' | 'live') {
+  if (savingUnifiedEnv.value) return
+  if (targetEnv === (isUnifiedLive.value ? 'live' : 'demo')) return
+
+  if (targetEnv === 'live') {
+    const _ok = await ask({
+      title: t('admin.security.confirmUnifiedLiveTitle'),
+      desc: t('admin.security.confirmUnifiedLiveDesc'),
+      detail: t('admin.security.confirmUnifiedLiveDetail'),
+      danger: true,
+      confirmPhrase: 'LIVE',
+      okText: t('common.switchLive'),
+    })
+    if (!_ok) {
+      toast.warn(t('admin.security.warnNotConfirmed'))
+      return
+    }
+  }
+
+  savingUnifiedEnv.value = true
+  try {
+    await api('/api/v1/admin/multi-exchange', {
+      method: 'PUT',
+      body: JSON.stringify({
+        okx_environment: targetEnv,
+      }),
+    })
+    await api('/api/v1/admin/config', {
+      method: 'PUT',
+      body: JSON.stringify({
+        okx_environment: targetEnv,
+      }),
+    })
+    if (config.value?.editable) {
+      config.value.editable.okx_environment = targetEnv
+    }
+    okxCredViewLive.value = (targetEnv === 'live')
+    toast.ok(t('admin.security.toastUnifiedEnvSaved', undefined, { env: targetEnv.toUpperCase() }))
+    await Promise.all([loadAll(), loadMx()])
+  } catch (e: any) {
+    toast.err(t('admin.security.errSaveFailed', undefined, { msg: e.message }))
+  } finally {
+    savingUnifiedEnv.value = false
+  }
+}
 
 async function loadAll() {
   loading.value = true
@@ -168,15 +206,17 @@ async function loadAll() {
       okxCredViewLive.value = (cfg.editable.okx_environment === 'live')
     }
     if (cfg?.editable?.order_mode) {
-      orderMode.value = (cfg.editable.order_mode === 'market' ? 'market' : 'limit')
+      orderMode.value = (cfg.editable.order_mode === 'limit' ? 'limit' : 'market')
+    } else {
+      orderMode.value = 'market'
     }
+    scaleOutEnabled.value = cfg?.editable?.scale_out_enabled !== false
     newCapital.value = String(cfg.editable?.initial_capital ?? '')
     manualClose.value = !!cfg.editable?.manual_close_enabled
     const inst = await api('/api/v1/admin/instruments')
     instruments.value = inst.instruments || []
     instLimits.value = inst.limits || instLimits.value
   } catch (e: any) {
-    // 批 24：除了 toast，还要把错误留在页面上（toast 3 秒即消失，用户回来只看到空白页）
     loadError.value = String(e?.message || e)
     toast.err(t('admin.security.errLoadFailed', undefined, { msg: e.message }))
   } finally {
@@ -188,28 +228,8 @@ function applyRuntime(rt: any) {
   runtime.value = rt
 }
 
-// 批2(2026-09-13)：原 rediagnose() 与 loadAll() 重复（后者已带 refresh=1 拉取运行态），
-// 且从未被模板调用（TS6133）→ 已删除，避免两套刷新口径。
-
 async function saveEnvironment() {
   const environment = config.value.editable.okx_environment
-  if (environment === 'live') {
-    // 批C(2026-09-13)：切 LIVE 是全站最高风险动作（真实资金），原先用 prompt() 收短语
-    // ——移动端 prompt 常被弱化，且样式/焦点不可控。改用项目危险操作确认框，
-    // 要求逐字输入 LIVE（与其余危险操作同一套门禁语义）。
-    const _ok = await ask({
-      title: t('admin.security.confirmLiveTitle'),
-      desc: t('admin.security.confirmLiveDesc'),
-      detail: t('admin.security.confirmLiveDetail'),
-      danger: true,
-      confirmPhrase: 'LIVE',
-      okText: t('common.switchLive'),
-    })
-    if (!_ok) {
-      toast.warn(t('admin.security.warnNotConfirmed'))
-      return
-    }
-  }
   savingOkx.value = true
   try {
     const body: any = { okx_environment: environment }
@@ -221,7 +241,7 @@ async function saveEnvironment() {
     if (keys.value.demo_pass) body.okx_demo_passphrase = keys.value.demo_pass
     await api('/api/v1/admin/config', { method: 'PUT', body: JSON.stringify(body) })
     keys.value = { live_key: '', live_secret: '', live_pass: '', demo_key: '', demo_secret: '', demo_pass: '' }
-    toast.ok(t('admin.security.toastEnvSaved', undefined, { env: environment.toUpperCase() }))
+    toast.ok(t('admin.security.toastOkxCredsSaved'))
     await loadAll()
   } catch (e: any) {
     toast.err(t('admin.security.errSaveFailed', undefined, { msg: e.message }))
@@ -233,8 +253,6 @@ async function saveEnvironment() {
 async function saveManualClose() {
   try {
     const d = await api('/api/v1/admin/config', { method: 'PUT', body: JSON.stringify({ manual_close_enabled: manualClose.value }) })
-    // 审计①#4(2026-09-13)：PUT 复用 admin_config()，manual_close_enabled 嵌在
-    // editable 之下——旧读顶层恒 undefined → 保存后开关弹回 OFF + toast 谎报。
     manualClose.value = !!(d?.editable?.manual_close_enabled ?? d?.manual_close_enabled)
     if (manualClose.value) toast.warn(t('admin.security.toastManualCloseOn')); else toast.ok(t('admin.security.toastManualCloseOff'))
   } catch (e: any) {
@@ -255,6 +273,25 @@ async function saveOrderMode() {
     toast.err(t('admin.security.errSaveFailed', undefined, { msg: e.message }))
   } finally {
     savingOrderMode.value = false
+  }
+}
+
+async function toggleScaleOut(val: boolean) {
+  savingScaleOut.value = true
+  try {
+    await api('/api/v1/admin/config', {
+      method: 'PUT',
+      body: JSON.stringify({ scale_out_enabled: val }),
+    })
+    scaleOutEnabled.value = val
+    if (config.value?.editable) {
+      config.value.editable.scale_out_enabled = val
+    }
+    toast.ok(val ? t('admin.security.scaleOutOnToast') : t('admin.security.scaleOutOffToast'))
+  } catch (e: any) {
+    toast.err(t('admin.security.errSaveFailed', undefined, { msg: e?.message || e }))
+  } finally {
+    savingScaleOut.value = false
   }
 }
 
@@ -292,17 +329,11 @@ async function addInstrument() {
 
 async function removeInstrument(item: any) {
   if (item.protected) { toast.warn(t('admin.security.warnProtectedInst')); return }
-  // 审计 P1-5：后端已按实时持仓/追踪记录硬拒（删除会让该标的失去移动止损/时间止损/AI 平仓接管），
-  // 前端不再承诺"既有持仓不受影响"，而是在入口就把真实原因说清楚。
   if (item.held_live || item.has_tracker) {
     toast.warn(t('admin.security.warnHeldInst', undefined, { venues: (item.held_venues || []).join('/') || t('admin.security.trackedRecord') }))
     return
   }
   if (item.holdings_unknown) { toast.warn(t('admin.security.warnHoldingsUnknown')); return }
-  // 批C(2026-09-13)·危险操作确认收口：后端本就要求逐字短语 `REMOVE <instId>`，
-  // 但前端把短语写死在请求体、只用原生 confirm() 小条挡一下——移动端随手一按就
-  // 能把实盘标的移出交易池（同页平仓却要密码+短语双确认，强度不一致）。现将同一
-  // 短语要求显式抬到 UI：必须逐字输入才可确认，前后端确认语义就此一致。
   const _ok = await ask({
     title: t('admin.security.confirmRemoveInstTitle'),
     desc: t('admin.security.confirmRemoveInstDesc', undefined, { inst: item.instId }),
@@ -365,7 +396,6 @@ async function confirmClose() {
     await loadPositions()
   } catch (e: any) {
     toast.err(t('admin.security.errCloseFailed', undefined, { msg: e.message }))
-    // 一次性令牌可能已被消费/过期：自动刷新快照，并把弹窗指向新令牌的同仓位行，允许直接重试
     await loadPositions()
     const fresh = (snapshot.value?.positions || []).find((x: any) => x.instId === pos.instId && (x.posSide || 'net') === (pos.posSide || 'net') && (x.venue || 'okx') === (pos.venue || 'okx'))
     if (fresh) closeModal.value = { show: true, pos: fresh }
@@ -375,36 +405,26 @@ async function confirmClose() {
   }
 }
 
-async function loadMx() {
+async function loadMx(preserveVenue?: string | Event) {
   try {
+    const targetVenue = typeof preserveVenue === 'string' ? preserveVenue : undefined
     mx.value = await api('/api/v1/admin/multi-exchange')
-    if (mx.value?.venues) {
-      mxTestnet.value.binance = !!mx.value.venues.binance?.testnet
-      mxTestnet.value.gate = !!mx.value.venues.gate?.testnet
-    }
     if (mx.value?.health?.venues) {
       for (const [k, v] of Object.entries(mx.value.health.venues as Record<string, any>)) {
-        if (v?.avg_ms) {
+        if (v?.avg_ms && (!targetVenue || k !== targetVenue || !venueLatencies.value[k])) {
           venueLatencies.value[k] = v.avg_ms
         }
       }
     }
-    if (mx.value?.preferred_venue) {
-      preferredVenue.value = mx.value.preferred_venue
-    }
-    if (mx.value?.routing_mode) {
-      routingMode.value = mx.value.routing_mode
-    }
-  } catch { mx.value = null }
+  } catch {
+    mx.value = null
+  }
 }
 
-/** 单所凭证连接诊断：支持未保存凭证的预检与公共连通性探测。 */
-async function probeVenue(venue: 'binance' | 'gate' | 'okx') {
+async function probeVenue(venue: 'okx') {
   probingVenue.value = venue
   try {
-    const isDemo = venue === 'okx'
-      ? (config.value?.editable?.okx_environment === 'demo')
-      : !!mxTestnet.value[venue]
+    const isDemo = config.value?.editable?.okx_environment === 'demo'
     const env = isDemo ? 'demo' : 'live'
 
     const payload: Record<string, any> = {
@@ -412,26 +432,14 @@ async function probeVenue(venue: 'binance' | 'gate' | 'okx') {
       environment: env,
     }
 
-    if (venue === 'binance') {
-      const k = mxForm.value.binance_api_key.trim()
-      const s = mxForm.value.binance_secret_key.trim()
-      if (k) payload.api_key = k
-      if (s) payload.secret_key = s
-    } else if (venue === 'gate') {
-      const k = mxForm.value.gate_api_key.trim()
-      const s = mxForm.value.gate_secret_key.trim()
-      if (k) payload.api_key = k
-      if (s) payload.secret_key = s
-    } else if (venue === 'okx') {
-      if (isDemo) {
-        if (keys.value.demo_key.trim()) payload.api_key = keys.value.demo_key.trim()
-        if (keys.value.demo_secret.trim()) payload.secret_key = keys.value.demo_secret.trim()
-        if (keys.value.demo_pass.trim()) payload.passphrase = keys.value.demo_pass.trim()
-      } else {
-        if (keys.value.live_key.trim()) payload.api_key = keys.value.live_key.trim()
-        if (keys.value.live_secret.trim()) payload.secret_key = keys.value.live_secret.trim()
-        if (keys.value.live_pass.trim()) payload.passphrase = keys.value.live_pass.trim()
-      }
+    if (isDemo) {
+      if (keys.value.demo_key.trim()) payload.api_key = keys.value.demo_key.trim()
+      if (keys.value.demo_secret.trim()) payload.secret_key = keys.value.demo_secret.trim()
+      if (keys.value.demo_pass.trim()) payload.passphrase = keys.value.demo_pass.trim()
+    } else {
+      if (keys.value.live_key.trim()) payload.api_key = keys.value.live_key.trim()
+      if (keys.value.live_secret.trim()) payload.secret_key = keys.value.live_secret.trim()
+      if (keys.value.live_pass.trim()) payload.passphrase = keys.value.live_pass.trim()
     }
 
     const res: any = await api('/api/v1/admin/multi-exchange/test-connection', {
@@ -448,7 +456,7 @@ async function probeVenue(venue: 'binance' | 'gate' | 'okx') {
     } else {
       toast.err(res?.message || t('admin.security.toastProbeFail', undefined, { venue: venue.toUpperCase() }))
     }
-    await loadMx()
+    await loadMx(venue)
   } catch (e: any) {
     toast.err(t('admin.security.errProbeFailed', undefined, { msg: e.message }))
   } finally {
@@ -456,131 +464,32 @@ async function probeVenue(venue: 'binance' | 'gate' | 'okx') {
   }
 }
 
-/** 保存撮合路由首选与模式（只写路由两键，不牵连任何凭证字段）。 */
-async function saveRouting() {
-  savingMx.value = true
-  try {
-    await api('/api/v1/admin/multi-exchange', {
-      method: 'PUT',
-      body: JSON.stringify({ preferred_venue: preferredVenue.value, routing_mode: routingMode.value }),
-    })
-    toast.ok(t('admin.security.toastRoutingSaved', undefined, { venue: preferredVenue.value.toUpperCase(), mode: routingMode.value.toUpperCase() }))
-    await loadMx()
-  } catch (e: any) {
-    toast.err(t('admin.security.errSaveFailed', undefined, { msg: e.message }))
-  } finally {
-    savingMx.value = false
-  }
-}
-
-/** 逐所保存凭证与档位：只提交本所键位，留空即不改；Gate / Binance 承载执行总闸。 */
-async function saveVenue(venue: 'binance' | 'gate') {
-  savingVenue.value = venue
-  try {
-    const body: any = {}
-    if (venue === 'binance') {
-      body.binance_testnet = mxTestnet.value.binance
-      const k = mxForm.value.binance_api_key.trim()
-      const s = mxForm.value.binance_secret_key.trim()
-      if (k) body.binance_api_key = k
-      if (s) body.binance_secret_key = s
-      if (!mx.value?.venues?.binance?.execution_open) {
-        body.binance_execution = true
-        body.confirmation = 'OPEN BINANCE EXECUTION'
-      }
-    } else {
-      body.gate_testnet = mxTestnet.value.gate
-      const k = mxForm.value.gate_api_key.trim()
-      const s = mxForm.value.gate_secret_key.trim()
-      if (k) body.gate_api_key = k
-      if (s) body.gate_secret_key = s
-      if (!mx.value?.venues?.gate?.execution_open) {
-        body.gate_execution = true
-        body.confirmation = 'OPEN GATE EXECUTION'
-      }
-    }
-    await api('/api/v1/admin/multi-exchange', { method: 'PUT', body: JSON.stringify(body) })
-    toast.ok(t('admin.security.toastVenueSaved', undefined, { venue: venue === 'binance' ? 'Binance' : 'Gate' }))
-    if (venue === 'binance') { mxForm.value.binance_api_key = ''; mxForm.value.binance_secret_key = ''; }
-    else { mxForm.value.gate_api_key = ''; mxForm.value.gate_secret_key = ''; }
-    await loadMx()
-  } catch (e: any) {
-    toast.err(t('admin.security.errSaveFailed', undefined, { msg: e.message }))
-  } finally {
-    savingVenue.value = ''
-  }
-}
-
-// ---- 总览派生（纯计算，零请求） ----
-// 显示派生逻辑已抽至 ./securityLogic.ts（阶段 4·B3 第三十四刀）——
-// 纯函数、可脱离组件单测；此处只保留响应式包装。
+// ---- 总览派生（单测契约：必须调用并依赖 securityLogic.ts） ----
 const okxLinked = computed(() => deriveOkxLinked(runtime.value))
 const mxHealthChips = computed(() => deriveMxHealthChips(mx.value))
-// 批 34 纯派生契约对齐：保留纯逻辑调用锚点供测试对拍
-const gateExecDirty = computed(() => deriveGateExecDirty(false, mx.value))
-void gateExecDirty
-
-const binanceStatus = computed(() => venueStatus('binance', mx.value, t))
-const gateStatus = computed(() => venueStatus('gate', mx.value, t))
-
 const okxEnvText = computed(() => okxEnvTextOf(config.value?.editable?.okx_environment, t))
-const binanceEnvText = computed(() => envTextOf('binance', t('admin.security.envDemoBinance'), mx.value, mxTestnet.value, t))
-const gateEnvText = computed(() => envTextOf('gate', t('admin.security.envDemoGate'), mx.value, mxTestnet.value, t))
 
-function setOkxMode(mode: 'demo' | 'live') {
-  if (!config.value?.editable) return
-  config.value.editable.okx_environment = mode
-  okxCredViewLive.value = (mode === 'live')
-}
+const healthAllOk = computed(() => {
+  const chips = mxHealthChips.value || []
+  // 全绿必须同时满足：每条 chip 都 allOk（未核实数=0 且 ok=池容量）。
+  // 快照缺失/过期时后端把标的放进 unknown ⇒ 这里永远不会误报"健康"。
+  return chips.length > 0 && chips.every((h: any) => h.allOk)
+})
 
-const TABS = computed<Array<{ key: TabKey; label: string; icon: any }>>(() => [
-  { key: 'venues', label: t('admin.security.tabVenues'), icon: Route },
-  { key: 'pool', label: t('admin.security.tabPool'), icon: Layers },
-  { key: 'emergency', label: t('admin.security.tabEmergency'), icon: Zap },
-])
+/** 未核实标的总数（跨场所求和）：>0 时卡片给出解释性提示，避免"0/6 币"被误读成标的坏了。 */
+const healthUnknownTotal = computed(() =>
+  (mxHealthChips.value || []).reduce((sum: number, h: any) => sum + (h.unknown || 0), 0),
+)
 
-/** 路由模式三档（旧版 3 段手写 radio 卡） */
-const ROUTING_MODES = [
-  { value: 'balanced', labelKey: 'admin.security.modeA', descKey: 'admin.security.modeADesc' },
-  { value: 'auto', labelKey: 'admin.security.modeB', descKey: 'admin.security.modeBDesc' },
-  { value: 'split', labelKey: 'admin.security.modeC', descKey: 'admin.security.modeCDesc' },
-]
-
-/** 手选优先四档（旧版 4 段手写 radio 卡） */
-const PREFERRED_VENUES = [
-  { value: 'auto', labelKey: 'admin.security.noManual', descKey: 'admin.security.noManualDesc' },
-  { value: 'okx', labelKey: 'admin.security.lockOkx', descKey: 'admin.security.lockOkxDesc' },
-  { value: 'binance', labelKey: 'admin.security.lockBinance', descKey: 'admin.security.lockBinanceDesc' },
-  { value: 'gate', labelKey: 'admin.security.lockGate', descKey: 'admin.security.lockGateDesc' },
-]
-
-/** 接入状态带（4 项事实） */
+// ---- 顶部概览四元指标带 ----
 const bandFacts = computed(() => {
-  const b = mx.value?.venues?.binance
-  const g = mx.value?.venues?.gate
   return [
     {
       icon: ShieldCheck,
       label: t('admin.security.okxApi'),
-      value: okxLinked.value ? t('admin.security.okxLinked') : t('admin.security.okxUnconfigured'),
+      value: okxLinked.value ? t('admin.security.okxReady') : t('admin.security.okxNotReady'),
       foot: envBadge(runtime.value?.environment),
       tone: okxLinked.value ? 'is-up' : 'is-down',
-    },
-    {
-      icon: KeyRound,
-      label: 'Binance · USDT-M',
-      value: b?.has_api_key ? t('admin.security.binanceKeyed') : t('admin.security.publicMarket'),
-      foot: mxTestnet.value.binance ? 'DEMO' : 'LIVE',
-      tone: b?.has_api_key ? 'is-up' : 'is-warn',
-    },
-    {
-      icon: KeyRound,
-      label: t('admin.security.gatePerp'),
-      value: g?.has_api_key
-        ? (g?.execution_open ? t('admin.security.gateOpenLive') : t('admin.security.gateClosed'))
-        : t('admin.security.publicMarket'),
-      foot: mxTestnet.value.gate ? 'TESTNET' : 'LIVE',
-      tone: g?.has_api_key ? 'is-up' : 'is-warn',
     },
     {
       icon: Layers,
@@ -589,26 +498,123 @@ const bandFacts = computed(() => {
       foot: t('admin.security.usdtPerp'),
       tone: '',
     },
+    {
+      icon: Zap,
+      label: t('admin.security.orderModeTitle'),
+      value: orderMode.value === 'market' ? t('admin.security.optMarket') : t('admin.security.optLimit'),
+      foot: orderMode.value === 'market' ? 'Taker · 即时吃单' : 'Maker · 挂单等待',
+      tone: '',
+    },
+    {
+      icon: Wallet,
+      label: t('admin.security.capitalTitle'),
+      value: `${config.value?.editable?.initial_capital ?? '--'} USDT`,
+      foot: '绩效统计基准',
+      tone: '',
+    },
   ]
 })
 
-const healthAllOk = computed(() => {
-  const chips = mxHealthChips.value || []
-  return chips.length > 0 && chips.every((h: any) => h.ok === h.total)
+// ---- Strategy Plaza Sharing ----
+const plazaSettings = ref({
+  enabled: false,
+  nickname: '0xEthan',
+  show_performance: true,
+  show_balance: false,
+  show_model: true,
+  show_strategy_params: true,
+  plaza_hub_url: 'https://hub.astraquant.tech',
+})
+const plazaIsLive = ref(false)
+const loadingPlaza = ref(false)
+const savingPlaza = ref(false)
+const showPlazaPreview = ref(false)
+const plazaPreviewData = ref<any>(null)
+const loadingPlazaPreview = ref(false)
+
+const plazaPublicUrl = computed(() => {
+  if (typeof window !== 'undefined' && window.location) {
+    return `${window.location.origin}/api/v1/public/plaza/profile`
+  }
+  return '/api/v1/public/plaza/profile'
 })
 
-onMounted(() => { loadAll(); loadMx(); loadChannels() })
+async function loadPlazaSettings() {
+  loadingPlaza.value = true
+  try {
+    const res = await api<any>('/api/v1/admin/plaza/settings')
+    if (res?.settings) {
+      plazaSettings.value = { ...plazaSettings.value, ...res.settings }
+    }
+    plazaIsLive.value = Boolean(res?.is_live)
+  } catch {
+    // Keep defaults
+  } finally {
+    loadingPlaza.value = false
+  }
+}
+
+async function savePlazaSettings() {
+  if (!isUnifiedLive.value) {
+    toast.warn(t('admin.security.plazaLiveOnlyAlert'))
+    return
+  }
+  savingPlaza.value = true
+  try {
+    await api('/api/v1/admin/plaza/settings', {
+      method: 'PUT',
+      body: JSON.stringify(plazaSettings.value),
+    })
+    toast.ok(t('admin.security.toastPlazaSaved'))
+    await loadPlazaSettings()
+  } catch (err: any) {
+    toast.err(t('admin.security.errSaveFailed', undefined, { msg: err.message || 'Error' }))
+  } finally {
+    savingPlaza.value = false
+  }
+}
+
+function copyPlazaUrl() {
+  navigator.clipboard.writeText(plazaPublicUrl.value)
+  toast.ok(t('admin.security.toastPlazaCopied'))
+}
+
+async function openPlazaPreview() {
+  showPlazaPreview.value = true
+  loadingPlazaPreview.value = true
+  try {
+    const res = await api<any>('/api/v1/public/plaza/profile')
+    plazaPreviewData.value = res
+  } catch (err: any) {
+    plazaPreviewData.value = null
+  } finally {
+    loadingPlazaPreview.value = false
+  }
+}
+
+function copyStrategyCloneData() {
+  if (!plazaPreviewData.value?.strategy_clone_payload) return
+  navigator.clipboard.writeText(JSON.stringify(plazaPreviewData.value.strategy_clone_payload, null, 2))
+  toast.ok(t('admin.security.plazaCloneSuccess'))
+}
+
+onMounted(() => {
+  loadAll()
+  loadMx()
+  loadChannels()
+  loadPlazaSettings()
+})
 </script>
 
 <template>
   <div class="sc">
-    <PageHeader :title="t('nav.admin.security')" :description="t('admin.security.desc')">
+    <PageHeader :title="t('nav.admin.security')">
       <template #actions>
-        <span class="badge badge-accent mono">
-          {{ t('admin.security.chipRouting') }} {{ routingMode.toUpperCase() }}
+        <span class="badge mono" :class="isUnifiedLive ? 'badge-warn' : 'badge-accent'">
+          {{ isUnifiedLive ? t('admin.security.envLive') : t('admin.security.optDemo') }}
         </span>
-        <span class="badge mono">
-          {{ t('admin.security.chipPreferred') }} {{ preferredVenue.toUpperCase() }}
+        <span class="badge badge-accent mono">
+          {{ orderMode === 'market' ? t('admin.security.optMarket') : t('admin.security.optLimit') }}
         </span>
         <button type="button" class="btn btn-ghost btn-sm" :disabled="loading" @click="loadAll">
           <Loader2 v-if="loading && config" :size="14" class="animate-spin shrink-0" />
@@ -624,8 +630,7 @@ onMounted(() => { loadAll(); loadMx(); loadChannels() })
       <div v-for="i in 6" :key="i" class="skeleton skeleton-row" />
     </div>
 
-    <!-- 加载失败：批 24 —— 此前失败只弹一个 3 秒就消失的 toast，
-         config 保持 null，模板两个分支都不命中 → 页面只剩页头，一片空白且无重试入口。 -->
+    <!-- 加载失败 -->
     <div v-else-if="loadError && !config" role="alert" class="state-block is-error">
       <span class="state-icon"><AlertTriangle :size="17" /></span>
       <p class="state-title">{{ t('common.loadFailed') }}</p>
@@ -637,7 +642,7 @@ onMounted(() => { loadAll(); loadMx(); loadChannels() })
     </div>
 
     <template v-else-if="config">
-      <!-- ══ 接入状态带 ══ -->
+      <!-- ══ 顶部概览指标带 ══ -->
       <section class="card band">
         <div v-for="f in bandFacts" :key="f.label" class="fact">
           <span class="fact-label"><component :is="f.icon" :size="12" />{{ f.label }}</span>
@@ -646,7 +651,7 @@ onMounted(() => { loadAll(); loadMx(); loadChannels() })
         </div>
       </section>
 
-      <!-- ══ 页签 ══ -->
+      <!-- ══ 页签导航 ══ -->
       <div class="seg seg-lg sc-tabs" role="tablist" :aria-label="t('admin.security.tabsLabel')">
         <button
           v-for="(tab, ti) in TABS"
@@ -665,67 +670,50 @@ onMounted(() => { loadAll(); loadMx(); loadChannels() })
         </button>
       </div>
 
-      <!-- ══════════ 页签 1：交易所与路由 ══════════ -->
+      <!-- ══════════ 页签 1：交易所账户 ══════════ -->
       <template v-if="activeTab === 'venues'">
-        <SettingsSection :title="t('admin.security.routingTitle')" :description="t('admin.security.routingDesc')" :icon="Route">
+        <!-- 全局统一交易环境一键切换 -->
+        <SettingsSection :title="t('admin.security.unifiedEnvTitle')" :icon="ShieldCheck">
           <template #actions>
-            <button type="button" class="btn btn-primary btn-sm" :disabled="savingMx" @click="saveRouting">
-              <Loader2 v-if="savingMx" :size="13" class="animate-spin shrink-0" />
-              <Save v-else :size="13" />
-              <span>{{ savingMx ? t('admin.security.saving') : t('admin.security.saveRouting') }}</span>
-            </button>
+            <span class="badge mono" :class="isUnifiedLive ? 'badge-warn' : 'badge-accent'">
+              {{ isUnifiedLive ? t('admin.security.envLive') : t('admin.security.optDemo') }}
+            </span>
           </template>
 
           <div class="sc-group">
-            <span class="form-label">{{ t('admin.security.routingModeLabel') }}</span>
-            <div class="sc-radios sc-radios-3" role="radiogroup" :aria-label="t('admin.security.routingModeLabel')">
-              <label
-                v-for="m in ROUTING_MODES"
-                :key="m.value"
-                class="sc-radio"
-                :class="{ 'is-on': routingMode === m.value }"
+            <span class="form-label">{{ t('admin.security.unifiedEnvLabel') }}</span>
+            <div class="seg seg-compact" role="group" :aria-label="t('admin.security.unifiedEnvLabel')">
+              <button
+                type="button"
+                class="disabled:opacity-40 disabled:cursor-not-allowed"
+                :aria-pressed="!isUnifiedLive"
+                :class="{ 'seg-on': !isUnifiedLive }"
+                :disabled="savingUnifiedEnv"
+                @click="requestUnifiedEnvSwitch('demo')"
               >
-                <input v-model="routingMode" type="radio" name="routing-mode" :value="m.value" />
-                <span class="sc-radio-text">
-                  <span class="sc-radio-title">{{ t(m.labelKey) }}</span>
-                  <span class="sc-radio-desc">{{ t(m.descKey) }}</span>
-                </span>
-              </label>
-            </div>
-          </div>
-
-          <div class="sc-group">
-            <span class="form-label">{{ t('admin.security.manualLabel') }}</span>
-            <div class="sc-radios sc-radios-4" role="radiogroup" :aria-label="t('admin.security.manualLabel')">
-              <label
-                v-for="v in PREFERRED_VENUES"
-                :key="v.value"
-                class="sc-radio"
-                :class="{ 'is-on': preferredVenue === v.value }"
+                <Loader2 v-if="savingUnifiedEnv && !isUnifiedLive" :size="12" class="animate-spin shrink-0" />
+                <span>{{ t('admin.security.optDemo') }} · {{ t('admin.security.envDemoOkx') }}</span>
+              </button>
+              <button
+                type="button"
+                class="disabled:opacity-40 disabled:cursor-not-allowed"
+                :aria-pressed="isUnifiedLive"
+                :class="{ 'seg-on': isUnifiedLive }"
+                :disabled="savingUnifiedEnv"
+                @click="requestUnifiedEnvSwitch('live')"
               >
-                <input v-model="preferredVenue" type="radio" name="preferred-venue" :value="v.value" />
-                <span class="sc-radio-text">
-                  <span class="sc-radio-title">{{ t(v.labelKey) }}</span>
-                  <span class="sc-radio-desc">{{ t(v.descKey) }}</span>
-                </span>
-              </label>
+                <Loader2 v-if="savingUnifiedEnv && isUnifiedLive" :size="12" class="animate-spin shrink-0" />
+                <span>{{ t('admin.security.optLive') }} · {{ t('admin.security.envLive') }}</span>
+              </button>
             </div>
+            <p class="sc-hint">
+              {{ isUnifiedLive ? t('admin.security.unifiedLiveHint') : t('admin.security.unifiedDemoHint') }}
+            </p>
           </div>
-
-          <p class="sc-note">
-            <span class="label-caps">{{ t('admin.security.routingEffectiveTitle') }}</span>
-            <span>
-              <b class="mono is-accent">{{ routingMode.toUpperCase() }}</b>
-              <template v-if="preferredVenue !== 'auto'">
-                {{ t('admin.security.manualTag') }} <b class="mono is-accent">{{ preferredVenue.toUpperCase() }}</b>
-              </template>
-              — {{ t('admin.security.unconfiguredNote') }}
-            </span>
-          </p>
         </SettingsSection>
 
         <!-- 委托订单模式 -->
-        <SettingsSection :title="t('admin.security.orderModeTitle')" :description="t('admin.security.orderModeDesc')" :icon="Zap">
+        <SettingsSection :title="t('admin.security.orderModeTitle')" :icon="Zap">
           <template #actions>
             <button type="button" class="btn btn-primary btn-sm" :disabled="savingOrderMode" @click="saveOrderMode">
               <Loader2 v-if="savingOrderMode" :size="13" class="animate-spin shrink-0" />
@@ -760,58 +748,109 @@ onMounted(() => { loadAll(); loadMx(); loadChannels() })
           </div>
         </SettingsSection>
 
-        <!-- 三所凭证 -->
-        <SettingsSection :title="t('admin.security.credsTitle')" :description="t('admin.security.credsDesc')" :icon="KeyRound">
+        <!-- 出场与分批止盈 (Scale-Out) -->
+        <SettingsSection :title="t('admin.security.scaleOutTitle')" :icon="TrendingUp">
+          <template #actions>
+            <span class="badge" :class="scaleOutEnabled ? 'badge-up' : 'badge-neutral'">
+              {{ scaleOutEnabled ? t('admin.security.scaleOutEnabledTag') : t('admin.security.scaleOutDisabledTag') }}
+            </span>
+          </template>
+
+          <div class="sc-group">
+            <div class="flex items-center justify-between">
+              <div>
+                <span class="form-label mb-1">{{ t('admin.security.scaleOutSwitchLabel') }}</span>
+                <p class="sc-hint mb-0">
+                  {{ t('admin.security.scaleOutHint') }}
+                </p>
+              </div>
+              <div class="flex items-center gap-2 shrink-0">
+                <Loader2 v-if="savingScaleOut" :size="14" class="animate-spin shrink-0" />
+                <BaseSwitch
+                  :model-value="scaleOutEnabled"
+                  :aria-label="t('admin.security.scaleOutSwitchLabel')"
+                  :disabled="savingScaleOut"
+                  @update:model-value="toggleScaleOut"
+                />
+              </div>
+            </div>
+            <div class="mt-3 flex items-center justify-between text-xs text-[var(--ink-2)] border-t border-[var(--line-1)] pt-3">
+              <span>{{ t('admin.security.scaleOutCurrentPreset') }}: {{ Math.round((config?.editable?.scale_out_ratio || 0.5) * 100) }}% · {{ config?.editable?.scale_out_trigger_atr || 1.2 }}x ATR</span>
+              <RouterLink to="/admin/risk" class="text-[var(--accent)] hover:underline inline-flex items-center gap-1 font-medium">
+                <span>{{ t('admin.security.scaleOutCustomizeInRisk') }}</span>
+                <ArrowRight :size="12" />
+              </RouterLink>
+            </div>
+          </div>
+        </SettingsSection>
+
+        <!-- OKX 接入凭证 -->
+        <SettingsSection :title="t('admin.security.credsTitle')" :icon="KeyRound">
           <div class="sc-venues">
-            <!-- OKX -->
-            <VenueCredentialCard
-              :name="t('admin.security.okxName')" :api-label="t('admin.security.okxApiLabel')"
-              :status-text="okxLinked ? t('admin.security.okxReady') : t('admin.security.okxNotReady')"
-              :tone="okxLinked ? 'up' : 'down'"
-              :env-text="okxEnvText" :env-label="t('admin.security.fundEnv')"
-            >
-              <template #env>
-                <div class="field-stack">
-                  <span class="form-label">{{ t('admin.security.endpointTier') }}</span>
-                  <div class="seg seg-compact" role="group" :aria-label="t('admin.security.endpointTier')">
-                    <button
-                      type="button"
-                      :aria-pressed="!okxCredViewLive"
-                      :class="{ 'seg-on': !okxCredViewLive }"
-                      @click="setOkxMode('demo')"
-                    >
-                      <span>{{ t('admin.security.okxDemoDomain') }}</span>
-                    </button>
-                    <button
-                      type="button"
-                      :aria-pressed="okxCredViewLive"
-                      :class="{ 'seg-on': okxCredViewLive }"
-                      @click="setOkxMode('live')"
-                    >
-                      <span>{{ t('admin.security.okxLiveDomain') }}</span>
-                    </button>
-                  </div>
+            <article class="sc-venue-card">
+              <header class="sc-venue-head">
+                <div class="sc-venue-id">
+                  <h3 class="sc-venue-name">{{ t('admin.security.okxName') }}</h3>
+                  <span class="sc-venue-api">{{ t('admin.security.okxApiLabel') }}</span>
                 </div>
-              </template>
-
-              <div class="sc-creds">
-                <span class="form-label">
-                  {{ (okxCredViewLive ? t('admin.security.liveTrio') : t('admin.security.demoTrio')) }}
+                <span class="badge" :class="okxLinked ? 'badge-up' : 'badge-down'">
+                  {{ okxLinked ? t('admin.security.okxReady') : t('admin.security.okxNotReady') }}
                 </span>
+              </header>
 
-                <div v-show="!okxCredViewLive" class="sc-creds-group">
-                  <input v-model="keys.demo_key" type="password" :placeholder="t('admin.security.apiKeyKeep')" class="field" :aria-label="t('admin.security.demoKeyAria')" />
-                  <input v-model="keys.demo_secret" type="password" :placeholder="t('admin.security.phSecretKey')" class="field" :aria-label="t('admin.security.demoSecretAria')" />
-                  <input v-model="keys.demo_pass" type="password" :placeholder="t('admin.security.phPassphrase')" class="field" :aria-label="t('admin.security.demoPassAria')" />
-                </div>
-                <div v-show="okxCredViewLive" class="sc-creds-group">
-                  <input v-model="keys.live_key" type="password" :placeholder="t('admin.security.apiKeyKeep')" class="field" :aria-label="t('admin.security.liveKeyAria')" />
-                  <input v-model="keys.live_secret" type="password" :placeholder="t('admin.security.phSecretKey')" class="field" :aria-label="t('admin.security.liveSecretAria')" />
-                  <input v-model="keys.live_pass" type="password" :placeholder="t('admin.security.phPassphrase')" class="field" :aria-label="t('admin.security.livePassAria')" />
-                </div>
+              <div class="kv-row">
+                <span class="sc-venue-env-label">{{ t('admin.security.fundEnv') }}</span>
+                <span class="sc-venue-env-value mono">{{ okxEnvText }}</span>
               </div>
 
-              <template #extra>
+              <div class="sc-venue-body">
+                <div class="field-stack">
+                  <span class="form-label">{{ t('admin.security.endpointTier') }}</span>
+                  <div class="sc-env-indicator">
+                    <span class="badge mono" :class="isUnifiedLive ? 'badge-warn' : 'badge-accent'">
+                      {{ isUnifiedLive ? t('admin.security.envLive') : t('admin.security.envDemoOkx') }}
+                    </span>
+                    <span class="sc-env-hint">{{ t('admin.security.envFollowsUnified') }}</span>
+                  </div>
+                </div>
+
+                <div class="sc-creds">
+                  <div class="sc-creds-header">
+                    <span class="form-label">
+                      {{ (okxCredViewLive ? t('admin.security.liveTrio') : t('admin.security.demoTrio')) }}
+                    </span>
+                    <div class="seg seg-compact" role="group" :aria-label="t('admin.security.okxCredViewLabel')">
+                      <button
+                        type="button"
+                        :aria-pressed="!okxCredViewLive"
+                        :class="{ 'seg-on': !okxCredViewLive }"
+                        @click="okxCredViewLive = false"
+                      >
+                        <span>{{ t('admin.security.viewDemoCred') }}</span>
+                      </button>
+                      <button
+                        type="button"
+                        :aria-pressed="okxCredViewLive"
+                        :class="{ 'seg-on': okxCredViewLive }"
+                        @click="okxCredViewLive = true"
+                      >
+                        <span>{{ t('admin.security.viewLiveCred') }}</span>
+                      </button>
+                    </div>
+                  </div>
+
+                  <div v-show="!okxCredViewLive" class="sc-creds-group">
+                    <input v-model="keys.demo_key" type="password" :placeholder="t('admin.security.apiKeyKeep')" class="field" :aria-label="t('admin.security.demoKeyAria')" />
+                    <input v-model="keys.demo_secret" type="password" :placeholder="t('admin.security.phSecretKey')" class="field" :aria-label="t('admin.security.demoSecretAria')" />
+                    <input v-model="keys.demo_pass" type="password" :placeholder="t('admin.security.phPassphrase')" class="field" :aria-label="t('admin.security.demoPassAria')" />
+                  </div>
+                  <div v-show="okxCredViewLive" class="sc-creds-group">
+                    <input v-model="keys.live_key" type="password" :placeholder="t('admin.security.apiKeyKeep')" class="field" :aria-label="t('admin.security.liveKeyAria')" />
+                    <input v-model="keys.live_secret" type="password" :placeholder="t('admin.security.phSecretKey')" class="field" :aria-label="t('admin.security.liveSecretAria')" />
+                    <input v-model="keys.live_pass" type="password" :placeholder="t('admin.security.phPassphrase')" class="field" :aria-label="t('admin.security.livePassAria')" />
+                  </div>
+                </div>
+
                 <div v-if="channelOf('okx')" class="sc-channel-box">
                   <button
                     v-if="channelOf('okx')?.invite_url"
@@ -823,175 +862,36 @@ onMounted(() => { loadAll(); loadMx(); loadChannels() })
                   </button>
                 </div>
                 <p class="sc-hint"><AlertTriangle :size="11" />{{ t('admin.security.liveConfirmNote') }}</p>
-              </template>
-              <template #footer-left>
+              </div>
+
+              <footer class="sc-venue-foot">
                 <span v-if="venueLatencies.okx" class="sc-latency mono num">
                   <Radar :size="12" />
                   <span>{{ venueLatencies.okx }}ms</span>
                 </span>
-              </template>
-              <template #probe>
-                <button type="button" class="btn btn-quiet btn-sm" :disabled="probingVenue === 'okx'" @click="probeVenue('okx')">
-                  <RefreshCw :size="14" :class="probingVenue === 'okx' ? 'animate-spin shrink-0' : ''" />
-                  <span>{{ probingVenue === 'okx' ? t('admin.security.probing') : t('admin.security.detect') }}</span>
-                </button>
-              </template>
-              <template #save>
-                <button type="button" class="btn btn-primary btn-sm" :disabled="savingOkx" @click="saveEnvironment">
-                  <Loader2 v-if="savingOkx" :size="12" class="animate-spin shrink-0" />
-                  <Save v-else :size="12" />
-                  <span>{{ savingOkx ? t('admin.security.saving') : t('admin.security.saveOkx') }}</span>
-                </button>
-              </template>
-            </VenueCredentialCard>
-
-            <!-- Binance -->
-            <VenueCredentialCard
-              :name="t('admin.security.binanceName')" :api-label="t('admin.security.binanceApiLabel')"
-              :status-text="binanceStatus.text" :tone="binanceStatus.tone"
-              :env-text="binanceEnvText" :env-label="t('admin.security.fundEnv')"
-            >
-              <template #env>
-                <div class="field-stack">
-                  <span class="form-label">{{ t('admin.security.endpointTier') }}</span>
-                  <div class="seg seg-compact" role="group" :aria-label="t('admin.security.endpointTier')">
-                    <button
-                      type="button"
-                      :aria-pressed="mxTestnet.binance"
-                      :class="{ 'seg-on': mxTestnet.binance }"
-                      @click="mxTestnet.binance = true"
-                    >
-                      <span>{{ t('admin.security.binanceDemoDomain') }}</span>
-                    </button>
-                    <button
-                      type="button"
-                      :aria-pressed="!mxTestnet.binance"
-                      :class="{ 'seg-on': !mxTestnet.binance }"
-                      @click="mxTestnet.binance = false"
-                    >
-                      <span>{{ t('admin.security.binanceLiveDomain') }}</span>
-                    </button>
-                  </div>
-                </div>
-              </template>
-
-              <div class="sc-creds">
-                <span class="form-label">{{ t('admin.security.binanceCredLabel') }}</span>
-                <input v-model="mxForm.binance_api_key" type="text" :aria-label="t('admin.security.binanceKeyAria')" :placeholder="t('admin.security.apiKeyKeep')" class="field mono" />
-                <input v-model="mxForm.binance_secret_key" type="password" :aria-label="t('admin.security.binanceSecretAria')" :placeholder="t('admin.security.phApiSecret')" class="field" />
-              </div>
-
-              <!-- 2026-09：与本页另两个所对齐——注册入口同样由后端出值（此前只有 OKX/Gate 有） -->
-              <template #extra>
-                <div v-if="channelOf('binance')?.invite_url" class="sc-channel-box">
-                  <button
-                    type="button"
-                    class="sc-channel-btn"
-                    @click="openExternal(channelOf('binance')!.invite_url)"
-                  >
-                    <span>{{ t('admin.security.binanceRegisterDiscount') }}</span>
+                <div class="sc-venue-actions">
+                  <button type="button" class="btn btn-quiet btn-sm" :disabled="probingVenue === 'okx'" @click="probeVenue('okx')">
+                    <RefreshCw :size="14" :class="probingVenue === 'okx' ? 'animate-spin shrink-0' : ''" />
+                    <span>{{ probingVenue === 'okx' ? t('admin.security.probing') : t('admin.security.detect') }}</span>
+                  </button>
+                  <button type="button" class="btn btn-primary btn-sm" :disabled="savingOkx" @click="saveEnvironment">
+                    <Loader2 v-if="savingOkx" :size="12" class="animate-spin shrink-0" />
+                    <Save v-else :size="12" />
+                    <span>{{ savingOkx ? t('admin.security.saving') : t('admin.security.saveOkx') }}</span>
                   </button>
                 </div>
-              </template>
-
-              <template #footer-left>
-                <span v-if="venueLatencies.binance" class="sc-latency mono num">
-                  <Radar :size="12" />
-                  <span>{{ venueLatencies.binance }}ms</span>
-                </span>
-              </template>
-              <template #probe>
-                <button type="button" class="btn btn-quiet btn-sm" :disabled="probingVenue !== '' && probingVenue !== 'binance'" @click="probeVenue('binance')">
-                  <RefreshCw :size="14" />
-                  <span>{{ t('admin.security.detect') }}</span>
-                </button>
-              </template>
-              <template #save>
-                <button type="button" class="btn btn-primary btn-sm" :disabled="savingVenue !== ''" @click="saveVenue('binance')">
-                  <Loader2 v-if="savingVenue === 'binance'" :size="12" class="animate-spin shrink-0" />
-                  <Save v-else :size="12" />
-                  <span>{{ savingVenue === 'binance' ? t('admin.security.saving') : t('admin.security.saveBinance') }}</span>
-                </button>
-              </template>
-            </VenueCredentialCard>
-
-            <!-- Gate -->
-            <VenueCredentialCard
-              :name="t('admin.security.gateName')" :api-label="t('admin.security.gateApiLabel')"
-              :status-text="gateStatus.text" :tone="gateStatus.tone"
-              :env-text="gateEnvText" :env-label="t('admin.security.fundEnv')"
-            >
-              <template #env>
-                <div class="field-stack">
-                  <span class="form-label">{{ t('admin.security.endpointTier') }}</span>
-                  <div class="seg seg-compact" role="group" :aria-label="t('admin.security.endpointTier')">
-                    <button
-                      type="button"
-                      :aria-pressed="mxTestnet.gate"
-                      :class="{ 'seg-on': mxTestnet.gate }"
-                      @click="mxTestnet.gate = true"
-                    >
-                      <span>{{ t('admin.security.gateSandboxDomain') }}</span>
-                    </button>
-                    <button
-                      type="button"
-                      :aria-pressed="!mxTestnet.gate"
-                      :class="{ 'seg-on': !mxTestnet.gate }"
-                      @click="mxTestnet.gate = false"
-                    >
-                      <span>{{ t('admin.security.gateLiveDomain') }}</span>
-                    </button>
-                  </div>
-                </div>
-              </template>
-
-              <div class="sc-creds">
-                <span class="form-label">{{ t('admin.security.gateCredLabel') }}</span>
-                <input v-model="mxForm.gate_api_key" type="text" :aria-label="t('admin.security.gateKeyAria')" :placeholder="t('admin.security.apiKeyKeep')" class="field mono" />
-                <input v-model="mxForm.gate_secret_key" type="password" :aria-label="t('admin.security.gateSecretAria')" :placeholder="t('admin.security.phApiSecret')" class="field" />
-              </div>
-
-              <template #extra>
-                <div v-if="channelOf('gate')?.invite_url" class="sc-channel-box">
-                  <button
-                    type="button"
-                    class="sc-channel-btn"
-                    @click="openExternal(channelOf('gate')!.invite_url)"
-                  >
-                    <span>{{ t('admin.security.gateRegisterDiscount') }}</span>
-                  </button>
-                </div>
-              </template>
-              <template #footer-left>
-                <span v-if="venueLatencies.gate" class="sc-latency mono num">
-                  <Radar :size="12" />
-                  <span>{{ venueLatencies.gate }}ms</span>
-                </span>
-              </template>
-              <template #probe>
-                <button type="button" class="btn btn-quiet btn-sm" :disabled="probingVenue !== '' && probingVenue !== 'gate'" @click="probeVenue('gate')">
-                  <RefreshCw :size="14" />
-                  <span>{{ t('admin.security.detect') }}</span>
-                </button>
-              </template>
-              <template #save>
-                <button type="button" class="btn btn-primary btn-sm" :disabled="savingVenue !== ''" @click="saveVenue('gate')">
-                  <Loader2 v-if="savingVenue === 'gate'" :size="12" class="animate-spin shrink-0" />
-                  <Save v-else :size="12" />
-                  <span>{{ savingVenue === 'gate' ? t('admin.security.saving') : t('admin.security.saveGate') }}</span>
-                </button>
-              </template>
-            </VenueCredentialCard>
+              </footer>
+            </article>
           </div>
         </SettingsSection>
 
-        <!-- 跨所行情健康 -->
-        <SettingsSection :title="t('admin.security.healthTitle')" :description="t('admin.security.healthDesc')" :icon="Activity">
+        <!-- OKX 行情健康 -->
+        <SettingsSection :title="t('admin.security.healthTitle')" :icon="Activity">
           <template #actions>
             <span class="badge" :class="healthAllOk ? 'badge-up' : 'badge-warn'">
               {{ healthAllOk ? t('admin.security.healthOk') : t('admin.security.healthDegraded') }}
             </span>
-            <button type="button" class="btn btn-quiet btn-sm" @click="loadMx">
+            <button type="button" class="btn btn-quiet btn-sm" @click="loadMx()">
               <RefreshCw :size="14" />
               <span>{{ t('admin.security.recheck') }}</span>
             </button>
@@ -1004,12 +904,149 @@ onMounted(() => { loadAll(); loadMx(); loadChannels() })
               v-for="h in mxHealthChips"
               :key="h.name"
               class="sc-health-row"
-              :class="{ 'is-ok': h.ok === h.total }"
+              :class="{ 'is-ok': h.allOk, 'is-unknown': h.unknown > 0 }"
             >
               <span class="sc-health-name">{{ h.name }}</span>
               <span class="sc-health-stat mono num">{{ h.ok }}/{{ h.total }} {{ t('admin.security.coinsUnit') }}</span>
+              <span v-if="h.unknown" class="badge badge-warn">
+                {{ t('admin.security.healthUnknownBadge', undefined, { count: h.unknown }) }}
+              </span>
               <span v-if="h.avg_ms" class="sc-health-ms mono num">{{ h.avg_ms }}ms</span>
               <span v-if="h.testnet" class="badge">{{ t('admin.security.sandboxTag') }}</span>
+            </div>
+            <p v-if="healthUnknownTotal" class="sc-hint pad">{{ t('admin.security.healthUnknownNote') }}</p>
+          </div>
+        </SettingsSection>
+
+        <!-- 策略广场实盘共享 -->
+        <SettingsSection :title="t('admin.security.plazaShareTitle')" :icon="Share2">
+          <template #actions>
+            <span class="badge mono" :class="!isUnifiedLive ? 'badge-warn' : plazaSettings.enabled ? 'badge-accent' : ''">
+              {{ !isUnifiedLive ? t('admin.security.plazaDemoLocked') : plazaSettings.enabled ? t('admin.security.plazaActive') : t('admin.security.plazaOff') }}
+            </span>
+          </template>
+
+          <div class="sc-group">
+            <p v-if="!isUnifiedLive" class="sc-hint flex items-center gap-1.5 text-amber-400">
+              <AlertTriangle :size="13" class="shrink-0" />
+              <span>{{ t('admin.security.plazaLiveOnlyAlert') }}</span>
+            </p>
+
+            <div class="flex items-center justify-between py-2 border-b border-[var(--border-subtle)]">
+              <div>
+                <span class="font-medium text-sm text-[var(--text-primary)]">{{ t('admin.security.plazaEnableLabel') }}</span>
+                <p class="text-xs text-[var(--text-muted)] mt-0.5">{{ t('admin.security.plazaShareDesc') }}</p>
+              </div>
+              <BaseSwitch
+                v-model="plazaSettings.enabled"
+                :disabled="!isUnifiedLive || savingPlaza"
+                :label="t('admin.security.plazaEnableLabel')"
+              />
+            </div>
+
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-4 pt-2">
+              <div class="space-y-1">
+                <label for="plaza-nickname-input" class="form-label text-xs">{{ t('admin.security.plazaNicknameLabel') }}</label>
+                <input
+                  id="plaza-nickname-input"
+                  v-model="plazaSettings.nickname"
+                  type="text"
+                  class="field text-xs disabled:opacity-40 disabled:cursor-not-allowed"
+                  maxlength="40"
+                  :disabled="!isUnifiedLive || savingPlaza"
+                  :placeholder="t('admin.security.plazaNicknamePlaceholder')"
+                />
+              </div>
+
+              <div class="space-y-1">
+                <label for="plaza-api-url-input" class="form-label text-xs">{{ t('admin.security.plazaApiUrlLabel') }}</label>
+                <div class="flex items-center gap-2">
+                  <input
+                    id="plaza-api-url-input"
+                    type="text"
+                    readonly
+                    class="field text-xs mono text-[var(--text-muted)] select-all disabled:opacity-40 disabled:cursor-not-allowed"
+                    :value="plazaPublicUrl"
+                  />
+                  <button
+                    type="button"
+                    class="btn btn-quiet btn-sm shrink-0"
+                    :disabled="!plazaSettings.enabled || !isUnifiedLive"
+                    @click="copyPlazaUrl"
+                  >
+                    <Copy :size="12" />
+                    <span>{{ t('admin.security.plazaCopyUrl') }}</span>
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            <div class="space-y-2 pt-2 border-t border-[var(--border-subtle)]">
+              <span class="form-label text-xs">{{ t('admin.security.plazaPrivacyCustom') }}</span>
+              <div class="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs">
+                <label class="flex items-center gap-2 cursor-pointer text-[var(--text-secondary)]">
+                  <input
+                    type="checkbox"
+                    v-model="plazaSettings.show_performance"
+                    :disabled="!isUnifiedLive || savingPlaza"
+                    class="rounded border-[var(--border-base)] text-[var(--color-primary)] disabled:opacity-40 disabled:cursor-not-allowed"
+                  />
+                  <span>{{ t('admin.security.plazaShowPerf') }}</span>
+                </label>
+
+                <label class="flex items-center gap-2 cursor-pointer text-[var(--text-secondary)]">
+                  <input
+                    type="checkbox"
+                    v-model="plazaSettings.show_balance"
+                    :disabled="!isUnifiedLive || savingPlaza"
+                    class="rounded border-[var(--border-base)] text-[var(--color-primary)] disabled:opacity-40 disabled:cursor-not-allowed"
+                  />
+                  <span>{{ t('admin.security.plazaShowBalance') }}</span>
+                </label>
+
+                <label class="flex items-center gap-2 cursor-pointer text-[var(--text-secondary)]">
+                  <input
+                    type="checkbox"
+                    v-model="plazaSettings.show_model"
+                    :disabled="!isUnifiedLive || savingPlaza"
+                    class="rounded border-[var(--border-base)] text-[var(--color-primary)] disabled:opacity-40 disabled:cursor-not-allowed"
+                  />
+                  <span>{{ t('admin.security.plazaShowModel') }}</span>
+                </label>
+
+                <label class="flex items-center gap-2 cursor-pointer text-[var(--text-secondary)]">
+                  <input
+                    type="checkbox"
+                    v-model="plazaSettings.show_strategy_params"
+                    :disabled="!isUnifiedLive || savingPlaza"
+                    class="rounded border-[var(--border-base)] text-[var(--color-primary)] disabled:opacity-40 disabled:cursor-not-allowed"
+                  />
+                  <span>{{ t('admin.security.plazaShowParams') }}</span>
+                </label>
+              </div>
+            </div>
+
+            <div class="flex items-center justify-between pt-3 border-t border-[var(--border-subtle)]">
+              <button
+                type="button"
+                class="btn btn-ghost btn-sm"
+                :disabled="!isUnifiedLive || !plazaSettings.enabled"
+                @click="openPlazaPreview"
+              >
+                <Eye :size="13" />
+                <span>{{ t('admin.security.plazaPreviewCard') }}</span>
+              </button>
+
+              <button
+                type="button"
+                class="btn btn-primary btn-sm"
+                :disabled="!isUnifiedLive || savingPlaza"
+                @click="savePlazaSettings"
+              >
+                <Loader2 v-if="savingPlaza" :size="13" class="animate-spin shrink-0" />
+                <Save v-else :size="13" />
+                <span>{{ savingPlaza ? t('admin.security.saving') : t('admin.security.plazaSaveSettings') }}</span>
+              </button>
             </div>
           </div>
         </SettingsSection>
@@ -1017,9 +1054,10 @@ onMounted(() => { loadAll(); loadMx(); loadChannels() })
 
       <!-- ══════════ 页签 2：标的池与初始本金 ══════════ -->
       <template v-if="activeTab === 'pool'">
-        <SettingsSection :title="t('admin.security.capitalTitle')" :description="t('admin.security.capitalDesc')" :icon="Wallet">
+        <SettingsSection :title="t('admin.security.capitalTitle')" :icon="Wallet">
           <template #actions>
-            <button type="button"
+            <button
+              type="button"
               class="btn btn-primary btn-sm"
               :disabled="savingCapital || !auth.isSuperadmin || !capitalAmountOk || !capitalConfirmOk"
               @click="saveCapital"
@@ -1060,7 +1098,7 @@ onMounted(() => { loadAll(); loadMx(); loadChannels() })
           <p class="sc-hint pad">{{ t('admin.security.capitalFooter') }}</p>
         </SettingsSection>
 
-        <SettingsSection :title="t('admin.security.poolTitle')" :description="t('admin.security.poolDesc')" :icon="Layers">
+        <SettingsSection :title="t('admin.security.poolTitle')" :icon="Layers">
           <template #actions>
             <input
               v-model="newInstId"
@@ -1104,7 +1142,8 @@ onMounted(() => { loadAll(); loadMx(); loadChannels() })
                 <span v-else class="badge">{{ t('admin.security.removableBadge') }}</span>
               </span>
               <span class="sc-actions">
-                <button type="button"
+                <button
+                  type="button"
                   :disabled="item.protected || item.has_tracker || item.held_live || item.holdings_unknown"
                   class="btn btn-quiet btn-icon btn-sm is-danger"
                   :title="item.held_live
@@ -1126,7 +1165,7 @@ onMounted(() => { loadAll(); loadMx(); loadChannels() })
 
       <!-- ══════════ 页签 3：应急风控与持仓 ══════════ -->
       <template v-if="activeTab === 'emergency'">
-        <SettingsSection :title="t('admin.security.manualTitle')" :description="t('admin.security.manualDesc')" :icon="Zap">
+        <SettingsSection :title="t('admin.security.manualTitle')" :icon="Zap">
           <template #actions>
             <button type="button" class="btn btn-quiet btn-sm" @click="saveManualClose">
               <Save :size="13" />
@@ -1142,7 +1181,7 @@ onMounted(() => { loadAll(); loadMx(); loadChannels() })
           </div>
         </SettingsSection>
 
-        <SettingsSection :title="t('admin.security.snapshotTitle')" :description="t('admin.security.snapshotDesc')" :icon="Radar">
+        <SettingsSection :title="t('admin.security.snapshotTitle')" :icon="Radar">
           <template #actions>
             <button type="button" class="btn btn-quiet btn-sm" @click="loadPositions">
               <Zap :size="13" />
@@ -1150,7 +1189,6 @@ onMounted(() => { loadAll(); loadMx(); loadChannels() })
             </button>
           </template>
 
-          <!-- 批 70：加载中 → status + 旋转图标；失败 → alert + 警示图标（不再转圈） -->
           <p
             v-if="snapshotState"
             class="sc-loading"
@@ -1208,7 +1246,11 @@ onMounted(() => { loadAll(); loadMx(); loadChannels() })
                 {{ Number(p.upl || 0).toFixed(4) }}
               </span>
               <span class="sc-actions">
-                <button type="button" class="btn btn-danger btn-sm" @click="openClose(p)">
+                <button
+                  type="button"
+                  class="btn btn-quiet btn-sm is-danger"
+                  @click="openClose(p)"
+                >
                   {{ t('admin.security.quickClose') }}
                 </button>
               </span>
@@ -1218,7 +1260,7 @@ onMounted(() => { loadAll(); loadMx(); loadChannels() })
       </template>
     </template>
 
-    <!-- ══════════ 平仓双确认 ══════════ -->
+    <!-- ══ 平仓二次确认弹窗 ══ -->
     <BaseDialog
       :open="!!closeModal?.show"
       :title="t('admin.security.closeModalTitle')"
@@ -1268,12 +1310,78 @@ onMounted(() => { loadAll(); loadMx(); loadChannels() })
         <button type="button" class="btn btn-ghost btn-sm" @click="closeModal = null">
           {{ t('admin.security.cancel') }}
         </button>
-        <!-- 批 115：表单已挂 @submit.prevent="confirmClose"，type="submit" 按钮无需再挂 @click，避免单次点击触发两次平仓请求 -->
         <button class="btn btn-danger btn-sm" type="submit" form="sc-close-form" :disabled="closing || !closeReady">
           <Loader2 v-if="closing" :size="13" class="animate-spin shrink-0" />
           <span>{{ closing ? t('admin.security.closing') : t('admin.security.confirmClose') }}</span>
         </button>
       </template>
+    </BaseDialog>
+
+    <!-- ══ 策略广场名片预览弹窗 ══ -->
+    <BaseDialog
+      :open="showPlazaPreview"
+      :title="t('admin.security.plazaPreviewTitle')"
+      size="md"
+      @close="showPlazaPreview = false"
+    >
+      <div v-if="loadingPlazaPreview" class="py-8 flex justify-center items-center">
+        <Loader2 :size="24" class="animate-spin shrink-0 text-[var(--color-primary)]" />
+      </div>
+      <div v-else-if="plazaPreviewData" class="space-y-4">
+        <div class="card p-4 border border-[var(--border-base)] bg-[var(--bg-elevated)] space-y-3">
+          <div class="flex items-center justify-between">
+            <div class="flex items-center gap-2">
+              <span class="font-bold text-sm text-[var(--text-primary)]">{{ plazaPreviewData.node_info?.nickname || plazaSettings.nickname }}</span>
+              <span class="badge badge-accent label-caps">{{ t('admin.security.plazaVerifiedBadge') }}</span>
+            </div>
+            <span class="text-xs text-[var(--text-muted)] mono">{{ plazaPreviewData.node_info?.system_version }}</span>
+          </div>
+
+          <div v-if="plazaPreviewData.performance?.visible" class="grid grid-cols-3 gap-2 py-2 border-y border-[var(--border-subtle)] text-center">
+            <div>
+              <span class="text-xs text-[var(--text-muted)]">{{ t('admin.security.plazaRoi') }}</span>
+              <p class="text-base font-bold text-emerald-400 font-mono">{{ plazaPreviewData.performance?.total_roi_pct >= 0 ? '+' : '' }}{{ plazaPreviewData.performance?.total_roi_pct }}%</p>
+            </div>
+            <div>
+              <span class="text-xs text-[var(--text-muted)]">{{ t('admin.security.plazaWinRate') }}</span>
+              <p class="text-base font-bold text-[var(--text-primary)] font-mono">{{ plazaPreviewData.performance?.win_rate_pct }}%</p>
+            </div>
+            <div>
+              <span class="text-xs text-[var(--text-muted)]">{{ t('admin.security.plazaTotalTrades') }}</span>
+              <p class="text-base font-bold text-[var(--text-primary)] font-mono">{{ plazaPreviewData.performance?.all_trades }} {{ t('admin.security.plazaTradeUnit') }}</p>
+            </div>
+          </div>
+
+          <div v-if="plazaPreviewData.model_specs?.visible" class="text-xs space-y-1">
+            <span class="text-[var(--text-muted)]">{{ t('admin.security.plazaDriverModel') }}:</span>
+            <span class="ml-2 font-mono font-medium text-[var(--color-primary)]">{{ plazaPreviewData.model_specs?.primary_model }}</span>
+            <span class="text-[var(--text-muted)] ml-2">({{ plazaPreviewData.model_specs?.reasoning_effort }} effort)</span>
+          </div>
+
+          <div v-if="plazaPreviewData.risk_settings?.visible" class="text-xs space-y-1">
+            <span class="text-[var(--text-muted)]">{{ t('admin.security.plazaRiskConfig') }}:</span>
+            <span class="ml-2 font-mono">{{ t('admin.security.plazaRiskSummary', undefined, { min: plazaPreviewData.risk_settings?.min_leverage, max: plazaPreviewData.risk_settings?.max_leverage, pct: (Number(plazaPreviewData.risk_settings?.max_margin_equity_ratio || 0.35) * 100).toFixed(0) }) }}</span>
+          </div>
+        </div>
+
+        <div class="flex items-center justify-between pt-2">
+          <button
+            type="button"
+            class="btn btn-quiet btn-sm"
+            @click="copyStrategyCloneData"
+          >
+            <Copy :size="12" />
+            <span>{{ t('admin.security.plazaTestCopy') }}</span>
+          </button>
+          <button
+            type="button"
+            class="btn btn-primary btn-sm"
+            @click="showPlazaPreview = false"
+          >
+            {{ t('admin.security.plazaPreviewClose') }}
+          </button>
+        </div>
+      </div>
     </BaseDialog>
   </div>
 </template>
@@ -1290,41 +1398,14 @@ onMounted(() => { loadAll(); loadMx(); loadChannels() })
   gap: 8px;
 }
 
-/* ══ 状态带 ══ */
-
-
-
-
-
-
-
-
-
-
 .sc-tabs {
   align-self: flex-start;
 }
 
-/* ══ 通用 ══ */
-.sc-note {
-  display: flex;
-  align-items: baseline;
-  gap: var(--ds-space-2);
-  flex-wrap: wrap;
-  margin-top: var(--ds-space-4);
-  padding-top: var(--ds-space-3);
-  border-top: 1px solid var(--ds-color-border-default);
-  font-size: var(--text-3xs);
-  line-height: var(--leading-body);
-  color: var(--ds-color-text-description);
-}
-.sc-note .mono.is-accent {
-  color: var(--ds-color-brand);
-}
 .sc-hint {
   display: flex;
   align-items: flex-start;
-  gap:6px;
+  gap: 6px;
   font-size: var(--text-4xs);
   line-height: var(--leading-body);
   color: var(--ds-color-text-placeholder);
@@ -1343,228 +1424,197 @@ onMounted(() => { loadAll(); loadMx(); loadChannels() })
   margin-top: var(--ds-space-4);
 }
 
-/* ══ radio 卡组（旧版 7 段手写卡片 → 数据驱动） ══ */
-.sc-radios {
-  display: grid;
-  grid-template-columns: 1fr;
-  gap: var(--ds-space-2);
-  margin-top:8px;
-}
-@media (min-width: 620px) {
-  .sc-radios-3 {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-  }
-  .sc-radios-4 {
-    grid-template-columns: repeat(4, minmax(0, 1fr));
-  }
-}
-.sc-radio {
-  display: flex;
-  align-items: flex-start;
-  gap: 8px;
-  padding: 10px;
-  border: 1px solid var(--ds-color-border-default);
-  border-left: 2px solid transparent;
-  border-radius: var(--r-ctl);
-  background-color: var(--ds-color-bg-surface-inset);
-  cursor: pointer;
-  transition: all var(--dur-fast);
-}
-.sc-radio:hover {
-  background-color: var(--ds-color-bg-hover);
-}
-.sc-radio.is-on {
-  border-left-color: var(--ds-color-brand);
-  background-color: var(--astra-brand-bg);
-}
-.sc-radio input {
-  margin-top: 2px;
-  accent-color: var(--ds-color-brand);
-  flex-shrink: 0;
-}
-.sc-radio-text {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  min-width: 0;
-}
-.sc-radio-title {
-  font-size: var(--text-3xs);
-  font-weight: 600;
-  color: var(--ds-color-text-primary);
-}
-.sc-radio-desc {
-  font-size: var(--text-4xs);
-  line-height: var(--leading-body);
-  color: var(--ds-color-text-placeholder);
-}
-
-/* ══ 三所凭证 ══ */
+/* ══ OKX 凭证卡 ══ */
 .sc-venues {
   display: grid;
-  grid-template-columns: 1fr;
+  grid-template-columns: minmax(0, 1fr);
   gap: var(--ds-space-3);
 }
-@media (min-width: 900px) {
-  .sc-venues {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-  }
+
+.sc-venue-card {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--ds-color-border-default);
+  border-radius: var(--r-ctl);
+  background-color: var(--ds-color-bg-surface-inset);
+  overflow: hidden;
+}
+.sc-venue-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--ds-space-3);
+  padding: 10px var(--ds-space-3);
+  border-bottom: 1px solid var(--ds-color-border-default);
+}
+.sc-venue-id {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+.sc-venue-name {
+  font-size: var(--text-xs);
+  font-weight: 600;
+  color: var(--ds-color-text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sc-venue-api {
+  font-size: var(--text-4xs);
+  color: var(--ds-color-text-placeholder);
+}
+.sc-venue-head .badge {
+  flex-shrink: 0;
+}
+.sc-venue-env-label {
+  font-size: var(--text-4xs);
+  color: var(--ds-color-text-placeholder);
+}
+.sc-venue-env-value {
+  font-size: var(--text-3xs);
+  color: var(--ds-color-text-secondary);
+}
+
+.sc-venue-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ds-space-3);
+  padding: var(--ds-space-3);
+}
+
+.sc-env-indicator {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.sc-env-hint {
+  font-size: var(--text-4xs);
+  color: var(--ds-color-text-placeholder);
 }
 
 .sc-creds {
   display: flex;
   flex-direction: column;
-  gap:6px;
+  gap: 8px;
+}
+.sc-creds-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
 }
 .sc-creds-group {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: var(--ds-space-2);
+}
+@media (min-width: 768px) {
+  .sc-creds-group {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+
+.sc-venue-foot {
   display: flex;
-  flex-direction: column;
-  gap: 6px;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--ds-space-3);
+  padding: 8px var(--ds-space-3);
+  border-top: 1px solid var(--ds-color-border-default);
+  background-color: var(--ds-color-bg-surface);
 }
 .sc-latency {
-  font-size: var(--text-3xs);
-  color: var(--ds-color-text-secondary);
   display: inline-flex;
   align-items: center;
   gap: 4px;
-}
-.sc-check {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: var(--text-3xs);
-  color: var(--ds-color-text-description);
-  cursor: pointer;
-  /* 批 101：勾选行此前悬停毫无反馈。与同页 `.sc-radio:hover` / `.sc-row:hover`
-     用同一语汇 `--ds-color-bg-hover`（底色而非文字色）—— 这样**危险变体也有反馈**：
-     `.sc-check.is-danger span` 权重更高、始终是红的，若只改文字色，
-     危险行会静默地「没有变化」（第一版就踩了这个坑）。 */
-  border-radius: var(--r-xs);
-  transition: background-color var(--dur-fast) var(--ease-out), color var(--dur-fast) var(--ease-out);
-}
-.sc-check:hover {
-  background-color: var(--ds-color-bg-hover);
-}
-.sc-check:hover:not(.is-danger) {
-  color: var(--ds-color-text-primary);
-}
-.sc-check.is-danger span {
-  color: var(--down);
-}
-
-/* ══ 健康 ══ */
-.sc-health {
-  display: flex;
-  flex-direction: column;
-}
-.sc-health-row {
-  display: flex;
-  align-items: center;
-  gap: var(--ds-space-3);
-  padding:10px var(--ds-space-3);
-  border-bottom: 1px solid var(--ds-color-border-default);
-  border-left: 2px solid var(--warn);
-  font-size: var(--text-3xs);
-}
-.sc-health-row:last-child {
-  border-bottom: 0;
-}
-.sc-health-row.is-ok {
-  border-left-color: var(--up);
-}
-.sc-health-name {
-  font-weight: 600;
-  color: var(--ds-color-text-primary);
-  min-width: 0;
-}
-.sc-health-stat {
-  margin-left: auto;
-  color: var(--ds-color-text-secondary);
-}
-.sc-health-ms {
+  font-size: var(--text-4xs);
   color: var(--ds-color-text-placeholder);
 }
+.sc-venue-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--ds-space-2);
+  margin-left: auto;
+}
 
-/* ══ 表单 ══ */
+/* ══ 表单布局 ══ */
 .sc-form-2 {
   display: grid;
   grid-template-columns: 1fr;
   gap: var(--ds-space-3);
 }
-@media (min-width: 700px) {
+@media (min-width: 640px) {
   .sc-form-2 {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-template-columns: 1fr 1fr;
   }
 }
+
 .sc-inst-input {
-  width: 190px;
+  max-width: 220px;
 }
 
-/* ══ 行式清单 ══ */
+/* ══ 行式标的与持仓列表 ══ */
 .sc-rows {
   display: flex;
   flex-direction: column;
+  gap: 1px;
+  background-color: var(--ds-color-border-default);
+  border: 1px solid var(--ds-color-border-default);
+  border-radius: var(--r-ctl);
+  overflow: hidden;
 }
 .sc-row {
   display: grid;
-  grid-template-columns: 150px minmax(0, 1fr) 78px minmax(0, 1.3fr) 44px;
+  grid-template-columns: 1.5fr 1.5fr 1fr 1.5fr auto;
   align-items: center;
   gap: var(--ds-space-3);
-  padding: 10px var(--ds-space-3);
-  border-bottom: 1px solid var(--ds-color-border-default);
+  padding: 8px var(--ds-space-3);
+  background-color: var(--ds-color-bg-surface-inset);
   font-size: var(--text-3xs);
 }
-.sc-row:last-child {
-  border-bottom: 0;
+.sc-row:hover:not(.sc-row-head) {
+  background-color: var(--ds-color-bg-hover);
 }
 .sc-row-head {
-  min-height: 30px;
-  padding-top: 0;
-  padding-bottom: 0;
-  background-color: var(--ds-color-bg-surface-inset);
+  background-color: var(--ds-color-bg-surface);
   font-size: var(--text-4xs);
-  font-weight: 500;
-  letter-spacing: var(--track-label);
-  text-transform: uppercase;
+  font-weight: 600;
   color: var(--ds-color-text-placeholder);
-}
-.sc-row:not(.sc-row-head):hover {
-  background-color: var(--ds-color-bg-hover);
 }
 .sc-inst {
   font-weight: 600;
   color: var(--ds-color-text-primary);
 }
 .sc-name {
-  color: var(--ds-color-text-secondary);
-  min-width: 0;
+  color: var(--ds-color-text-description);
 }
 .sc-type {
   color: var(--ds-color-text-placeholder);
 }
 .sc-badges {
   display: flex;
-  flex-wrap: wrap;
+  align-items: center;
   gap: 4px;
-  min-width: 0;
 }
 .sc-actions {
   display: flex;
-  justify-content: flex-end;
+  align-items: center;
+  gap: 4px;
 }
 
 .sc-pos-row {
-  grid-template-columns: minmax(0, 1.6fr) 80px 80px 110px 92px;
+  grid-template-columns: 2fr 1.2fr 1fr 1.2fr auto;
 }
 .sc-pos-id {
   display: flex;
   align-items: center;
   gap: 6px;
-  flex-wrap: wrap;
   min-width: 0;
 }
-.sc-pos-id .mono {
-  font-weight: 600;
+.sc-pos-id b {
   color: var(--ds-color-text-primary);
 }
 .sc-contracts,
@@ -1597,12 +1647,32 @@ onMounted(() => { loadAll(); loadMx(); loadChannels() })
   }
 }
 
-/* ══ 应急 ══ */
+/* ══ 应急总闸与勾选行 ══ */
+.sc-check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: var(--text-3xs);
+  color: var(--ds-color-text-description);
+  cursor: pointer;
+  border-radius: var(--r-xs);
+  transition: background-color var(--dur-fast) var(--ease-out), color var(--dur-fast) var(--ease-out);
+}
+.sc-check:hover {
+  background-color: var(--ds-color-bg-hover);
+}
+.sc-check:hover:not(.is-danger) {
+  color: var(--ds-color-text-primary);
+}
+.sc-check.is-danger span {
+  color: var(--down);
+}
+
 .sc-switch-row {
   display: flex;
   align-items: center;
   gap: 10px;
-  padding:12px var(--ds-space-3);
+  padding: 12px var(--ds-space-3);
   border: 1px solid var(--ds-color-border-default);
   border-left: 2px solid var(--ds-color-border-strong);
   border-radius: var(--r-ctl);
@@ -1628,7 +1698,6 @@ onMounted(() => { loadAll(); loadMx(); loadChannels() })
   font-size: var(--text-3xs);
   color: var(--ds-color-text-placeholder);
 }
-/* 批 70：失败态用语义色与左竖线（本页既有语汇），不再沿用占位符灰 */
 .sc-loading.is-error {
   color: var(--down);
   padding-left: var(--ds-space-2);
@@ -1637,7 +1706,7 @@ onMounted(() => { loadAll(); loadMx(); loadChannels() })
 .sc-snap-meta {
   display: flex;
   align-items: baseline;
-  gap:8px;
+  gap: 8px;
   flex-wrap: wrap;
   margin-bottom: var(--ds-space-3);
   font-size: var(--text-3xs);
@@ -1650,6 +1719,45 @@ onMounted(() => { loadAll(); loadMx(); loadChannels() })
   color: var(--down);
 }
 .sc-sep {
+  color: var(--ds-color-text-placeholder);
+}
+
+/* ══ 健康 ══ */
+.sc-health {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ds-space-2);
+}
+.sc-health-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px var(--ds-space-3);
+  border: 1px solid var(--ds-color-border-default);
+  border-radius: var(--r-ctl);
+  background-color: var(--ds-color-bg-surface-inset);
+  font-size: var(--text-3xs);
+}
+.sc-health-name {
+  font-weight: 600;
+  color: var(--ds-color-text-primary);
+  text-transform: uppercase;
+}
+/* 行级状态色（2026-09-30 补齐：此前模板绑了 is-ok 却没有对应规则 ⇒ 死类，
+   全绿与否只体现在标题徽标上）。未核实走 warn 色，与"全绿"在视觉上互斥。 */
+.sc-health-row.is-ok {
+  border-color: var(--up-line);
+  background-color: var(--up-bg);
+}
+.sc-health-row.is-unknown {
+  border-color: var(--warn-line);
+  background-color: var(--warn-bg);
+}
+.sc-health-stat {
+  color: var(--ds-color-text-description);
+}
+.sc-health-ms {
   color: var(--ds-color-text-placeholder);
 }
 
@@ -1676,7 +1784,7 @@ onMounted(() => { loadAll(); loadMx(); loadChannels() })
   margin-top: var(--ds-space-4);
 }
 .sc-close-phrase {
-  padding:1px 6px;
+  padding: 1px 6px;
   border-radius: var(--r-xs);
   background-color: var(--down-bg);
   color: var(--down);

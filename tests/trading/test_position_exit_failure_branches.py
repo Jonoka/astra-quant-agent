@@ -37,6 +37,20 @@ def _pos(**kw):
     return base
 
 
+class _RigRegistry:
+    """最小场所注册表替身（三所持仓接管后 `position_exit` 按场所取适配器）。"""
+
+    class _Ad:
+        pass
+
+    def __init__(self):
+        self.asked: list = []
+
+    def get_adapter(self, venue, environment=None):
+        self.asked.append(venue)
+        return self._Ad()
+
+
 class _Rig:
     """把 `manage_position_tp_and_trailing` 的**全部注入项**都换成记录器。
 
@@ -52,6 +66,10 @@ class _Rig:
         self.notifies = []
         self.cooldowns = []
         self.synced = []
+        # 三所持仓接管（2026-09-28）：平仓与云 OCO 核验都必须**按场所**分流，
+        # 故要把它们的真实入参记下来逐条钉住。
+        self.close_calls = []
+        self.protect_calls = []
         self.hard_stop = hard_stop
         self.protection = protection
         self.close = close
@@ -76,6 +94,7 @@ class _Rig:
             record_signal_snapshot=lambda payload: None,
             record_trade=lambda payload: self.trades.append(payload),
             sync_cloud_algo_stop=lambda *a, **k: self.synced.append((a, k)),
+            venue_registry=_RigRegistry(),
             ASSET_CLASS_PROFILES=PROFILES,
             TAKER_FEE_RATE=0.0005,
             TIME_STOP_ATR_BAND=0.5,
@@ -85,12 +104,17 @@ class _Rig:
             notify_trade_close=lambda **k: self.notifies.append(k),
             protection_signals=lambda **k: self.hard_stop,
             ratcheted_trailing_stop=self._ratchet,
+            # 2026-10：建档时钉死"谁做的决定"（单模型 / 投委会＋采纳席位），供平仓
+            # 证据归档读取。桩按"读不到"诚实返回 unknown（不冒充单模型）。
+            resolve_decision_attribution=lambda inst_id: ("unknown", None),
         )
 
     def _close(self, *a, **k):
+        self.close_calls.append((a, k))
         return self.close
 
     def _protect(self, *a, **k):
+        self.protect_calls.append((a, k))
         if self.protect_raises:
             raise RuntimeError("protect boom")
         return self.protection
@@ -158,7 +182,10 @@ class ExitFailureBranchTest(unittest.TestCase):
         self.assertTrue(ok)
         self.assertEqual(detail, "保护失效安全退出")
         self.assertNotIn(key, trackers)
-        self.assertTrue(rig.notifies, "安全退出也要通知（不能悄悄平掉）")
+        # 2026-09-30（通知单一事实源）：安全退出**不由本路径发金额通知** —— 同一笔此前
+        # 会被本路径与台账路径各发一张卡片（实测两条金额互相矛盾）。退出动作本身仍留痕：
+        # tracker 已清、台账已记（断言在上方），金额卡片由台账路径按交易所真值发布。
+        self.assertFalse(rig.notifies, "本路径不得再发金额通知（改由台账路径）")
 
     # ── 149：缺 takeProfitPx 时补默认 ─────────────────────────────────
     def test_missing_take_profit_gets_a_default(self):
@@ -175,14 +202,14 @@ class ExitFailureBranchTest(unittest.TestCase):
         # 持仓超过 TIME_STOP_HOURS 且价格几乎没动（|cur_profit| < 0.5*atr）
         return _Rig(entry_ts=int(time.time()) - int(25 * HOUR), **kw)
 
-    def test_time_stop_closes_records_notifies_and_clears(self):
+    def test_time_stop_closes_records_and_clears_without_publishing_a_card(self):
         rig = self._time_stop_rig()
         ok, detail, trackers, key = self._run(rig)
         self.assertTrue(ok)
         self.assertEqual(detail, "时间止损")
         self.assertNotIn(key, trackers)
         self.assertEqual(len(rig.trades), 1)
-        self.assertTrue(rig.notifies, "时间止损要通知")
+        self.assertFalse(rig.notifies, "本路径不得再发金额通知（改由台账路径）")
         self.assertTrue(any("时间止损" in a for a in rig.actions), rig.actions)
 
     def test_time_stop_close_failure_keeps_the_position(self):
@@ -208,7 +235,7 @@ class ExitFailureBranchTest(unittest.TestCase):
         self.assertEqual(detail, "已阶梯锁利")
         self.assertNotIn(key, trackers)
         self.assertEqual(len(rig.trades), 1)
-        self.assertTrue(rig.notifies, "锁利平仓要通知")
+        self.assertFalse(rig.notifies, "本路径不得再发金额通知（改由台账路径）")
         self.assertTrue(rig.synced, "锁利线上移必须同步到云端 OCO")
 
     def test_ratchet_floor_stop_close_failure_keeps_the_position(self):
@@ -262,7 +289,7 @@ class ExitFailureBranchTest(unittest.TestCase):
         self.assertEqual(detail, "已移动止盈")
         self.assertNotIn(key, trackers, "平仓确认后要清 tracker")
         self.assertEqual(len(rig.trades), 1)
-        self.assertTrue(rig.notifies, "动能止盈要通知")
+        self.assertFalse(rig.notifies, "本路径不得再发金额通知（改由台账路径）")
 
     def test_long_momentum_pullback_close_failure_keeps_the_position(self):
         rig = _Rig(floor=69000.0, high_water=71750.0, close=(False, "交易所拒绝"))
@@ -282,7 +309,7 @@ class ExitFailureBranchTest(unittest.TestCase):
         self.assertNotIn(key, trackers)
         self.assertTrue(rig.synced, "空头的锁利线下移必须同步云端 OCO")
         self.assertEqual(rig.synced[0][0][1], "short", f"方向必须是 short：{rig.synced}")
-        self.assertTrue(rig.notifies)
+        self.assertFalse(rig.notifies)
 
     def test_short_momentum_rebound_exit(self):
         """峰值利润 >= 2*ATR 后从低点反弹 ⇒ 动能止盈（空）。"""
@@ -331,6 +358,43 @@ class ExitFailureBranchTest(unittest.TestCase):
         self.assertGreater(t["trailingStopPx"], 0, "建 tracker 时必须带止损线")
         self.assertGreater(t["takeProfitPx"], 0, "建 tracker 时必须带止盈线")
         self.assertEqual(t["entryTime"], "2026-09-21 12:00:00")
+
+
+class CrossVenueExitRoutingTest(unittest.TestCase):
+    """三所持仓接管（2026-09-28）后，退出路径必须**按场所**分流。
+
+    `position_exit` 原本假定自己只服务 OKX 直签链：所有 `close_position_confirmed`
+    都不传 `venue`（默认 `okx`）、云 OCO 核验走 `okx_rest`。接管外所持仓后，
+    这两点都会真的出事：
+
+    - 不传 venue ⇒ fail-closed「保护失效退出」会去平**同名标的在 OKX 的仓**
+      （实测日志 `OKX 51001: Instrument ID doesn't exist` —— 它拿币安的标的问 OKX）；
+    - 云 OCO 核验对币安/Gate 必然失败 ⇒ **误触发**上面那条 fail-closed。
+    """
+
+    def _run(self, rig, f=None):
+        f = f or _f()
+        key, trackers = rig.trackers(f)
+        ok, detail = manage_position_tp_and_trailing(
+            f, rig._pos, trackers, "2026-09-21 12:00:00", rig.actions, **rig.kwargs())
+        return ok, detail, trackers, key
+
+    def test_a_non_okx_position_is_safely_skipped_without_issuing_orders(self):
+        rig = _Rig(hard_stop=True)
+        rig._pos = _pos(venue="binance")
+        ok, why, _, _ = self._run(rig)
+        self.assertFalse(ok)
+        self.assertIn("非 OKX 场所", why)
+        self.assertEqual(rig.close_calls, [], "已下架场所绝对不下发平仓指令")
+
+    def test_an_okx_position_still_uses_the_okx_paths(self):
+        """OKX 路径逐位不变。"""
+        rig = _Rig(hard_stop=True)
+        rig._pos = _pos(venue="okx")
+        self._run(rig)
+        self.assertTrue(rig.close_calls)
+        _a, kw = rig.close_calls[0]
+        self.assertEqual(kw.get("venue"), "okx")
 
 
 if __name__ == "__main__":

@@ -45,8 +45,16 @@ _BUDGET_NODE, _BUDGET_PATH = source_scan.find_function_node(
     BRAIN_FACADE, "build_risk_budget_text", **BRAIN_DOMAIN)
 _EXTRA_NODES = {
     name: source_scan.find_function_node(BRAIN_FACADE, name, **BRAIN_DOMAIN)[0]
-    for name in ("_sl_atr_mult_for", "_xvenue_prompt_line")
+    for name in ("_sl_atr_mult_for",)
 }
+
+# 2026-09-30 提示词体系重构：提示词正文**只存** `data/prompt_library.json`，代码里
+# 只剩只读输出 JSON Schema。旧沙箱把 `BASELINE_FILE` 指向一个**不存在**的临时路径，
+# 靠 `_default()` 空库回退拿"代码常量里的正文"——现在那样会拿到**空提示词**
+# （断言要么假红，要么对空串真空通过）。故改为把真基线复制进沙箱当只读种子。
+# ⚠️ 必须在安装 IO 栅栏**之前**（模块导入期）读盘，见本文件 Sandbox.setUp 的 guarded open。
+_BASELINE_SRC = PROJECT / "data" / "prompt_library.json"
+_REAL_BASELINE_TEXT = _BASELINE_SRC.read_text(encoding="utf-8")
 
 APP_TREE = ast.parse((PROJECT / "astra_backend/app.py").read_text())
 OLD_TREE = ast.parse((PROJECT / "tests/ops/test_control_plane_v2.py").read_text())
@@ -57,6 +65,9 @@ class Sandbox(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
+        # 真基线种子：`BASELINE_FILE` 随后被 patch 到 `self.root / "library.json"`，
+        # 先写入再装栅栏，沙箱里的 `get_profile` / `active_profile` 才拿得到真正文。
+        (self.root / "library.json").write_text(_REAL_BASELINE_TEXT, encoding="utf-8")
         self.stack = ExitStack()
         self.addCleanup(self.stack.close)
         self.stack.enter_context(patch.object(prompts, "ROOT", self.root))
@@ -102,9 +113,9 @@ class Sandbox(unittest.TestCase):
                        # 下面两个是被 exec 的节点按**全局名**解析的主脑私有函数。
                        # 本测试刻意不 import trader 模块（隔离），故同样从领域 AST
                        # 取节点注入 —— 它们只被"按名解析"，不参与本测试的实际调用
-                       # （用例传 packages=[]，两个函数体都不会执行）。
-                       _sl_atr_mult_for=_EXTRA_NODES["_sl_atr_mult_for"],
-                       _xvenue_prompt_line=_EXTRA_NODES["_xvenue_prompt_line"])
+                       # （用例传 packages=[]，函数体不会执行）。OKX-only 迁移后
+                       # `_xvenue_prompt_line` 已从主脑域删除，故不再注入。
+                       _sl_atr_mult_for=_EXTRA_NODES["_sl_atr_mult_for"])
         self.ns.update({k: v for k, v in vars(risk_constants).items() if k.isupper()})
         exec(compile(ast.Module(body=[budget_node, node], type_ignores=[]), "scripts/ai_brain_trader.py", "exec"), self.ns)
         self.construct = self.ns["construct_full_market_prompt"]

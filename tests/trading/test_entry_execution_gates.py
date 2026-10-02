@@ -86,12 +86,39 @@ class Harness:
                 self.submitted.append((a, k)),
                 (True, "ord-1") if self.submit_ok else (False, "被拒"))[1],
             trade_open_kwargs=lambda **k: k,
+            # 三所单位不同：实提交口径取不到时逐位回落 OKX 张数（见
+            # 展示口径已统一为**钱**（保证金/名义额）——见 notifications.money_size_text。
+            # 替身照实现形状返回 `(实提交保证金, 实提交名义额)`；取不到即 (None, None)，
+            # 由 entry_execution 回落计划值。
+            venue_executed_facts=lambda ctx: (None, None),
         )
         with redirect_stdout(self.printed):
             return execute_entry_scan(**kwargs)
 
 
 class RefusalGateTest(unittest.TestCase):
+    def test_invalid_market_data_blocks_entry(self):
+        h = Harness()
+        h.factor["market_data_valid"] = False
+        h.brain = {INST: {"decision": {"action": "BUY_LONG", "confidence": 95, "leverage": 3,
+                                       "margin_usdt": 100.0}}}
+        h.run()
+        self.assertEqual(h.submitted, [], "行情无效时禁止开仓")
+        self.assertIn("行情数据不完整或指标缺失", h.printed.getvalue())
+
+    def test_venue_ctx_carries_atr_to_order_submission(self):
+        h = Harness()
+        h.factor["atr"] = 555.0
+        h.brain = {INST: {"decision": {"action": "BUY_LONG", "confidence": 90, "leverage": 3,
+                                       "margin_usdt": 100.0}}}
+        h.sized = 3.0
+        h.run()
+        self.assertEqual(len(h.submitted), 1)
+        _, kwargs = h.submitted[0]
+        ctx = kwargs.get("venue_ctx") or {}
+        self.assertIn("atr", ctx)
+        self.assertEqual(ctx["atr"], 555.0)
+
     def test_illiquid_tradfi_is_skipped(self):
         h = Harness()
         h.factor["type"] = "tradfi"
@@ -143,7 +170,9 @@ class RefusalGateTest(unittest.TestCase):
         h.factor["size_below_exchange_min"] = True
         h.run()
         self.assertEqual(h.submitted, [])
-        self.assertIn("低于交易所最小下单量", h.printed.getvalue(),
+        # 2026-09-28 口径统一：文案说**最小下单名义**（钱），不再说张 ——
+        # 各币种合约面值不同，张数无法横向比较。见 notifications.money_size_text。
+        self.assertIn("低于交易所最小下单名义", h.printed.getvalue(),
                       "跳过要说明是「风险预算推不出合法数量」，不是静默")
 
     def test_initial_entry_below_confidence_is_blocked(self):
@@ -347,6 +376,12 @@ class SubmittedBracketTest(unittest.TestCase):
 
         这里直接扫源码，钉住 `order_submit.py` 的回写键 —— 比断言字符串常量更强，
         因为将来有人重命名字段而忘了本文件时，门会红。
+
+        ⚠️ 2026-09-28 口径统一后分两类：
+        - **展示口径**（`venue_exec_margin` / `venue_exec_notional`）必须有读者；
+        - `venue_exec_sz` 是**审计留档**（各所原生数量单位互不相同），
+          **故意没有展示层读者** —— 展示一律走保证金。它必须仍在写入侧，
+          否则台账/对账会丢字段。
         """
         import re
         from pathlib import Path
@@ -354,7 +389,21 @@ class SubmittedBracketTest(unittest.TestCase):
         written = set(re.findall(r"venue_ctx\[\"([a-z_]+)\"\]", src))
         self.assertEqual(written, {"submitted_px", "submitted_tp", "submitted_sl"},
                          "下单路径回写的字段名变了 ⇒ 通知会静默退回计划值")
-        read = Path("scripts/trader/entry_execution.py").read_text(encoding="utf-8")
+        # 三价由 entry_execution 直接读
+        entry_src = Path("scripts/trader/entry_execution.py").read_text(encoding="utf-8")
         for field in written:
-            self.assertIn(f'"{field}"', read,
+            self.assertIn(f'"{field}"', entry_src,
                           f"读取侧没有取 {field} ⇒ 通知仍是计划值")
+
+    def test_display_layer_never_reads_the_contract_count(self):
+        """★ 回归闸：展示层不得再读张数。
+
+        用户 2026-09-28 拍板「全系统不再用张」——三所数量单位不同、各币种面值
+        算法也不同。若哪天有人又把 `venue_exec_sz` 读进文案，本门必须红。
+        """
+        from pathlib import Path
+        for rel in ("scripts/trader/notifications.py",):
+            src = Path(rel).read_text(encoding="utf-8")
+            body = src.split('"""', 2)[-1]      # 跳过模块 docstring（其中会提到该字段）
+            self.assertNotIn("venue_exec_sz", body,
+                             f"{rel} 又读了原生张数 ⇒ 展示口径回退")

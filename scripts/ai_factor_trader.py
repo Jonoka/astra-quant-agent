@@ -48,10 +48,6 @@ from scripts.trader.position_mgmt import (
 )
 from scripts.trader.leverage import clamp_ai_leverage
 from scripts.trader.sizing import size_for_decision
-from scripts.trader.venue_evidence import (
-    build_venue_candidates as _venue_evidence_candidates,
-    persist_venue_decision as _venue_evidence_persist,
-)
 from scripts.trader.cycle_stages import (
     cycle_disclosure_payload,
     cycle_disclosure_summary,
@@ -62,12 +58,6 @@ from scripts.trader.cycle_stages import (
     fetch_universe_and_manage_positions,
     persist_state_and_sync_ledger,
     preflight_reconcile_and_housekeeping,
-    venue_protection_watchdog_stage,
-)
-from scripts.trader.venue_protection import (
-    read_ledger_rows,
-    audit_cross_venue_protection,
-    watchdog_debounce_step,
 )
 from scripts.trader.entry_execution import (
     execute_entry_scan,
@@ -85,8 +75,6 @@ from scripts.trader.routing_policy import (
     portfolio_budget_guard as _routing_policy_budget_guard,
     portfolio_risk_budget_usdt as _routing_policy_risk_budget,
     route_and_reserve_signal as _routing_policy_route,
-    _decision_payload as _routing_policy_decision_payload,
-    _rejection_focus_reason as _routing_policy_rejection_reason,
 )
 from scripts.trader.venue_query import (
     close_position_confirmed as _venue_query_close_confirmed,
@@ -96,7 +84,6 @@ from scripts.trader.venue_query import (
     _venue_health_stamp as _venue_query_health_stamp,
 )
 from scripts.trader.cloud_protection import (
-    amend_venue_stop_loss as _cloud_protection_amend,
     ensure_cloud_position_protection as _cloud_protection_ensure,
     sync_cloud_algo_stop as _cloud_protection_sync_stop,
     _live_oco_coverage as _cloud_protection_coverage,
@@ -105,12 +92,27 @@ from scripts.trader.order_lifecycle import (
     clean_stale_open_orders as _order_lifecycle_clean,
     reconcile_pending_orders as _order_lifecycle_reconcile,
 )
+# 交易时段闸门（2026-09-30）：判定是纯函数（子模块），配置读取走 store。
+# 两者都**不在 import 期取值**（除函数引用外无绑定）：配置每个周期重读一次，
+# 与 `risk_constants` 的"子进程重新 import ⇒ .env 改参下轮生效"同一语义。
+from scripts.trader.session import (
+    resolve_session as _session_resolve,
+    session_state_summary as _session_summary,
+)
+from astra_backend.trading_session_store import (
+    load_trading_session as _load_trading_session,
+)
 from scripts.trader.ledger_writer import (
     record_open_intent as _ledger_writer_intent,
     record_trade as _ledger_writer_trade,
 )
 from scripts.trader.signal_snapshot import (
     build_signal_snapshot as _signal_snapshot_build,
+)
+from scripts.trader.close_evidence import (
+    append_close_evidence as _close_evidence_append,
+    build_close_evidence as _close_evidence_build,
+    resolve_decision_attribution as _resolve_decision_attribution,
 )
 from scripts.trader.circuit_guard import (
     check_black_swan_sentinel as _circuit_guard_sentinel,
@@ -119,15 +121,14 @@ from scripts.trader.circuit_guard import (
 from scripts.trader.data_shape import (validate_intents_file,
                                        validate_trackers_file)
 from scripts.trader.cycle_snapshot import (
-    broken_execution_venues,
     build_state_payload,
-    collect_pending_inst_ids,
     venue_position_span,
 )
 from scripts.trader.notifications import (
     entry_action_message,
     entry_failure_message,
     trade_open_kwargs,
+    venue_executed_facts,
 )
 from scripts.trader.order_intent import (
     build_order_intent,
@@ -147,7 +148,6 @@ from scripts.trader.gates import (
 from scripts.trader.factors import fetch_single_instrument_data as _fetch_single_instrument_data
 from scripts.trader.position_universe import (
     collect_okx_position_payloads as _collect_okx_position_payloads,
-    merge_cross_venue_positions as _merge_cross_venue_positions,
 )
 from scripts.trader.protection import (
     protection_signals,
@@ -160,7 +160,6 @@ from scripts.trader.protection import (
 # US-003 决策面接线：选所路由（US-002）与预算原子预留（US-001）以模块绑定名引用，
 # 接线级测试 patch 模块属性即可完全离线（零出网/零凭证/零真实预留库）。
 from astra_backend import risk_reservation
-from astra_backend import venue_router
 from astra_backend.exchanges import canonical_base
 from astra_backend.exchanges import registry as venue_registry
 from astra_backend.exchanges import routing_policy
@@ -220,25 +219,6 @@ LEDGER_JSON_FILE = os.path.join(DATA_DIR, "trading_ledger.json")
 # 批E(2026-09-13)：周期收尾的台账/DB spawn 总闸（模块导入时快照——测试用
 # patch.dict(clear=True) 清空环境也抹不掉）。生产不设 ASTRA_LEDGER_SYNC_DISABLED。
 LEDGER_AUTOSYNC_ENABLED = str(os.environ.get("ASTRA_LEDGER_SYNC_DISABLED", "")).strip().lower() not in ("1", "true", "yes")
-# roadmap G8：跨所（Gate/Binance）云端保护单巡检总闸。**默认关闭** —— 置于模块导入时
-# 快照（与 LEDGER_AUTOSYNC_ENABLED 同法）。开闸 = 每周期对外所仓位核验保护腿并在临期
-# 前续期（先挂新后撤旧；绝不猜价位、绝不撤人工腿）。开闸是运营决定，需人工拍板。
-ASTRA_VENUE_PROTECTION_WATCHDOG = str(os.environ.get("ASTRA_VENUE_PROTECTION_WATCHDOG", "0")).strip().lower() in ("1", "true", "yes")
-# 第一百二十九刀：**预演模式**（G8 开闸前的第一步）。置 1 时巡检每周期照常判定，
-# 但**绝不下单/撤单**——只报"如果开闸这一轮会做什么"（审计层的 `dry_run`/`would`）。
-# 与总闸同法：默认关，且总闸未开时本标志无意义（整个巡检不跑）。
-ASTRA_VENUE_PROTECTION_WATCHDOG_DRY_RUN = str(os.environ.get("ASTRA_VENUE_PROTECTION_WATCHDOG_DRY_RUN", "0")).strip().lower() in ("1", "true", "yes")
-# 第一百三十刀：**防抖窗口**（分钟，默认 30）：缺口必须持续这么久才允许真实写单。
-# 续期窗口是 24h，30 分钟远小于它 —— 防的是"瞬时口径波动被当成缺口"。
-# 置 0 = 显式关闭防抖（立即动手）。
-try:
-    ASTRA_VENUE_PROTECTION_WATCHDOG_DEBOUNCE_S = float(
-        os.environ.get("ASTRA_VENUE_PROTECTION_WATCHDOG_DEBOUNCE_MIN", "30")) * 60.0
-except (TypeError, ValueError):
-    ASTRA_VENUE_PROTECTION_WATCHDOG_DEBOUNCE_S = 30 * 60.0
-# 防抖状态（跨周期记忆"这缺口从什么时候开始"）：只记时刻，不记凭证/不记仓位细节
-VENUE_PROTECTION_WATCHDOG_STATE_FILE = os.path.join(
-    DATA_DIR, "venue_protection_watchdog_state.json")
 LOG_FILE = os.path.join(LOGS_DIR, "ai_factor_trader.log")
 POSITION_TRACKER_FILE = os.path.join(DATA_DIR, "position_trackers.json")
 # 2026-09-16：`SIGNAL_JOURNAL_FILE` 常量已删——它把路径**钉死在导入期**，
@@ -324,7 +304,7 @@ from astra_backend.execution.cooldowns import (
 
 def order_margin_gate(planned_margin: float, *, size: float, price: float, ct_val: float,
                       leverage: float, usdt_available: float) -> float:
-    """多所下单保证金闸门。实现与理由见 scripts/trader/gates.py。
+    """下单保证金闸门（OKX 直签链路）。实现与理由见 scripts/trader/gates.py。
 
     风控常量在**调用期**读取（`risk_constants` 的 .env 改参由门面重载刷新）。
     注意：本函数名在**本文件里**出现 3 次（1 定义 + 开多 + 开空），这是计数锚点
@@ -519,9 +499,10 @@ def _run_captured(script, label=None, timeout=15):
     return run_script(script, timeout=t, label=label)
 
 
-# 本进程内被回收枚举实证「凭证已死」的外所集合（审计 2026-09-13：坏键所自动摘除
-# 执行资格，防最低费率赢下评分后死在下单阶段白烧信号）。trader 每轮新进程=每轮
-# 重探，密钥修好后下一轮自动恢复，无需人工。
+# 本进程内被回收枚举实证「凭证已死」的场所集合（审计 2026-09-13：坏键所自动摘除
+# 执行资格，防死在下单阶段白烧信号）。trader 每轮新进程=每轮重探，密钥修好后
+# 下一轮自动恢复，无需人工。OKX 专用化后外所枚举已移除，本集合结构性恒为空，
+# 但保留为 `venue_execution_ready` / `clean_stale_open_orders` 的既有注入面。
 _BROKEN_VENUES: set = set()
 
 
@@ -641,11 +622,6 @@ def close_position_confirmed(inst_id: str, pos_side: str, before_size: float, ve
         query_positions=query_positions,
         fetch_other_venue_positions=fetch_other_venue_positions)
 
-def amend_venue_stop_loss(ad, symbol: str, pos_side: str, new_sl: float,
-                          contracts: float) -> Tuple[bool, str]:
-    """壳（第八十五刀搬至 `scripts/trader/cloud_protection.py`，纯函数无注入）。"""
-    return _cloud_protection_amend(ad, symbol, pos_side, new_sl, contracts)
-
 def prune_trackers(trackers: Dict[str, Any], real_pos_dict: Dict[str, Any]) -> int:
     """Remove stale/non-universe trackers while preserving every live exchange position."""
     valid_keys = {
@@ -666,9 +642,9 @@ def prune_trackers(trackers: Dict[str, Any], real_pos_dict: Dict[str, Any]) -> i
 # =============================================================================
 # 主脑信号进下单流程**之前**必须先过选所路由与预算预留；任一失败 → 本轮不下单
 # （fail-closed），并把选所证据（含 rejected）随决策 JSON 落盘。
-# 封闭性约定（测试依赖）：venue_router / risk_reservation / registry /
-# routing_policy / AI_DECISION_CACHE_FILE 全部按**模块绑定名**在本文件引用，
-# 逐项 patch 即可完全离线；本文件绝不直连除 OKX 直签链路以外的下单端点。
+# 封闭性约定（测试依赖）：risk_reservation / registry / routing_policy /
+# AI_DECISION_CACHE_FILE 全部按**模块绑定名**在本文件引用，逐项 patch 即可
+# 完全离线；本文件绝不直连除 OKX 直签链路以外的下单端点。
 
 AI_DECISION_CACHE_FILE = os.path.join(DATA_DIR, "ai_brain_decisions.json")
 VENUE_HEALTH_FILE = os.path.join(DATA_DIR, "venue_health.json")
@@ -682,11 +658,9 @@ PORTFOLIO_RISK_BUDGET_ENV = "ASTRA_PORTFOLIO_RISK_BUDGET_USDT"
 #: 场所取数健康度可容忍年龄（brain 15min 周期写盘，给 2 个周期 + 余量）
 VENUE_HEALTH_MAX_AGE_S = 1900.0
 
-#: 已接入真实下单实现的场所 → 提交函数。三所对等支持原生受保护开仓。
+#: 已接入真实下单实现的场所 → 提交函数。OKX 专用化后只剩 OKX 一个场所。
 VENUE_SUBMITTERS: Dict[str, str] = {
     "okx": "okx_rest.place_order",
-    "gate": "execution_router.open_protected_position",
-    "binance": "execution_router.open_protected_position",
 }
 
 
@@ -723,17 +697,6 @@ def _venue_health_stamp():
     """壳（第八十六刀搬至 `scripts/trader/venue_query.py`）。"""
     return _venue_query_health_stamp(VENUE_HEALTH_FILE=VENUE_HEALTH_FILE)
 
-def build_venue_candidates(inst_id: str, environment: str) -> List[Dict[str, Any]]:
-    """壳（第八十二刀搬至 `scripts/trader/venue_evidence.py`，调用期注入门面全局）。"""
-    return _venue_evidence_candidates(
-        inst_id, environment,
-        venue_health_stamp=_venue_health_stamp,
-        venue_registry=venue_registry,
-        load_preferred_venue=load_preferred_venue,
-        venue_execution_ready=venue_execution_ready,
-        MAKER_FEE_RATE=MAKER_FEE_RATE,
-        VENUE_HEALTH_MAX_AGE_S=VENUE_HEALTH_MAX_AGE_S)
-
 def reservation_manager():
     """US-001 预留层单一台账（默认 data/risk_reservation.db）。
 
@@ -751,44 +714,24 @@ def estimate_margin_usdt(notional_usdt: float, margin_usdt: float = 0.0) -> floa
     """壳（第八十七刀搬至 `scripts/trader/routing_policy.py`，纯函数）。"""
     return _routing_policy_estimate_margin(notional_usdt, margin_usdt)
 
-def _decision_payload(decision, preferred: str) -> Dict[str, Any]:
-    """壳（第八十七刀搬至 `scripts/trader/routing_policy.py`，纯函数）。"""
-    return _routing_policy_decision_payload(decision, preferred)
-
-def persist_venue_decision(inst_id: str, venue_decision: Dict[str, Any]) -> bool:
-    """壳（第八十二刀搬至 `scripts/trader/venue_evidence.py`）。
-
-    同名注入 `AI_DECISION_CACHE_FILE`：patch 门面常量的既有面保真；
-    flock 包裹的写路径真现在子包（batch3 tripwire 断言指向那里）。
-    """
-    return _venue_evidence_persist(inst_id, venue_decision,
-                                   AI_DECISION_CACHE_FILE=AI_DECISION_CACHE_FILE)
-
-def _rejection_focus_reason(decision, candidates: List[Dict[str, Any]],
-                            preferred: str) -> str:
-    """壳（第八十七刀搬至 `scripts/trader/routing_policy.py`，纯函数）。"""
-    return _routing_policy_rejection_reason(decision, candidates, preferred)
-
-def route_and_reserve_signal(inst_id: str, side: str, size: float, price: float,
+def route_and_reserve_signal(inst_id: str, side: str, price: float,
                              notional_usdt: float = 0.0, margin_usdt: float = 0.0,
-                             intent_id: str = "") -> Dict[str, Any]:
-    """壳（第八十七刀搬至 `scripts/trader/routing_policy.py`，调用期同名注入）。"""
+                             intent_id: str = "", leverage: float = 0.0) -> Dict[str, Any]:
+    """壳（第八十七刀搬至 `scripts/trader/routing_policy.py`，调用期同名注入）。
+
+    ⚠️ 2026-09-28：**不再接收张数** —— 路由层只认钱（保证金/名义额），
+    原生数量只在场所边界出现一次。见 `scripts/trader/routing_policy.py`。
+    """
     return _routing_policy_route(
-        inst_id, side, size, price, notional_usdt, margin_usdt, intent_id,
-        _decision_payload=_decision_payload,
-        _rejection_focus_reason=_rejection_focus_reason,
-        build_venue_candidates=build_venue_candidates,
+        inst_id, side, price, notional_usdt, margin_usdt, intent_id, leverage,
         estimate_margin_usdt=estimate_margin_usdt,
         load_preferred_venue=load_preferred_venue,
-        load_routing_mode=load_routing_mode,
-        persist_venue_decision=persist_venue_decision,
         portfolio_budget_guard=portfolio_budget_guard,
         portfolio_risk_budget_usdt=portfolio_risk_budget_usdt,
         reservation_manager=reservation_manager,
         VENUE_SUBMITTERS=VENUE_SUBMITTERS,
         current_environment=current_environment,
-        risk_reservation=risk_reservation,
-        venue_router=venue_router)
+        risk_reservation=risk_reservation)
 
 def confirm_signal_reservation(reservation: Dict[str, Any]) -> None:
     """审计④6(2026-09-13)：成交后把预算预留 pending→confirmed（仍占预算直至终态）。
@@ -880,6 +823,7 @@ def submit_protected_limit_order(inst_id: str, side: str, pos_side: str, size: f
         current_environment=current_environment,
         fetch_ticker=fetch_ticker,
         okx_rest=okx_rest,
+        quantize_size=quantize_size,
         venue_registry=venue_registry)
 
 
@@ -894,11 +838,27 @@ def _live_oco_coverage(orders: List[Dict[str, Any]], pos_side: str) -> float:
     """壳（第八十五刀搬至 `scripts/trader/cloud_protection.py`）。"""
     return _cloud_protection_coverage(orders, pos_side, _float_or_zero=_float_or_zero)
 
-def ensure_cloud_position_protection(inst_id: str, pos_side: str, size: float, tp_px: float, sl_px: float) -> Tuple[bool, str]:
-    """壳（第八十五刀搬至 `scripts/trader/cloud_protection.py`）。"""
+def ensure_cloud_position_protection(inst_id: str, pos_side: str, size: float, tp_px: float, sl_px: float,
+                                    tp1_px=None, scale_out_ratio: float = 0.5,
+                                    leg_min_sz: float = 0.0,
+                                    prec: int = 2, px_prec=None, legs_state=None,
+                                    simulated: bool = False, split_enabled: bool = True) -> Tuple[bool, str]:
+    """壳（第八十五刀搬至 `scripts/trader/cloud_protection.py`）。
+
+    2026-09-29：新增分批止盈参数透传（`tp1_px`/`scale_out_ratio`/`legs_state` 等）——
+    **壳必须把新参数原样转发**，否则持仓退出路径传进来的双腿意图会被静默丢弃
+    （表现为 `TypeError: unexpected keyword argument 'tp1_x'`）。
+
+    2026-09-30：`leg_min_sz` 同款补转发。它由 `position_exit` 根据**当前持仓的
+    `minSz`** 传入（而非行情表的 `minSz`，两者可能不同），漏转发会让双腿拆分退回
+    实例最小下单量，实测导致腿量凑不满仓位 → 覆盖率卡在 98.13% → 看板报「1 笔缺失止损」。
+    """
     return _cloud_protection_ensure(
         inst_id, pos_side, size, tp_px, sl_px,
-        okx_rest=okx_rest, _live_oco_coverage=_live_oco_coverage)
+        okx_rest=okx_rest, _live_oco_coverage=_live_oco_coverage,
+        tp1_px=tp1_px, scale_out_ratio=scale_out_ratio, leg_min_sz=leg_min_sz,
+        prec=prec, px_prec=px_prec,
+        legs_state=legs_state, simulated=simulated, split_enabled=split_enabled)
 
 def build_signal_snapshot(f: dict) -> dict:
     """壳（第八十二刀搬至 `scripts/trader/signal_snapshot.py`）。
@@ -907,6 +867,31 @@ def build_signal_snapshot(f: dict) -> dict:
     的既有专测面保真。
     """
     return _signal_snapshot_build(f, data_dir=DATA_DIR)
+
+#: 平仓证据归档路径（旁车）。**调用期解析**，与 `_signal_journal_file` 同纪律：
+#: 模块级常量是导入期绑定，`patch.object(aft, "DATA_DIR", tmp)` 对它无效 ——
+#: 测试若不慎触发一次记录就会真写生产 `data/`（`signal_journal.json` 有过前科）。
+def _close_evidence_file() -> str:
+    return os.path.join(DATA_DIR, "closed_trade_evidence.json")
+
+def resolve_decision_attribution(inst_id: str) -> tuple:
+    """壳：从 per-symbol 决策缓存解析 `(decision_source, adopted_role)`。
+
+    调用期解析 `AI_DECISION_CACHE_FILE`，令 `patch.object(aft, ...)` 的既有隔离手法生效。
+    """
+    return _resolve_decision_attribution(inst_id, cache_path=AI_DECISION_CACHE_FILE)
+
+def build_close_evidence(*args, **kwargs):
+    """壳：平仓证据组装（纯计算，实现在 `scripts/trader/close_evidence.py`）。"""
+    return _close_evidence_build(*args, **kwargs)
+
+def append_close_evidence(record) -> bool:
+    """壳：平仓证据原子归档（实现在 `scripts/trader/close_evidence.py`）。
+
+    归档路径**调用期**解析（`patch.object(aft, "DATA_DIR", tmp)` 保真）——
+    测试若碰巧触发一次记录，也只会写进沙箱而不是生产 `data/`。
+    """
+    return _close_evidence_append(_close_evidence_file(), record)
 
 def _signal_journal_file() -> str:
     """**调用期**解析信号日记路径（与 `build_signal_snapshot(data_dir=DATA_DIR)` 同款）。
@@ -1014,6 +999,7 @@ def manage_position_tp_and_trailing(f, curr_pos, trackers, timestamp_full, execu
         record_signal_snapshot=record_signal_snapshot,
         record_trade=record_trade,
         sync_cloud_algo_stop=sync_cloud_algo_stop,
+        venue_registry=venue_registry,
         ASSET_CLASS_PROFILES=ASSET_CLASS_PROFILES,
         TAKER_FEE_RATE=TAKER_FEE_RATE,
         TIME_STOP_ATR_BAND=TIME_STOP_ATR_BAND,
@@ -1022,7 +1008,8 @@ def manage_position_tp_and_trailing(f, curr_pos, trackers, timestamp_full, execu
         _close_trade_payload=_close_trade_payload,
         notify_trade_close=notify_trade_close,
         protection_signals=protection_signals,
-        ratcheted_trailing_stop=ratcheted_trailing_stop)
+        ratcheted_trailing_stop=ratcheted_trailing_stop,
+        resolve_decision_attribution=resolve_decision_attribution)
 
 def execute_ai_position_management(real_pos_dict, trackers, timestamp_full, executed_actions):
     """执行主脑写下的持仓指令。实现与两条安全语义见 scripts/trader/position_mgmt.py。
@@ -1038,7 +1025,6 @@ def execute_ai_position_management(real_pos_dict, trackers, timestamp_full, exec
         okx_rest=okx_rest,
         venue_registry=venue_registry,
         current_environment=current_environment,
-        amend_venue_stop_loss=amend_venue_stop_loss,
     )
 
 # =============================================================================
@@ -1058,6 +1044,22 @@ def evaluate_asset_signal(f):
         is_in_stop_cooldown=is_in_stop_cooldown,
         load_adaptive_config=load_adaptive_config,
     )
+
+def trading_session_state(now_bj=None):
+    """交易时段闸门的**门面壳**：判定纯函数在 `scripts/trader/session.py`。
+
+    为什么是壳而不是别名：本模块的计数/来源锚点与 `patch.object(门面, 名字)` 测试缝
+    都要求"门面里有一个真正的 def"（见 `scripts/trader/__init__.py` 铁律 2）。
+
+    `ASTRA_SESSION_FORCE=1` ⇒ 强制按 `full` 运行（运维显式意图优先于时段配置）。
+    两个消费者：后台「立即运行」端点（子进程带该变量）与测试。
+
+    配置由 `_load_trading_session()` 在**调用期**读取（每周期一份新配置，
+    所以后台保存后下一轮即生效，无需重启任何进程）。
+    """
+    return _session_resolve(_load_trading_session(), now_bj=now_bj,
+                            force=os.getenv("ASTRA_SESSION_FORCE", "") == "1")
+
 
 def _slot_guard_should_skip(now_slot: int) -> bool:
     """同槽重复触发守卫：**判定 + 记录**（第一百三十六刀从装饰器内联抽出）。
@@ -1106,7 +1108,17 @@ def single_trader_cycle(func):
         try:
             now_slot = int(time.time()) // 900
             # 判定 + 记录走助手（原子写 + 读失败告警；见其 docstring）
-            if _slot_guard_should_skip(now_slot):
+            #
+            # ⚠️ 2026-09-30（交易时段闸门）：`ASTRA_SESSION_FORCE=1`（后台「立即运行」
+            # 与测试用）时**仍然写**槽文件、但**不拦截**本轮。理由：休市周期会提前
+            # return，槽文件却已经写下 ⇒ 紧接着的手工强制运行会被"同槽重复"静默吞掉
+            # （实测的坑：点两次「立即运行」只有第一次有效）。写槽保证下一轮**定时**
+            # 周期仍按同槽去重；跳过拦截保证运维的显式意图不被一个状态文件否掉。
+            # 默认不设该变量 ⇒ 现有行为逐位不变。
+            if os.getenv("ASTRA_SESSION_FORCE", "") == "1":
+                _atomic_write_json(TRADER_SLOT_FILE,
+                                   {"slot": now_slot, "started_at": int(time.time()), "pid": os.getpid()})
+            elif _slot_guard_should_skip(now_slot):
                 return None
             lock_handle.seek(0)
             lock_handle.truncate()
@@ -1123,10 +1135,37 @@ def single_trader_cycle(func):
 
 
 # =============================================================================
+# 观望/拦单明细渲染（2026-10 三态可观测性）
+# =============================================================================
+def _format_entry_diagnostics(diag) -> str:
+    """把 `entry_execution.ENTRY_DIAGNOSTICS` 渲染成一行日志文本。
+
+    三态：`模型` = 大模型自己输出 WAIT；`风控` = 物理层拦下了它的开仓意图；
+    `未作答` = 该标的未出现在模型响应里（契约允许省略，按 fail-closed 兜底）。
+    纯展示函数：任何异常都由调用方吞掉，**绝不影响交易**。
+    """
+    label = {"model": "模型", "gate": "风控", "omitted": "未作答"}
+    parts = []
+    for d in diag:
+        source = str(d.get("source") or "model")
+        conf = f"{float(d.get('confidence') or 0.0):.0f}%" if source == "model" else "-"
+        parts.append(f"{d.get('name')}[{label.get(source, source)}{conf}]{d.get('reason') or ''}")
+    return " | ".join(parts)
+
+
+# =============================================================================
 # Master Portfolio Execution Loop
 # =============================================================================
 @single_trader_cycle
 def execute_portfolio():
+    # 0a. 交易时段闸门（2026-09-30）：**在任何网络调用之前**判定，因为它的目的就是省钱。
+    #    窗口内 / 未启用 / ASTRA_SESSION_FORCE=1 ⇒ full（后面逐位照旧）；
+    #    窗口外 ⇒ manage_only（跳过相位 4 的批量主脑调用与新开仓）或 off（相位 0/0a 后退出）。
+    #    ⚠️ 判定本身只读一个本地 JSON + 一个纯函数，失败方向是"按全天候运行 + 告警"。
+    _session = trading_session_state()
+    print(_session_summary(_session))
+    session_restricted = _session["mode"] == "manage_only"
+
     # US-002 fail-closed entry gate: without a static V5 API Key for the frozen
     # cycle environment the engine must physically refuse to trade.
     # current_environment (not selected_environment): the decorator froze the env
@@ -1145,6 +1184,25 @@ def execute_portfolio():
         return None
     entries_blocked, timestamp_full = _preflight
 
+    # 0b. 交易时段 = `off`：相位 0/0a 已经跑完（就绪闸 + 挂单对账 + **超时挂单回收**），
+    #     随后立即退出 —— 不查持仓、不动追踪止损、不叫大模型。
+    #
+    #     ⚠️ 为什么不是"一步都不跑"：`clean_stale_open_orders` 的陈旧判据是 4 分钟
+    #     （`scripts/trader/order_lifecycle.py::STALE_MS`）。若整段休市窗口一次都不跑，
+    #     窗口关闭瞬间仍未成交的**入场限价单会一直挂在交易所**。相位 0/0a 只有 3 次
+    #     只读接口 + 一次撤单机会、零 token，用它换掉"陌生挂单过夜"是划算的。
+    #     ⚠️ 刻意**不**改写 `data/trading_state.json`：那会用一份空状态覆盖看板上的好数据。
+    if _session["mode"] == "off":
+        _disc = cycle_disclosure_payload(
+            broken_venues=_BROKEN_VENUES,
+            entries_blocked=entries_blocked,
+            session=_session)
+        print(cycle_disclosure_summary(_disc))
+        write_cycle_disclosure_snapshot(
+            path=CYCLE_DISCLOSURE_FILE, payload=_disc,
+            _atomic_write_json=_atomic_write_json)
+        return None
+
     # 0.5 只读形状预检：把"读得到但会被静默忽略"的形状问题**尽早指名道姓**
     #     （只警告、不阻断 —— 行为判定在加载侧：意图 fail-closed、追踪器拒绝覆盖）
     _shape_violations = data_shape_preflight_stage(
@@ -1156,20 +1214,13 @@ def execute_portfolio():
     # 1. Fetch Real Positions. A failed account query aborts the complete cycle.
     _phase1 = fetch_positions_and_reconcile(
         entries_blocked=entries_blocked,
-        _BROKEN_VENUES=_BROKEN_VENUES,
-        collect_pending_inst_ids=collect_pending_inst_ids,
         current_environment=current_environment,
-        fetch_other_venue_positions=fetch_other_venue_positions,
-        load_instruments=load_instruments,
         okx_rest=okx_rest,
         query_positions=query_positions,
-        reconcile_reservation_ledger=reconcile_reservation_ledger,
-        venue_execution_ready=venue_execution_ready,
-        broken_execution_venues=broken_execution_venues,
-        venue_registry=venue_registry    )
+        reconcile_reservation_ledger=reconcile_reservation_ledger)
     if _phase1 is None:
         return None
-    (_xv_total, active_pos_count, all_positions, entries_blocked, long_count, pending_inst_ids, real_pos_dict, reserved_long_count, reserved_short_count, reserved_slot_count, short_count, usdt_available, xv_positions_by_venue) = _phase1
+    (active_pos_count, all_positions, entries_blocked, long_count, pending_inst_ids, real_pos_dict, reserved_long_count, reserved_short_count, reserved_slot_count, short_count, usdt_available) = _phase1
 
     # 2. Parallel fetch for the configured crypto universe
     all_factors, executed_actions, trackers = fetch_universe_and_manage_positions(
@@ -1179,6 +1230,8 @@ def execute_portfolio():
         usdt_available=usdt_available,
         TARGET_INSTRUMENTS=TARGET_INSTRUMENTS,
         ThreadPoolExecutor=ThreadPoolExecutor,
+        build_close_evidence=build_close_evidence,
+        append_close_evidence=append_close_evidence,
         fetch_single_instrument_data=fetch_single_instrument_data,
         load_trackers=load_trackers,
         manage_position_tp_and_trailing=manage_position_tp_and_trailing,
@@ -1187,7 +1240,6 @@ def execute_portfolio():
 
     # 4. Check Circuit Breaker & Batch AI Brain Scan (Including Active Positions Detail)
     ASSET_MARGIN_CAP, brain_cache, cb_active, cb_reason = scan_risk_gates_and_ai_brain(
-        _xv_total=_xv_total,
         venue_position_span=venue_position_span,
         active_pos_count=active_pos_count,
         all_factors=all_factors,
@@ -1197,10 +1249,8 @@ def execute_portfolio():
         timestamp_full=timestamp_full,
         trackers=trackers,
         usdt_available=usdt_available,
-        xv_positions_by_venue=xv_positions_by_venue,
         MAX_CONCURRENT_POSITIONS=MAX_CONCURRENT_POSITIONS,
         _collect_okx_position_payloads=_collect_okx_position_payloads,
-        _merge_cross_venue_positions=_merge_cross_venue_positions,
         effective_single_asset_margin=effective_single_asset_margin,
         execute_ai_position_management=execute_ai_position_management,
         execute_batch_ai_brain_cycle=execute_batch_ai_brain_cycle,
@@ -1209,9 +1259,14 @@ def execute_portfolio():
         pool_state=pool_state,
         query_positions=query_positions,
         read_cycle_health=read_cycle_health,
-        save_trackers=save_trackers    )
+        real_pos_dict=real_pos_dict,
+        save_trackers=save_trackers,
+        session_restricted=session_restricted    )
 
-    if not cb_active and pool_is_trustworthy():
+    # 交易时段窗口外（manage_only）：`brain_cache` 必为空 ⇒ 入场扫描只会逐标的打印
+    # "本轮无有效新鲜 AI 决策，禁止开仓"然后 continue。既然一个仓位都开不出来，
+    # 就不必跑这段循环（它同时省掉一次全标的的信号求值）。
+    if not cb_active and pool_is_trustworthy() and not session_restricted:
         execute_entry_scan(
             all_factors=all_factors,
             brain_cache=brain_cache,
@@ -1254,39 +1309,44 @@ def execute_portfolio():
             size_for_decision=size_for_decision,
             submit_protected_limit_order=submit_protected_limit_order,
             trade_open_kwargs=trade_open_kwargs,
+            venue_executed_facts=venue_executed_facts,
         )
 
-    # 4b. 跨所云端保护单巡检（roadmap G8）：Gate/Binance 的触发单带 expiration，
-    # 到期后仓位裸奔，而主链的 OKX 保护核验够不到跨所仓位（合成 id 匹配不上）。
-    # **默认关闭**（ASTRA_VENUE_PROTECTION_WATCHDOG=1 才跑）：本刀只接线，线上行为零变化。
-    # 开闸前先用 `ASTRA_VENUE_PROTECTION_WATCHDOG_DRY_RUN=1` 预演一轮：照常判定但不写单，
-    # 日志逐条给出"本来会做"的动作（见该函数 docstring）。
-    _wd_report = venue_protection_watchdog_stage(
-        xv_positions_by_venue=xv_positions_by_venue,
-        executed_actions=executed_actions,
-        venue_registry=venue_registry,
-        current_environment=current_environment,
-        ASTRA_VENUE_PROTECTION_WATCHDOG=ASTRA_VENUE_PROTECTION_WATCHDOG,
-        # 第一百二十九刀：预演模式（总闸未开时无意义）——开闸前先看"会做什么"。
-        dry_run=ASTRA_VENUE_PROTECTION_WATCHDOG_DRY_RUN,
-        # 第一百三十刀：防抖 —— 缺口必须持续够久才允许真实写单（状态不可读写则不写单）。
-        state_path=VENUE_PROTECTION_WATCHDOG_STATE_FILE,
-        debounce_s=ASTRA_VENUE_PROTECTION_WATCHDOG_DEBOUNCE_S,
-        debounce_step=watchdog_debounce_step,
-        audit_cross_venue_protection=audit_cross_venue_protection,
-        # 第一百七十四刀：台账行（只读；读不到 ⇒ None ⇒ 不产生 ledger 证据）
-        ledger_rows=read_ledger_rows(LEDGER_JSON_FILE),
-    )
+    # 4a-bis. 观望/拦单明细落盘（2026-10 三态可观测性）。
+    #
+    # 为什么必须单独落一行：`entry_execution._record_entry_diagnostic` 收集到的三态
+    # 此前**根本没有落到任何日志**——`logs/` 全目录搜不到每标的的观望原因，事后只能看
+    # 决策缓存里那一行被三种语义共用的 `summary_reason`。于是"为什么一直观望"无法审计。
+    #
+    # 放在门面（而不是 `persist_state_and_sync_ledger`）的原因：后者是**AST 逐字**抽取段，
+    # 往里加逻辑会破坏抽取门的不变量；此处只读模块级明细 + 追加一行，零交易语义。
+    # 失败一律吞掉：可观测性绝不允许影响交易。
+    try:
+        from scripts.trader.entry_execution import ENTRY_DIAGNOSTICS as _entry_diag
+        _omitted = 0
+        if isinstance(brain_cache, dict):
+            _omitted = sum(1 for f in all_factors if f.get("instId") not in brain_cache)
+        # 只有在**入场扫描真的跑了**时才写这一行（与上面调用点的守卫同一条件）：
+        # 行存在 ⇒ 逐标的裁决已审计；行缺失 ⇒ 本轮根本没扫（熔断/池不可信/非交易时段）。
+        # 否则"没有这行"会被误读成"没有观望"，而两者含义完全相反。
+        if not cb_active and pool_is_trustworthy() and not session_restricted:
+            _detail = _format_entry_diagnostics(_entry_diag) or "全标的均未产生观望"
+            _line = (f"[{timestamp_full}] 🔍 观望明细 "
+                     f"({_omitted}/{len(all_factors)} 未作答): {_detail}\n")
+            with open(LOG_FILE, "a", encoding="utf-8") as _fh:
+                _fh.write(_line)
+            print(_line.strip())
+        _entry_diag.clear()
+    except Exception as _diag_err:
+        print(f"[观望明细] 落盘失败（不影响交易）: {_diag_err}")
 
-    # 4c. 行情取数健康快照（第 137 刀事故的可观测性闭环）：把本轮的取数
+    # 4b. 行情取数健康快照（第 137 刀事故的可观测性闭环）：把本轮的取数
     # 失败计数/耗时/最近成功时刻落盘，供后端 `/metrics` 跨进程读取。
     # 只写一个 JSON、失败只返回 False（绝不抛异常、绝不改变交易行为）。
     write_market_data_health_snapshot(path=MARKET_DATA_HEALTH_FILE)
 
     # 5. Persist Latest State for Web Monitoring Dashboard
     persist_state_and_sync_ledger(
-        _xv_total=_xv_total,
-        xv_positions_by_venue=xv_positions_by_venue,
         venue_position_span=venue_position_span,
         active_pos_count=active_pos_count,
         all_factors=all_factors,
@@ -1314,8 +1374,7 @@ def execute_portfolio():
         broken_venues=_BROKEN_VENUES,
         entries_blocked=entries_blocked,
         shape_violations=_shape_violations,
-        watchdog_report=_wd_report,
-        watchdog_enabled=ASTRA_VENUE_PROTECTION_WATCHDOG)
+        session=_session)
     print(cycle_disclosure_summary(_disc))
     write_cycle_disclosure_snapshot(
         path=CYCLE_DISCLOSURE_FILE, payload=_disc,

@@ -20,6 +20,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from scripts.trader.order_submit import submit_protected_limit_order
+from tests.venue_gate_stub import direct_venue_gate_adapter as _direct_venue_gate_adapter
 
 INST = "BTC-USDT-SWAP"
 
@@ -78,7 +79,11 @@ class Rig:
             current_environment=lambda: SimpleNamespace(
                 simulated=self.simulated, mode="demo" if self.simulated else "live"),
             fetch_ticker=lambda i: {"last": self.ticker},
-            okx_rest=self.okx, venue_registry=_Reg())
+            okx_rest=self.okx,
+            # 2026-09-28：OKX 边界从**保证金**换算张数（与币安/Gate 同口径）
+            quantize_size=lambda raw, step: (float(int(raw / (step or 1)) * (step or 1))
+                                             if raw > 0 else 0.0),
+            venue_registry=_Reg())
         params.update(over)
         # ⚠️ 隔离**真实**的 listing gate 与几何复验：
         # ① 真目录里没有我造的 `BTC_OKX` ⇒ 它会 fail-closed 拒单（那是它工作正常，
@@ -93,7 +98,8 @@ class Rig:
         with _listing, \
              patch("scripts.order_risk.validate_quote_geometry_and_rr",
                    side_effect=lambda *a, **k: (self.geometry_calls.append(a),
-                                                self.geometry)[1]):
+                                                self.geometry)[1]), \
+             _direct_venue_gate_adapter():
             return submit_protected_limit_order(
                 INST, "buy" if pos_side == "long" else "sell", pos_side, 3.0,
                 self.price, self.tp, self.sl, venue_ctx=venue_ctx, **params)
@@ -161,6 +167,8 @@ class PriceAnchorGateTest(unittest.TestCase):
                 MAX_LEVERAGE=20, MIN_LEVERAGE=1, canonical_base=lambda i: i.split("-")[0],
                 current_environment=lambda: SimpleNamespace(simulated=False, mode="live"),
                 fetch_ticker=lambda i: {"last": "100000"}, okx_rest=rig.okx,
+                quantize_size=lambda raw, step: (float(int(raw / (step or 1)) * (step or 1))
+                                                 if raw > 0 else 0.0),
                 venue_registry=_Reg())
 
     def test_buy_above_market_beyond_cross_threshold_is_rejected(self):
@@ -186,55 +194,6 @@ class PriceAnchorGateTest(unittest.TestCase):
     def test_far_but_plausible_pullback_is_allowed(self):
         rig, (ok, why) = self._run_with(price=97000.0)
         self.assertTrue(ok, f"回踩方向的远挂单是合法策略，不该被闸掉：{why}")
-
-
-class MultiVenueRouteTest(unittest.TestCase):
-    def _run(self, router, venue="binance"):
-        rig = Rig(venue=venue, routing={"ok": True, "reservation": "res-9", "venue": venue})
-        # ⚠️ 必须 patch **真模块的属性**：代码写的是 `from astra_backend import execution_router`
-        # ⇒ 一旦该模块被别处导入过，`from … import …` 走的是**包属性**，
-        # `patch.dict(sys.modules, {...})` 塞的假模块**不会被用到**（单跑本文件时恰好没导入过，
-        # 于是"单跑绿、全量红"）。这正是隔离类缺陷的典型形态。
-        import astra_backend.execution_router as real_router
-        with patch.object(real_router, "open_protected_position", side_effect=router), \
-             patch("astra_backend.exchanges.listing.ensure_contract_listed",
-                   return_value=SimpleNamespace(ok=True, reason="")), \
-             patch("scripts.order_risk.validate_quote_geometry_and_rr",
-                   return_value=(True, "", 1.0)):
-            return rig, rig.run(venue_ctx={"notional_usdt": 100, "margin_usdt": 50,
-                                           "leverage": 5, "confidence": 90})
-
-    def test_router_success_records_intent_and_confirms(self):
-        calls = []
-
-        def router(payload, **kw):
-            calls.append((payload, kw))
-            return {"ok": True, "order_id": "bn-1"}
-
-        rig, (ok, order_id) = self._run(router)
-        self.assertTrue(ok)
-        self.assertEqual(order_id, "bn-1")
-        self.assertEqual(calls[0][0]["venue"], "binance")
-        self.assertEqual(calls[0][0]["asset"], "BTC")
-        self.assertEqual(calls[0][0]["leverage"], 5.0)
-        self.assertEqual(calls[0][0]["confidence"], 90.0, "per-venue 置信度门禁要用原始 AI 置信度")
-        self.assertEqual(rig.recorded, [(INST, "buy")])
-        self.assertEqual(rig.confirmed, ["res-9"])
-
-    def test_router_refusal_releases_the_reservation(self):
-        rig, (ok, why) = self._run(lambda payload, **kw: {"ok": False, "detail": "深度不足"})
-        self.assertFalse(ok)
-        self.assertIn("BINANCE 下单失败", why)
-        self.assertEqual(rig.released, [("res-9", "深度不足")])
-        self.assertEqual(rig.confirmed, [])
-
-    def test_router_exception_releases_and_reports(self):
-        def boom(payload, **kw):
-            raise RuntimeError("路由器炸了")
-        rig, (ok, why) = self._run(boom)
-        self.assertFalse(ok)
-        self.assertIn("执行异常", why)
-        self.assertEqual(rig.released, [("res-9", "多所执行异常: 路由器炸了")])
 
 
 class OkxDirectTest(unittest.TestCase):

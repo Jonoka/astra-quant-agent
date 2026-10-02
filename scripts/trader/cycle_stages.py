@@ -8,7 +8,7 @@
 | `fetch_universe_and_manage_positions` | 14 行 | 相位 2-3：并发取标的池因子 + 逐仓追踪止损退出 |
 | `persist_state_and_sync_ledger` | 30 行 | 相位 5-6：面板状态持久化 + 生命周期台账/SQLite 实时同步 |
 | `scan_risk_gates_and_ai_brain` | 50 行 | 相位 4 前段：熔断判定 + 单标的保证金上限自适应 + 主脑批量扫描（LLM 批次 + 持仓全景装配 + AI 健康告警）+ 池可信闸（**无 return；4 项输出**） |
-| `fetch_positions_and_reconcile` | 115 行 | 相位 1：取真实持仓 + 合约对账 + 跨所汇总 + 挂单盲区守卫 + 预留对账（**4 处 `return None` = 本周期中止**；13 项输出） |
+| `fetch_positions_and_reconcile` | 相位 1：取真实持仓 + 挂单盲区守卫 + 预留对账（**4 处 `return None` = 本周期中止**；11 项输出） |
 | `preflight_reconcile_and_housekeeping` | 26 行 | 相位 0/0a：引擎就绪闸 + 挂单对账 + 陈旧单回收 + 舆情采集（**段内 `return None` = 本周期中止**） |
 
 ## 准入判据（沿用第九十刀定式）
@@ -16,13 +16,13 @@
 两段均 **0 个 `return`、0 个 `break`**；段内写入的外围量要么作为返回值回传，
 要么无人再读（`persist_state_and_sync_ledger` 无输出 ⇒ 纯副作用段）。
 所有自由名（外围局部量 + 门面全局）一律**同名 kw-only 入参** ⇒ 段体 **AST 逐字**。
+
+⚠️ **OKX 专用化**：跨所汇总（外所持仓快照 / 外所挂单枚举 / 外所凭证坏所探测 /
+外所仓位接管 `venue_position_record`）与跨所保护巡检
+（`venue_protection_watchdog_stage` + 防抖状态读写）已随多所执行面整体移除。
+本系统只在 OKX 上持仓；历史/外所行一律**只读容错**（不接管、不清算、不进配额）。
 """
 from __future__ import annotations
-
-import json
-import os
-import time
-from typing import Any, Dict, List, Optional, Tuple
 
 
 def fetch_universe_and_manage_positions(*,
@@ -32,6 +32,8 @@ def fetch_universe_and_manage_positions(*,
         usdt_available,
         TARGET_INSTRUMENTS,
         ThreadPoolExecutor,
+        build_close_evidence,
+        append_close_evidence,
         fetch_single_instrument_data,
         load_trackers,
         manage_position_tp_and_trailing,
@@ -43,13 +45,55 @@ def fetch_universe_and_manage_positions(*,
     # 3. Process Positions & Dynamic Trailing Exits
     executed_actions = []
     trackers = load_trackers()
+    _trackers_snapshot = {k: dict(v) for k, v in trackers.items() if isinstance(v, dict)} if isinstance(trackers, dict) else {}
     stale_tracker_count = prune_trackers(trackers, real_pos_dict)
     if stale_tracker_count:
+        # 为在两轮巡检之间由交易所云端 OCO（移动止损/止盈）平仓的持仓补记平仓证据
+        for k, tr in _trackers_snapshot.items():
+            if k not in trackers:
+                try:
+                    append_close_evidence(
+                        build_close_evidence(
+                            tracker=tr,
+                            position_key=k,
+                            exit_cause="exchange_closed",
+                            closed_at=timestamp_full,
+                        ),
+                    )
+                except Exception:
+                    pass
         executed_actions.append(f"清理 {stale_tracker_count} 条已失效持仓追踪记录")
     for f in all_factors:
         curr_pos = f["position"]
         if curr_pos:
-            manage_position_tp_and_trailing(f, curr_pos, trackers, timestamp_full, executed_actions)
+            # 平仓前追踪器快照 + 机制级离场原因归档（2026-10）：
+            # 追踪器在平仓分支里被 `pop`，`highWaterMark`/`lowWaterMark`/开仓快照
+            # 随之消失；而返回值第二项**就是**机制级离场原因，旧实现直接丢弃，
+            # 于是台账只能按盈亏金额猜出场原因（实测 41% 是"止盈推定"）。
+            #
+            # ⚠️ 这里**不自己拼追踪器 key**（`f['instId'] + '_' + curr_pos['side']`）：
+            # 那会与 `position_exit.py` 的拼法重复一份，任一侧漂移就静默错配、证据
+            # 挂到别的仓上。改用**调用前后差集**定位被摘掉的那一条 —— 调用点只关心
+            # "谁没了"，不关心 key 怎么拼。
+            _keys_before = set(trackers)
+            _snapshot_before = {k: dict(trackers[k]) for k in _keys_before
+                                if isinstance(trackers.get(k), dict)}
+            # 返回值契约是 `(是否已平, 离场原因)`；但**旧调用方一直丢弃它**，
+            # 故桩/替身很可能返回 None。宽容解包：认不出就按"未平仓"处理
+            # （宁可不留证据，也不把"没平"错记成"已平"）。
+            _outcome = manage_position_tp_and_trailing(f, curr_pos, trackers, timestamp_full, executed_actions)
+            _closed, _exit_cause = (_outcome if isinstance(_outcome, tuple) and len(_outcome) == 2
+                                    else (False, ""))
+            _removed = [k for k in _keys_before if k not in trackers]
+            if _closed and len(_removed) == 1:
+                append_close_evidence(
+                    build_close_evidence(
+                        tracker=_snapshot_before.get(_removed[0]) or {},
+                        position_key=_removed[0],
+                        exit_cause=_exit_cause,
+                        closed_at=timestamp_full,
+                    ),
+                )
     save_trackers(trackers)
     # ⚠️ 不返回 `f`：原文段后对 `f` 的那次读（`f.write(log_entry)`）是
     # `with open(LOG_FILE) as f` **自己绑定的文件句柄**，与标的字典无关
@@ -58,8 +102,6 @@ def fetch_universe_and_manage_positions(*,
 
 
 def persist_state_and_sync_ledger(*,
-        _xv_total,
-        xv_positions_by_venue,
         venue_position_span,
         active_pos_count,
         all_factors,
@@ -91,7 +133,7 @@ def persist_state_and_sync_ledger(*,
     _atomic_write_json(os.path.join(DATA_DIR, "trading_state.json"), state_payload)
 
     # 6. Always Sync Full Lifecycle Ledger and SQLite DB in Realtime
-    # 批E(2026-09-13)·测试封闭闸：这两条 spawn 会打三所接口并**重写生产台账/数据库**。
+    # 批E(2026-09-13)·测试封闭闸：这两条 spawn 会重写生产台账/数据库。
     # 测试若在进程内跑一轮交易员巡检（多处如此），就会连带改写 data/trading_ledger.json
     # 与 SQLite——违反「测试不触生产文件」。tests/__init__.py 在任何测试模块导入前置位
     # ASTRA_LEDGER_SYNC_DISABLED=1，下面的模块级快照即 False；生产不设 → 行为不变。
@@ -108,8 +150,6 @@ def persist_state_and_sync_ledger(*,
 
     position_span = venue_position_span(okx_count=active_pos_count, okx_long=long_count,
                                         okx_short=short_count,
-                                        xv_positions_by_venue=xv_positions_by_venue,
-                                        xv_total=_xv_total,
                                         max_positions=MAX_CONCURRENT_POSITIONS)
     log_entry = f"[{timestamp_full}] ⚡ AstraQuant v{__version__} 巡检完成 | {position_span} | 动作: {', '.join(executed_actions) if executed_actions else '无开平仓操作'}\n"
     with open(LOG_FILE, "a", encoding="utf-8") as f:
@@ -161,26 +201,18 @@ def preflight_reconcile_and_housekeeping(*,
 
 def fetch_positions_and_reconcile(*,
         entries_blocked,
-        _BROKEN_VENUES,
-        collect_pending_inst_ids,
         current_environment,
-        fetch_other_venue_positions,
-        load_instruments,
         okx_rest,
         query_positions,
-        reconcile_reservation_ledger,
-        venue_execution_ready,
-        broken_execution_venues,
-        venue_registry):
-    """相位 1：取真实持仓 + 合约对账 + 跨所汇总 + 挂单盲区守卫 + 预留对账。
+        reconcile_reservation_ledger):
+    """相位 1：取真实持仓 + 挂单盲区统计 + 预留对账。
 
     段内 4 处 `return None` 语义 = **本周期中止**（调用点判 None 后 `return None`）。
-    `entries_blocked` 是 **in-out**：段内只在"跨所读取失败"分支里被置 True，
-    其余路径不碰它 —— 若不把上游（preflight）的值传进来，未命中分支时它会
-    **未绑定**（首版即如此，空世界 smoke 当场抓出 `UnboundLocalError`）。
-    其余 12 项输出在本段内均"必然绑定"（确定赋值分析），无需入参。
+    `entries_blocked` 是 **in-out**：原实现只在"跨所读取失败"分支里被置 True，
+    该分支已随多所执行面移除 ⇒ 本段现在原样透传上游（preflight）的值。
+    其余输出在本段内均"必然绑定"（确定赋值分析），无需入参。
 
-    ⚠️ **输入失败语义表**（第一百二十八刀逐项实测，改动前先读）：
+    ⚠️ **输入失败语义表**（改动前先读）：
 
     | 输入 | 读失败时的行为 | 决策方是否被告知 |
     |---|---|---|
@@ -189,19 +221,10 @@ def fetch_positions_and_reconcile(*,
     | OKX 余额 `balances` | **整周期 abort** | 日志 |
     | 清理存量挂单 `clean_stale_open_orders` | **整周期 abort** | 日志 |
     | OKX 挂单对账（preflight `reconcile_pending_orders`） | `entries_blocked=True`（禁新开仓） | 日志 |
-    | 跨所**持仓** `fetch_other_venue_positions` | `entries_blocked=True` + 预留对账**不释放** + 提示词写"未知(拉取失败)" | 日志/提示词 |
-    | 跨所**挂单** `collect_pending_inst_ids` | 预留对账**不释放**（第一百二十七刀）；⚠️ **不拦新开仓**，且槽位/同向占用**少算** | 仅 warn |
-    | 凭证已死场所 `broken_venues` | 跳过该所枚举（不报错、不拦）；其持仓/挂单**不进配额与敞口** | 收侧 CRITICAL + **每周期"未计入"告警**（第一百三十一刀）|
 
-    ⚠️ **凭证已死场所**（执行闸开着但密钥失效）另有一条边界：该所**读不出来**（不是没有仓），
-    其仓位/挂单不进配额与敞口；现状是"跳过 + 每周期明确告知未计入"，
-    而非 fail-closed 拦新开仓 —— 后者与既有审计#4教训（"拿凭证错误拦全链=交易停摆"）冲突，
-    故列为**待人工拍板**（面板/提示词的跨所笔数仍不含该所）。
-
-    唯一**残留缺口**是"跨所挂单枚举失败不拦新开仓"：计数少算是**仓位数口径**
-    （槽位/同向上限），不涉及 USDT 预算（预算由预留台账与敞口闸把关）。
-    改 fail-closed 是**实盘行为变更**（可能因某所一次读失败而停一轮新开仓，
-    但也可能因某所**每轮**都失败的良性异常而长期静默停止开仓）⇒ 已列入待人工拍板。
+    ⚠️ **OKX 专用化**：跨所持仓快照 / 外所挂单枚举 / 外所凭证坏所探测 / 外所仓位
+    接管（`venue_position_record`）已随多所执行面整体移除——本系统只在 OKX 上持仓，
+    历史外所行只做**只读容错**（不接管、不清算），绝不进配额与敞口。
     """
     positions_ok, all_positions, positions_error = query_positions()
     if not positions_ok:
@@ -250,121 +273,20 @@ def fetch_positions_and_reconcile(*,
                 pending_long_count += 1
             elif pos_side == "short":
                 pending_short_count += 1
-    # 审计(2026-09-13)·外所挂单盲区修复：本守卫此前只数 OKX 在途单，路由派往
-    # binance/gate 的单对周期不可见 → 同信号逐轮在外所重复挂单（实锤：binance
-    # demo BTC/SUI 各成对）。执行闸开的场并入同一把尺；凭证已死的场收侧已吼
-    # CRITICAL 且 router 同样发不出单，此处静默跳过不重复报警。
-    _auth_markers = ("INVALID_KEY", "Invalid key", "Invalid API-key", "-2015", "50111",
-                     "signature", "Signature", "not exist", "invalid timestamp")
     try:
-        _gv_mode = str(current_environment().mode or "")
-    except Exception:
-        _gv_mode = ""
-    # ⚠️ 第一百二十七刀：**记录**挂单枚举的失败（仍然照原样打印，输出不变）。
-    # 该失败此前只 warn 就丢，而 `xv_ok` 只覆盖**持仓**读取 —— 于是存在这样一个组合：
-    # 某所持仓读成功（`xv_ok=True`）但**挂单读失败**，若该所恰好有一笔**未成交**的
-    # 入场单（还没有持仓），对账器的"无仓无挂"判据就会成立并把它的预留按超 TTL 释放
-    # （释放不可逆 ⇒ 预算台账少算在场活单）。持仓侧已由 `venue_snapshot_verified`
-    # 把关；这里把**挂单侧**一并纳入同一个"实况是否核验"标志。
-    # ⚠️ 第一百三十一刀：**凭证已死场所必须每周期明说"未计入"**。
-    # 此前只有回收侧一次性 CRITICAL，之后本函数静默 `continue` —— 而
-    # `venue_execution_ready` 见 `_BROKEN_VENUES` 即否决，`fetch_other_venue_positions`
-    # 也随之跳过该所（返回 ok=True 且**无错误**）⇒ 该所的持仓/挂单**不进**配额与敞口，
-    # 且跨所笔数看起来"完整"。口径：凭证死的所**读不出来**（不是没有仓），
-    # 所以这里如实登记"未计入"，绝不假装干净。
-    # 判据精确到"执行闸开着（本该能交易）却不可就绪" ⇒ 只可能是凭证已死：
-    # registry 未登记/闸没开属于"结构性无该所"，不是本告警的范围。
-    try:
-        _xv_broken = list(broken_execution_venues(
-            ("gate", "binance"), _gv_mode, venue_registry=venue_registry,
-            venue_execution_ready=venue_execution_ready))
-    except Exception as _bv_exc:
-        _xv_broken = []
-        print(f"[跨所封顶] warn 坏所探测异常（不影响本周期）: {_bv_exc}")
-    if _xv_broken:
-        print(f"[跨所封顶] warn {'/'.join(_xv_broken)} 凭证已死（执行闸开着却不可就绪）——"
-              "该所持仓/挂单**未计入**本周期配额与敞口（跨所笔数不含该所），"
-              "修好密钥后自动恢复；请勿据面板跨所笔数当作全景")
-
-    _pending_enum_errors: list = []
-
-    def _pending_warn(_msg):
-        _pending_enum_errors.append(_msg)
-        print(_msg)
-
-    # ⚠️ 第二百二十刀（**回归修复**，勿改回整体赋值）：上面刚从 OKX 挂单数出的
-    # `pending_inst_ids`/`pending_long_count`/`pending_short_count` 是**基准值**，
-    # 外所枚举（bb6cb57 抽出的 `collect_pending_inst_ids`）当年是**并进**它们；
-    # 抽取时写成了整体赋值 ⇒ OKX 在途挂单被**静默丢弃**，后果两条：
-    #   ① `reserved_slot_count`/同向计数少算 OKX 在途单 ⇒ 开仓闸可能**超发槽位**；
-    #   ② `reconcile_reservation_ledger` 拿到的集合里没有 OKX 在场活单 ⇒
-    #      对账器据「无仓无挂」把它当陈旧占用**释放**（释放不可逆，正是该函数
-    #      docstring 点名的第一类错误）。
-    # 恢复为**并集**：两处枚举各管一段（OKX 走本地 loop、外所走适配器），谁都不是对方的替代。
-    _xv_pending_ids, _xv_pending_long, _xv_pending_short = \
-        collect_pending_inst_ids(
-            venues=("gate", "binance"), venue_mode=_gv_mode,
-            broken_venues=_BROKEN_VENUES, venue_registry=venue_registry,
-            load_instruments=load_instruments, auth_markers=_auth_markers,
-            warn=_pending_warn)
-    pending_inst_ids |= {str(_x) for _x in (_xv_pending_ids or set()) if _x}
-    pending_long_count += int(_xv_pending_long or 0)
-    pending_short_count += int(_xv_pending_short or 0)
+        _env_mode = str(current_environment().mode or "")
+    except Exception as _env_exc:
+        _env_mode = ""
+        print(f"[周期环境] warn 周期冻结环境不可得（{_env_exc}），按不可信环境处理")
     reserved_slot_count = active_pos_count + len(pending_inst_ids)
     reserved_long_count = long_count + pending_long_count
     reserved_short_count = short_count + pending_short_count
-    # ⚠️ 第一百二十八刀（**已知残留缺口**，等策略拍板）：外所挂单枚举失败时，
-    # 上面三个计数**少算**该所的在场单，而执行层的开仓闸用的正是它们
-    # （`reserved_slot_count < MAX_CONCURRENT_POSITIONS` 与同向上限）⇒ 本周期可能
-    # **超发槽位**。位置读取失败会 `entries_blocked=True`（禁新开仓），挂单侧目前**不拦**。
-    # 口径边界：只影响**仓位数**（槽位/同向），**不涉及 USDT 预算** —— 预算由预留台账
-    # 与敞口闸另行把关。本行只做**如实告知**（零行为变更）；是否改 fail-closed 见
-    # `fetch_positions_and_reconcile` docstring 的"输入失败语义表"。
-    if _pending_enum_errors:
-        print(f"[跨所封顶] warn 外所挂单未枚举成功（{len(_pending_enum_errors)} 所）——"
-              f"本周期槽位/同向占用**少算**该所在场单（{reserved_slot_count} 为下限），"
-              "若照常放行新开仓可能突破仓位上限（仅仓位数口径；USDT 预算不受影响）")
-
-    # 1a. 跨所封顶（三所平权开单后的风控收口）：开闸所（gate/binance）的
-    # 活跃持仓计入总仓/同向配额；读取失败 → 本周期禁止新增开仓（fail-closed，
-    # 与挂单对账同一把尺——宁停不错）。孤儿仓只计数不处置（可能是用户手动仓）。
-    try:
-        _xv_env = str(current_environment().mode)
-    except Exception as _xv_exc:
-        _xv_env = ""
-        print(f"[跨所封顶] warn 周期冻结环境不可得（{_xv_exc}），按不可信环境处理")
-    xv_ok, xv_positions_by_venue, xv_error = fetch_other_venue_positions(_xv_env)
-    # 巡检文案口径（审计 D 级）：持仓数历来只报 OKX，跨所持仓仅在封顶逻辑里
-    # 出现——面板/日志读起来「0/8」像全空，实际外所可能有数笔。此处统一算出
-    # 跨所笔数供 AI 提示词与巡检日志；拉取失败显式标「未知」，绝不装 0。
-    _xv_total = sum(len(v or []) for v in (xv_positions_by_venue or {}).values()) if xv_ok else None
-    xv_enabled = bool(_xv_env) and any(venue_execution_ready(v, _xv_env)
-                                       for v in ("gate", "binance"))
-    if (xv_enabled or not _xv_env) and not xv_ok:
-        print(f"[跨所封顶] fail-closed 本周期禁止新增开仓: {xv_error or '环境轴不可得'}")
-        entries_blocked = True
-    else:
-        for _v, _rows in (xv_positions_by_venue or {}).items():
-            for _p in _rows:
-                print(f"[跨所封顶] {_v} {_p.get('inst_id')} {_p.get('side')} "
-                      f"size={_p.get('size_signed')} 纳入本周期仓位配额（只计数不处置）")
-                reserved_slot_count += 1
-                if str(_p.get("side", "")).lower() == "long":
-                    reserved_long_count += 1
-                else:
-                    reserved_short_count += 1
 
     # 1b. US-010 预留对账：基于本周期刚核验的持仓/挂单实况回笼陈旧占用
     #     （活仓/在途挂单一律保留；无仓无挂且超 TTL 才 closed——宁慢不错杀）。
+    #     跨所实况旗标不再需要：系统只有一个场所，上面两个枚举就是全量。
     try:
-        reconcile_reservation_ledger(real_pos_dict, pending_inst_ids, _xv_env,
-                                     venue_snapshot=xv_positions_by_venue,
-                                     # ⚠️ 第一百二十六/二十七刀：把"这次跨所**实况**到底
-                                     # 核验成功没有"一并交给对账器 —— 持仓（`xv_ok`）与
-                                     # 挂单枚举（`_pending_enum_errors`）**都要**成功。
-                                     # 此前只传快照 ⇒ 读取失败时传进去的是**空字典**，
-                                     # 对账器据它判"外所无仓无挂"并误释放活仓/在场活单的预留。
-                                     venue_snapshot_verified=(xv_ok and not _pending_enum_errors))
+        reconcile_reservation_ledger(real_pos_dict, pending_inst_ids, _env_mode)
     except Exception as _rc_exc:
         print(f"[预留对账] warn 对账器异常（不影响本周期交易）: {_rc_exc}")
 
@@ -379,11 +301,10 @@ def fetch_positions_and_reconcile(*,
             if d.get("ccy") == "USDT":
                 usdt_available = float(d.get("availBal", 0.0))
                 break
-    return (_xv_total, active_pos_count, all_positions, entries_blocked, long_count, pending_inst_ids, real_pos_dict, reserved_long_count, reserved_short_count, reserved_slot_count, short_count, usdt_available, xv_positions_by_venue)
+    return (active_pos_count, all_positions, entries_blocked, long_count, pending_inst_ids, real_pos_dict, reserved_long_count, reserved_short_count, reserved_slot_count, short_count, usdt_available)
 
 
 def scan_risk_gates_and_ai_brain(*,
-        _xv_total,
         venue_position_span,
         active_pos_count,
         all_factors,
@@ -393,10 +314,8 @@ def scan_risk_gates_and_ai_brain(*,
         timestamp_full,
         trackers,
         usdt_available,
-        xv_positions_by_venue,
         MAX_CONCURRENT_POSITIONS,
         _collect_okx_position_payloads,
-        _merge_cross_venue_positions,
         effective_single_asset_margin,
         execute_ai_position_management,
         execute_batch_ai_brain_cycle,
@@ -405,12 +324,21 @@ def scan_risk_gates_and_ai_brain(*,
         pool_state,
         query_positions,
         read_cycle_health,
-        save_trackers):
+        real_pos_dict,
+        save_trackers,
+        session_restricted=False):
     """相位 4 前段：熔断判定 + 单标的保证金上限自适应 + 主脑批量扫描 + 池可信闸。
 
     段内不动控制流（无 return/break）：`executed_actions` 由**原地 append** 回传
     （故只入参、不返回）；`brain_cache` 在段内顶层初始化为 `{}` ⇒ 必然绑定。
     4 项输出见调用点解包。
+
+    ⚠️ `session_restricted`（2026-09-30 交易时段闸门）：为真时**不叫大模型** ——
+    交易主脑实测占全系统模型消耗的 94%（≈4.2M token/天），窗口外让它继续跑
+    就是纯烧钱。**默认 False** 是刻意的：既有调用点（含各测试的 `_scan_kwargs`）
+    不传它时必须与改造前逐位一致。抑制发生在**本段内部**而不是门面传 `None`：
+    门面调用点受 `test_facade_calls_pass_every_parameter_once_same_name` 约束
+    （每个关键字必须与参数同名、且顺序一致），传三元表达式会当场翻红。
     """
     cb_active, cb_reason = is_circuit_breaker_active(usdt_available)
     # 单标的累计保证金上限按可用余额自适应，与提示词 {{risk_budget}} 同口径
@@ -418,17 +346,13 @@ def scan_risk_gates_and_ai_brain(*,
 
     brain_cache = {}
     # One LLM call covers the full six-instrument universe and all active positions.
-    if not cb_active and execute_batch_ai_brain_cycle:
+    if not cb_active and execute_batch_ai_brain_cycle and not session_restricted:
         try:
             pos_desc = "当前系统总" + venue_position_span(
                 okx_count=active_pos_count, okx_long=long_count, okx_short=short_count,
-                xv_positions_by_venue=xv_positions_by_venue, xv_total=_xv_total,
                 max_positions=MAX_CONCURRENT_POSITIONS)
             # 持仓全景装配（阶段 4·B3 第三十一刀：迁至 scripts/trader/position_universe.py）
             active_pos_list = _collect_okx_position_payloads(all_factors, trackers)
-            # 汇入多所（Binance / Gate）在管持仓，形成三所平权持仓全景。
-            # 审计(2026-09-13)：必须复用 1a 已冻结的周期快照（零重复出网）。
-            _merge_cross_venue_positions(active_pos_list, xv_positions_by_venue, all_factors)
             brain_cache = execute_batch_ai_brain_cycle(pos_desc, active_pos_list, usdt_available=usdt_available) or {}
             if brain_cache:
                 refreshed_ok, refreshed_positions, refreshed_error = query_positions()
@@ -439,6 +363,8 @@ def scan_risk_gates_and_ai_brain(*,
                         p.get("instId"): p for p in refreshed_positions
                         if float(p.get("pos", 0) or 0) > 0
                     }
+                    # 刷新的是 OKX 直签链的权威持仓（`query_positions` 只读 OKX）；
+                    # OKX 专用化后它就是全部持仓，无需再并回任何外所记录。
                     execute_ai_position_management(refreshed_pos_dict, trackers, timestamp_full, executed_actions)
                     save_trackers(trackers)
             else:
@@ -447,14 +373,17 @@ def scan_risk_gates_and_ai_brain(*,
                     _cf = int(_hf.get("consecutive_failures", 0) or 0)
                     _warn = f"本轮AI推理失败（连续{_cf}轮｜{_hf.get('last_error') or '未知原因'}），禁止复用旧持仓指令"
                     if _cf >= 3:
-                        _warn = "🔴 AI决策链连续" + str(_cf) + "轮失败——非并发跳过，模型/密钥/额度需人工核查！" + _warn
+                        _warn = "[告警] AI决策链连续" + str(_cf) + "轮失败——非并发跳过，模型/密钥/额度需人工核查！" + _warn
                     executed_actions.append(_warn)
                     if _cf >= 3:
-                        print(f"[AI Health] 🔴 连续 {_cf} 轮批次决策失败，最近错误: {_hf.get('last_error')}")
+                        print(f"[AI Health] [告警] 连续 {_cf} 轮批次决策失败，最近错误: {_hf.get('last_error')}")
                 else:
                     executed_actions.append("本轮AI推理并发跳过（旧指令不违规复用），禁止复用旧持仓指令")
         except Exception as e:
             print(f"[AI Brain Batch Scan Warning] {e}")
+    elif not cb_active and session_restricted:
+        # 窗口外：必须留下**一条可检索**的动作行，否则"这一轮为什么什么都没做"在日志里无从解释
+        executed_actions.append("[非交易时段] 跳过 AI 大模型决策与新开仓（机械风控照常）")
 
     # 审计 P2-11：标的池不可信（文件损坏/为空/条目非法）时，旧实现会拿 10 币出厂默认
     # 清单继续开新仓 —— 管理员删掉的标的会因"文件坏了"重新被交易。这里 fail-closed：
@@ -467,204 +396,6 @@ def scan_risk_gates_and_ai_brain(*,
         executed_actions.append(_pool_warn)
     return (ASSET_MARGIN_CAP, brain_cache, cb_active, cb_reason)
 
-
-def _load_watchdog_state(path) -> Optional[Dict[str, Any]]:
-    """读防抖状态。**文件不存在 ⇒ `{}`**（首次运行，合法空态）；不可读/损坏 ⇒ `None`。
-
-    ⚠️ 区分这两种"空"是刻意的：把"读不出来"当成"没有缺口"正是本会话反复修的
-    那一类缺陷。调用方拿到 `None` 必须**不写单**。
-    """
-    try:
-        if not os.path.exists(path):
-            return {}
-        with open(path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        gaps = data.get("gaps") if isinstance(data, dict) else None
-        if not isinstance(gaps, dict):
-            return None
-        out: Dict[str, Any] = {}
-        for k, v in gaps.items():
-            try:
-                out[str(k)] = float(v)
-            except (TypeError, ValueError):
-                # 单条时间戳坏了 ⇒ 只丢这条（其余仍可用），但要留痕
-                print(f"[跨所保护巡检] warn 防抖状态里 {k} 的时间戳不可解析，已丢弃该条")
-        return out
-    except Exception as exc:
-        print(f"[跨所保护巡检] warn 防抖状态读取失败（{exc}）")
-        return None
-
-
-def _save_watchdog_state(path, state: Dict[str, Any]) -> bool:
-    """原子写防抖状态（临时文件 + `os.replace`）。失败只返回 False，绝不抛。"""
-    try:
-        _dir = os.path.dirname(path)
-        if _dir:
-            os.makedirs(_dir, exist_ok=True)
-        tmp = f"{path}.tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump({"gaps": dict(list(state.items())[:500]),
-                       "updated_at": time.time()}, f, ensure_ascii=False)
-        os.replace(tmp, path)
-        return True
-    except Exception as exc:
-        print(f"[跨所保护巡检] warn 防抖状态写入失败（{exc}）")
-        return False
-
-
-def venue_protection_watchdog_stage(*,
-        xv_positions_by_venue,
-        executed_actions,
-        venue_registry,
-        current_environment,
-        ASTRA_VENUE_PROTECTION_WATCHDOG,
-        audit_cross_venue_protection,
-        dry_run=False,
-        state_path=None,
-        debounce_s=None,
-        debounce_step=None,
-        now_s=None,
-        ledger_rows=None):
-    """跨所云端保护单巡检（roadmap G8 的周期接线；**默认关闭**）。
-
-    ## 为什么单独一格、且默认关闭
-
-    外所（Gate/Binance）的触发单带 `expiration`（Gate 默认 7 天，相对创建时间），
-    到期后离开交易所 open 列表 ⇒ 仓位裸奔；而主链的 OKX 保护核验**够不到**跨所仓位
-    （跨所持仓 instId 是合成 id `GATE:BTC_USDT`，与因子快照的 OKX 形态匹配不上）。
-    本格把 `scripts/trader/venue_protection.py` 的判定/动作接到每周期快照上。
-
-    **接线不等于开闸**：`ASTRA_VENUE_PROTECTION_WATCHDOG` 未置 1 时本函数直接返回，
-    **零网络、零写单**（线上行为与本刀之前逐字一致）。开闸是运营决定，需人拍板。
-
-    ## 防抖：缺口必须**持续**够久才写单（第一百三十刀）
-
-    `state_path` + `debounce_step` 都在时启用：每周期先跑一次**观察轮**
-    （`dry_run=True`，零写单）拿"本来会做"的动作，按 `venue|inst|stage` 记首次出现时刻；
-    只有**已持续 ≥ `debounce_s`** 的缺口才允许触发真实写单那一轮。缺口愈合 ⇒ 状态自清。
-
-    未出现够久的周期**只观察不写单**，并把每个缺口的"已持续 X 分钟"报进
-    `executed_actions`（运营能看到它在逼近阈值）。`debounce_s <= 0` = 显式不防抖。
-
-    ⚠️ **状态不可读写 ⇒ 本周期不写单**（fail-closed）：状态失真的防抖等于没有防抖，
-    宁可晚一轮动手，也不要在"不知道这缺口多久了"的情况下写单。
-    不传 `state_path`/`debounce_step`（测试与显式调用）⇒ 防抖关闭、单轮直通。
-
-    ## 开闸前的第一步：`dry_run=True` 预演（第一百二十九刀）
-
-    总闸开启 + `ASTRA_VENUE_PROTECTION_WATCHDOG_DRY_RUN=1` ⇒ 本格照常每周期判定，
-    但把 `dry_run=True` 透给审计层：**只判定、不写单**，并把审计层 `would`
-    里"本来会做"的动作逐条打印出来。这是把"一次误判"与"一串真实订单"隔开的那道闸，
-    也是本格从"默认关闭"走向"开闸"之间**唯一安全**的过渡档。
-
-    ## 边界（刻意的保守选择）
-
-    - **fail-soft**：本格任何异常只打印告警、绝不中断周期 —— 它是在既有 OKX 硬核验
-      之上的**加固层**，不该成为新的单点；后续若要收紧成 fail-closed，是独立的一刀；
-    - 只读**已冻结的本周期快照**（不额外拉持仓）；每仓一次保护单列表核验是必要成本；
-    - 完全没有止损腿的仓位只报 CRITICAL（**不替它定价补挂** —— 价位是策略决定，
-      巡检层臆造价位等于偷偷改策略）。
-    """
-    if not ASTRA_VENUE_PROTECTION_WATCHDOG:
-        return None
-    try:
-        env_mode = str(current_environment().mode)
-    except Exception as exc:
-        print(f"[跨所保护巡检] warn 环境轴不可得（{exc}），本轮跳过")
-        return None
-
-    _now = time.time() if now_s is None else float(now_s)
-    _debounce_on = bool(state_path) and callable(debounce_step)
-    _observe = None
-    _new_state: Dict[str, Any] = {}
-    _observed: List[str] = []
-    _qualified: List[str] = []
-    _qualify_min = 0.0 if debounce_s is None else max(0.0, float(debounce_s)) / 60.0
-
-    def _run_audit(_dry):
-        return audit_cross_venue_protection(
-            xv_positions_by_venue,
-            venue_registry=venue_registry,
-            environment=env_mode,
-            dry_run=bool(_dry),
-            # 第一百七十四刀：台账行供**归属取证**（`ledger` 档证据＝同币同向同量已平记录）。
-            # 读不到（None）⇒ 不产生证据 ⇒ 腿留在"归属不可判定" ⇒ 绝不自动撤。
-            ledger_rows=ledger_rows,
-        )
-
-    if _debounce_on:
-        # 观察轮：**只判定不写单**，拿到"本来会做"的动作（真模式与它同源）
-        try:
-            _observe = _run_audit(True)
-        except Exception as exc:
-            # fail-soft：巡检是加固层，不该成为新的单点
-            print(f"[跨所保护巡检] warn 观察轮异常（不影响本周期）: {exc}")
-            return None
-        _state = _load_watchdog_state(state_path)
-        if _state is None:
-            print("[跨所保护巡检] warn 防抖状态不可读——本周期**不写单**（不知道缺口持续多久就不动手）")
-            return None
-        try:
-            _new_state, _observed, _qualified = debounce_step(
-                _state, _observe, now_s=_now, debounce_s=debounce_s)
-        except Exception as exc:
-            print(f"[跨所保护巡检] warn 防抖计算异常（{exc}）——本周期不写单")
-            return None
-        if not _save_watchdog_state(state_path, _new_state):
-            print("[跨所保护巡检] warn 防抖状态不可写——本周期**不写单**（否则下轮状态失真）")
-            return None
-
-    if dry_run:
-        # 预演：观察轮即结果（若要写单的那一轮，本也不该写）
-        report = _observe if _debounce_on else _run_audit(True)
-        if _debounce_on:
-            print(f"[跨所保护巡检] 预演：{len(_observed)} 个缺口，其中 {len(_qualified)} 个"
-                  f"已持续 ≥ {_qualify_min:.0f} 分钟（开闸后这些才会真的写单）")
-    elif _debounce_on and not _qualified:
-        print(f"[跨所保护巡检] {len(_observed)} 个缺口尚未持续够 {_qualify_min:.0f} 分钟"
-              f"——本周期只观察不写单")
-        for _k in _observed:
-            _age = max(0.0, _now - float(_new_state.get(_k) or _now)) / 60.0
-            _line = f"[跨所保护·观察] {_k} 已持续 {_age:.1f} 分钟"
-            print(_line)
-            executed_actions.append(_line)
-        report = _observe
-    else:
-        try:
-            report = _run_audit(False)
-        except Exception as exc:
-            print(f"[跨所保护巡检] warn 巡检异常（不影响本周期）: {exc}")
-            return None
-
-    if dry_run:
-        # ⚠️ 预演模式下 `actions` 必然为空（审计层不写单）——要报的是 `would`。
-        # 若预演却出现了 `actions`，那是审计层违约，如实喊出来而不是悄悄展示。
-        if report.get("actions"):
-            print("🔴 [跨所保护] 预演模式下审计层仍返回了 actions —— 断言失败，请立即排查"
-                  "（预演不得写单）")
-        print("[跨所保护] ⚠️ 预演模式（dry-run）：本周期**只判定不写单**，"
-              "下列是'如果开闸本来会做'的动作")
-        for item in report.get("would") or []:
-            _w = (f"[跨所保护·预演] {str(item.get('venue','')).upper()} "
-                  f"{item.get('inst') or ''} {item.get('stage') or ''} "
-                  f"{item.get('detail') or ''}").strip()
-            print(_w)
-            executed_actions.append(_w)
-    for item in report.get("actions") or []:
-        executed_actions.append(
-            f"[跨所保护] {item['venue'].upper()} {item['inst']} {item['detail']}")
-    for item in report.get("critical") or []:
-        _line = (f"🔴 [跨所保护] {item['venue'].upper()} {item['inst']} {item['side']} "
-                 f"无止损腿（{item.get('detail')}）——需人工或用既定策略价位重挂")
-        print(_line)
-        executed_actions.append(_line)
-    for item in report.get("errors") or []:
-        print(f"[跨所保护巡检] warn {item.get('venue')} {item.get('inst') or ''} "
-              f"{item.get('stage')}: {item.get('detail')}")
-    if _debounce_on and not dry_run:
-        print(f"[跨所保护巡检] 本轮实写 {len(report.get('actions') or [])} 个动作"
-              f"（防抖窗口 {_qualify_min:.0f} 分钟，观察 {len(_observed)} 项）")
-    return report
 
 def data_shape_preflight_stage(*, intents_path, trackers_path,
                                validate_intents_file, validate_trackers_file) -> list:
@@ -695,16 +426,21 @@ def data_shape_preflight_stage(*, intents_path, trackers_path,
     return violations
 
 def cycle_disclosure_payload(*, broken_venues=(), entries_blocked=False,
-                            shape_violations=(), watchdog_report=None,
-                            watchdog_enabled=True) -> dict:
+                            shape_violations=(), session=None) -> dict:
     """周期披露的**结构化**载荷（第 51 刀）：供"渲染一条行"与"落盘成指标"共用。
 
     单一事实源：`cycle_disclosure_summary` 只负责把它渲染成一行；
     `write_cycle_disclosure_snapshot` 只负责把它原子落盘给后端 `/metrics` 读。
     两处都不再各自解释"什么算跳过" —— 这正是本仓反复吃过的"同一语义两处写"。
 
-    ⚠️ 绝不抛异常（非 dict 的 watchdog 报告、`None` 集合、含 `None` 的列表一律宽容）：
-    报告器不得成为新的单点故障。
+    ⚠️ 绝不抛异常（`None` 集合、含 `None` 的列表一律宽容）：报告器不得成为新的
+    单点故障。跨所保护巡检（roadmap G8）已随多所执行面移除 ⇒ `watchdog_*` 三个
+    字段一并删除（`/metrics` 侧用 `.get`，读不到即不发对应计数）。
+
+    ⚠️ `session`（2026-09-30 交易时段闸门）：为 `None` 或 `mode == "full"` 时
+    载荷与 `clean` **逐键不变**（既有测试 `test_clean_cycle` 钉住整行文案）；
+    只有在窗口外降级时才追加 `session_*` 三个键并把 `clean` 置 False ——
+    "没开闸/降级跑"不是错误，但**必须被看见**（与 `entries_blocked` 同一哲学）。
     """
     # ⚠️ `str(None)` 是 `"None"`（真值！）—— 旧写法会把列表里的 `None` 渲染成
     # "一所名叫 None 的坏所"，披露行里就多出一条假场所（"UI 不说谎"的反面）。
@@ -712,25 +448,27 @@ def cycle_disclosure_payload(*, broken_venues=(), entries_blocked=False,
     venues = sorted({str(v).strip() for v in (broken_venues or [])
                      if v is not None and str(v).strip()})
     bad = [str(b) for b in (shape_violations or [])]
-    rep = watchdog_report if isinstance(watchdog_report, dict) else {}
-    return {
+    restricted = bool(isinstance(session, dict) and session.get("restricted"))
+    payload = {
         "broken_venues": venues,
         "broken_venue_count": len(venues),
         "entries_blocked": bool(entries_blocked),
         "shape_violation_count": len(bad),
         "shape_violation_head": bad[:3],
-        "watchdog_enabled": bool(watchdog_enabled),
-        "watchdog_errors": len(rep.get("errors") or []),
-        "watchdog_critical": len(rep.get("critical") or []),
-        "clean": not (venues or entries_blocked or bad),
+        "clean": not (venues or entries_blocked or bad or restricted),
     }
+    if restricted:
+        payload["session_mode"] = str(session.get("mode") or "")
+        payload["session_reason"] = str(session.get("reason") or "")
+        payload["session_restricted"] = True
+    return payload
 
 
 def cycle_disclosure_summary(payload: dict) -> str:
     """把披露载荷渲染成**一条可检索**的行（渲染器；判定/落盘见 payload 与快照写入）。
 
         [周期披露] 本轮无跳过/未核验项
-        [周期披露] 本轮跳过/未核验：凭证坏所=2(binance,gate); 对账失败（禁本轮新开仓）
+        [周期披露] 本轮跳过/未核验：凭证坏所=2(...); 对账失败（禁本轮新开仓）
 
     判据很朴素但有效：**这条行必须每轮都出现**（门禁钉调用点）⇒ 有人删掉某处披露时，
     汇总行里的数字会随之变化，评审看日志就能发现"怎么不报了"。
@@ -742,20 +480,18 @@ def cycle_disclosure_summary(payload: dict) -> str:
         parts.append(f"凭证坏所={n_ven}({','.join(payload.get('broken_venues') or [])})")
     if payload.get("entries_blocked"):
         parts.append("对账失败（禁本轮新开仓）")
+    if payload.get("session_restricted"):
+        # 2026-09-30：休市降级必须出现在**这一行**里 —— 它每轮都打印、也可检索，
+        # 是"这一轮为什么什么都没做"的唯一常驻线索。
+        mode = str(payload.get("session_mode") or "")
+        parts.append("时段限制=" + ("完全停跑" if mode == "off" else "只做机械风控"))
     n_bad = int(payload.get("shape_violation_count") or 0)
     if n_bad:
         head = "; ".join(payload.get("shape_violation_head") or [])
         more = f" …共{n_bad}条" if n_bad > 3 else ""
         parts.append(f"数据形状违规={n_bad}（{head}{more}）")
-    errs, crit = int(payload.get("watchdog_errors") or 0), int(payload.get("watchdog_critical") or 0)
-    if errs or crit:
-        parts.append(f"跨所保护：错误={errs} 严重缺口={crit}")
-    line = ("[周期披露] 本轮跳过/未核验：" + "; ".join(parts)) if parts \
+    return ("[周期披露] 本轮跳过/未核验：" + "; ".join(parts)) if parts \
         else "[周期披露] 本轮无跳过/未核验项"
-    if not payload.get("watchdog_enabled", True):
-        # 未开闸的加固层是**没在跑的保护**，属"应当被看见"的事实（不是错误）
-        line += "；跨所保护巡检未开闸"
-    return line
 
 
 def write_cycle_disclosure_snapshot(*, path, payload, _atomic_write_json) -> bool:

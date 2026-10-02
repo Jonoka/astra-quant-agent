@@ -1,5 +1,9 @@
 # `astra_backend/` 分层与归档约定
 
+> **OKX 专用量化系统**：本系统专为 OKX 永续合约打造；
+> 根层聚焦 OKX 直签执行与单所风控，
+> `dashboard_payload/` 统一聚合 OKX 实时持仓与保护委托。
+>
 > 本文是**约定文档，不是目录搬迁计划**。结构优化研究（`plan_local/records/structure-01.md`
 > §2 B7 / §10.5）得出的结论是：**不为目录整齐去搬已上线的启动路径模块**，
 > 而是把"哪个模块属于哪一层、新文件该进哪个子包"固化成文字约定。
@@ -7,10 +11,10 @@
 
 ## 1. 为什么这里不是"一个包一个域"的整齐目录
 
-根层 35 个模块 + 9 个子包**看起来**扁平，但那是**有代价的取舍**，不是没整理：
+根层约 40 个模块 + 9 个子包**看起来**扁平，但那是**有代价的取舍**，不是没整理：
 
 1. **路径锚点会被踩。** 仓里有一批审计测试按**文件路径**钉死读取
-   （`astra_backend/execution_router.py` 5 处、`policy_snapshot.py` 3 处、
+   （`policy_snapshot.py` 3 处、
    `qq_gateway_daemon.py` 2 处、`llm_manager.py` 2 处、`council_manager.py` 2 处、
    `app.py` 2 处、`scheduler.py` 1 处）。为目录整齐去改 17 处锚点，
    正是研究文档 §4 明确反对的方向（"先设计抽取边界去迁就锚点，而不是反过来"）。
@@ -36,7 +40,7 @@
 | `llm_manager.py` | ~281 | `llm/`（util / capabilities / providers / transport / policy / store / failover / call） |
 | `council_manager.py` | ~416 | `council/`（debate / policy / roster / presets） |
 | `policy_snapshot.py` | ~295 | `policy/`（paths / schema / fingerprints / io / capture / restore / archive） |
-| `dashboard_cache.py` | 536 | `dashboard_payload/`（12 模块）；**0 条路由**（纯库，路由在 `routers/dashboard.py`） |
+| `dashboard_cache.py` | 536 | `dashboard_payload/`（载荷按域模块化）；**0 条路由**（纯库，路由在 `routers/dashboard.py`） |
 
 **判据**：一个模块如果"只剩转发/薄壳"，它就是门面，新逻辑一律进它对应的子包。
 
@@ -51,7 +55,7 @@
 ### L2 HTTP 边界 — `routers/`
 
 `auth` / `system` / `exchanges` / `risk` / `strategy` / `llm` / `gateway` /
-`dashboard`。**路由层只做参数校验与调用编排，不放业务逻辑。**
+`dashboard`（含 `plaza` 实盘共享子路由）。**路由层只做参数校验与调用编排，不放业务逻辑。**
 路由瘦身的正确做法是把业务下沉到 `exchanges/`、`execution/`、
 `dashboard_payload/`，路由保留薄壳（与 `astra_backend/dashboard_cache.py` 降为纯库同一手法）。
 
@@ -63,23 +67,26 @@
 路由表对拍门见 `tests/ops/test_gateway_router_split.py`。
 
 `strategy` 已按此手法拆成**包**（第九十六刀）：`strategy/` =
-`strategy/council.py`（议会配置与辩论）/ `strategy/interceptors.py`（拦截器 CRUD）/
-`strategy/policy.py`（策略快照）/ `strategy/prompts.py`（提示词库与档案），
-`strategy/__init__.py` 只做**按原顺序**聚合
-（顺序即匹配优先级）。35 条 URL/方法/处理器名/tags 一字未改，
-路由表对拍门见 `tests/trading/test_strategy_router_split.py`。
+`strategy/council.py`（议会配置与辩论）/ `strategy/policy.py`（策略快照）/
+`strategy/prompts.py`（提示词库与档案），`strategy/__init__.py` 只做**按原顺序**聚合
+（顺序即匹配优先级）。
+
+⚠️ 2026-10：`strategy/interceptors.py`（拦截器 CRUD，8 条路由）随**策略插件系统整套裁撤**
+一并删除（连同根层 `interceptor_manager` 模块与 `plugins/interceptors/` 目录），聚合顺序变为
+council → policy → prompts；路由表对拍门 `tests/trading/test_strategy_router_split.py`
+按前缀显式摘除这 8 条并钉住"不得复活"。
 
 ### L3 领域服务（根层，按域成组）
 
 | 域 | 模块 |
 |---|---|
-| 交易执行 | `execution_router.py`、`okx_trade_service.py`、`okx_client.py`、`close_intent.py`、`risk_reservation.py`、`venue_router.py`、`exchanges/`、`execution/`、`sandbox/` |
-| 风控与安全 | `risk_config.py`、`net_security.py`、`login_guard.py`、`client_ip.py`、`admin_auth.py`、`interceptor_manager.py`、`redact.py` |
+| 交易执行 | `okx_trade_service.py`、`okx_client.py`、`close_intent.py`、`risk_reservation.py`、`exchanges/`、`execution/`、`sandbox/` |
+| 风控与安全 | `risk_config.py`、`net_security.py`、`login_guard.py`、`client_ip.py`、`admin_auth.py`、`redact.py` |
 | 通知与外部通道 | `notifications.py`、`qq_bind.py`、`qq_gateway_daemon.py` |
 | 审计与备份 | `audit.py`、`backup_store.py`、`backup_secrets.py`、`file_locks.py` |
-| 组合与账户 | `portfolio_aggregator.py`、`account_baseline.py` |
+| 组合与账户 | `portfolio_aggregator.py`、`account_baseline.py`、`evolution_config.py`、`plaza_share.py` |
 | 提示词 | `prompt_views.py`、`dashboard_payload/prompts*` |
-| 通用 | `time_utils.py`、`math_utils.py`、`schemas.py`、`schedule_store.py` |
+| 通用 | `time_utils.py`、`math_utils.py`、`schemas.py`、`schedule_store.py`、`trading_session_store.py`（交易时段配置的读写；判定纯函数在 `scripts/trader/session.py`） |
 | 可观测性 | `metrics.py`（Prometheus 文本 exposition 的唯一渲染点；路由薄壳在 `routers/system.py::admin_metrics`） |
 
 ### L4 纯计算/载荷子包（新代码的默认去处）
@@ -111,7 +118,6 @@
 | `collect.py` | `collect_core_account_state` —— `update_cache_cycle` **相位 1**：余额/持仓/挂单三路并发抓取 + 单项失败降级 + 「三项同时 NOT_READY ⇒ 连接方式缺失」判定 + USDT 余额解析 + 追踪器/持仓行/挂单行装配（B2 第九十四刀；段体 AST 逐字、11 项同名注入、14 项输出） |
 | `algo_protection.py` | 算法保护单视图 |
 | `ledger_view.py` | 台账视图 |
-| `multi_venue.py` | 三所组合视图 |
 | `integrity_sidecars.py` | 完整性旁车并入 `source_errors`（台账同步状态 / AI 连败） |
 | `reset_state.py` | 状态重置 |
 
@@ -162,7 +168,7 @@
 ## 6. 每次拆分后必须过的两道闸
 
 ```bash
-# 1) 全量套件（当前基线：10370 例 OK, skipped=1）
+# 1) 全量套件（当前基线：8680 例 OK, skipped=1）
 #    ⚠️ 这个数字由 tests/core/test_readme_baseline_numbers.py 钉住：
 #    它用 AST 数出仓里 test_* 方法数，再要求本行数字与之同量级。
 #    超过 ±10% 就会翻红 —— 忘了更新这里会当场被抓住，不会静默漂移。

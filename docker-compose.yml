@@ -39,6 +39,9 @@ services:
   # 2. 量化网关与调度核心：15分钟波段扫描、因子刷新、AI 投委会与硬风控执行
   # ----------------------------------------------------------------------------
   gateway:
+    build:
+      context: .
+      dockerfile: Dockerfile
     image: astraquant:latest
     container_name: astraquant-gateway
     restart: unless-stopped

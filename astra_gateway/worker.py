@@ -2,6 +2,7 @@
 from __future__ import annotations
 import fcntl
 import os
+import re
 import signal
 import time
 from datetime import datetime, timedelta, timezone
@@ -96,18 +97,28 @@ def _prune_job_history(store: GatewayStore) -> None:
             f"（保留 {result['keep_days']} 天，VACUUM={'是' if result['vacuumed'] else '否'}）")
 
 
+def sanitize_message_content(text: str) -> str:
+    """去除可能混入的 SVG、HTML 标签及富文本乱码，保障通道纯文本投递安全。"""
+    if not text:
+        return ""
+    cleaned = re.sub(r"<svg[\s\S]*?</svg>", "", text, flags=re.IGNORECASE)
+    cleaned = re.sub(r"<img[\s\S]*?>", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"</?[a-zA-Z][^>]*>", "", cleaned)
+    return cleaned.strip()
+
+
 def format_message(row: dict[str, object]) -> str:
     created = str(row.get("created_at", ""))
     # Format cleaner timestamp if ISO format
     if "T" in created:
         created = created.replace("T", " ")[:19]
-    title = str(row.get("title", "")).strip()
-    body = str(row.get("message", "")).strip()
-    if title.startswith("【ASTRA") or "【ASTRA" in title:
+    title = sanitize_message_content(str(row.get("title", "")).strip())
+    body = sanitize_message_content(str(row.get("message", "")).strip())
+    if title.startswith("【ASTRA") or "【ASTRA" in title or title.startswith("【Astra"):
         header = title
     else:
         header = f"【AstraQuant】{title}"
-    return f"{header}\n⏱️ 时间：{created}\n━━━━━━━━━━━━━━\n{body}"
+    return f"{header}\n时间：{created}\n━━━━━━━━━━━━━━\n{body}"
 
 
 def run() -> None:
@@ -159,6 +170,14 @@ def run() -> None:
         launched = scheduler.tick()
         for job_name in launched:
             log(f"scheduled job={job_name}")
+        try:
+            # 前缀缓存保活：**默认 off**（2026-09-29 实测该组合下预热净亏，见
+            # astra_gateway/cache_warmer.py 的复盘）。off 模式下这里是纯函数调用、
+            # 不发任何网络请求；只有显式设置 ASTRA_CACHE_WARMUP_MODE=jit 才预热。
+            from astra_gateway.cache_warmer import check_and_warmup_cache
+            check_and_warmup_cache()
+        except Exception:
+            pass
         if time.time() >= _next_prune_at:           # 之后每 6 小时一次
             _next_prune_at = time.time() + PRUNE_INTERVAL_SECONDS
             _prune_job_history(store)

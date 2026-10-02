@@ -52,19 +52,30 @@ TIER_PROFILES = {
     }
 }
 
-# 默认 10 标的池：按 24H 名义成交额降序；规格取自 OKX /public/instruments 实时数据。
-# 扩容说明：MAX_CONCURRENT_POSITIONS = len(池) 自动跟随，同向持仓上限仍固定 3 笔(防 Beta 踩踏)。
+# 出厂默认 6 标的池（2026-09-30 收敛：8 → 6，移除 ADA 与 SUI）。
+#
+# 选型判据（按 OKX 24H 名义成交额实测 + 台账效率）：
+#   BTC 5.97B / ETH 7.65B（蓝筹，BTC 另兼全局黑天鹅哨兵基准，不可删）
+#   SOL 1.27B / XRP 545M / DOGE 361M（候选里流动性最好的三个）
+#   ARB 88M（流动性第 6，但当时有实时持仓与追踪器 ⇒ 被动保留）
+#   移除 ADA（76M，候选里流动性最低）与 SUI（占全台账 39% 笔数、单日最大亏 -139.35、
+#   每笔净 +3.80 为全池最差 ⇒ 过度集中 + 尾部风险最大）。
+#
+# ⚠️ 这份常量是「默认标的」**唯一可持久化**的定义：`data/instrument_pool.json`
+# 被 `.gitignore` 忽略（`data/*.json`），池文件缺失/损坏时 `load_instruments()`
+# 走的就是这份清单。故它必须与运行态池**保持同一份 6 条**，否则一旦重建就会复活
+# 已淘汰标的并把并发上限顶高（旧版正是 10 条、含已移除的 LINK/UNI）。
+# 规格取自 OKX /public/instruments 实时数据；`max_leverage` 为按 `.env`
+# （ASTRA_MIN_LEVERAGE/ASTRA_MAX_LEVERAGE）派生后的值（tier1=12、tier2=6）。
+# 扩容说明：MAX_CONCURRENT_POSITIONS = len(池) 自动跟随（当前 6），
+# 同向持仓上限仍由 ASTRA_MAX_SAME_DIRECTION_POSITIONS 钳制（当前 5，防 Beta 踩踏）。
 DEFAULT_INSTRUMENTS = [
-    {"instId": "BTC-USDT-SWAP", "name": "BTC", "type": "crypto", "ccy": "BTC", "tier": "tier_1_bluechip", "max_leverage": 5, "sl_atr_mult": 1.8, "base_sz": 1, "precision": 1, "ctVal": 0.01, "tickSz": "0.1", "minSz": "0.01", "risk_per_trade_usd": 15.0},
-    {"instId": "ETH-USDT-SWAP", "name": "ETH", "type": "crypto", "ccy": "ETH", "tier": "tier_1_bluechip", "max_leverage": 5, "sl_atr_mult": 1.8, "base_sz": 3, "precision": 2, "ctVal": 0.1, "tickSz": "0.01", "minSz": "0.01", "risk_per_trade_usd": 15.0},
-    {"instId": "SOL-USDT-SWAP", "name": "SOL", "type": "crypto", "ccy": "SOL", "tier": "tier_2_momentum", "max_leverage": 3, "sl_atr_mult": 2.2, "base_sz": 7, "precision": 2, "ctVal": 1.0, "tickSz": "0.01", "minSz": "0.01", "risk_per_trade_usd": 15.0},
-    {"instId": "XRP-USDT-SWAP", "name": "XRP", "type": "crypto", "ccy": "XRP", "tier": "tier_2_momentum", "max_leverage": 3, "sl_atr_mult": 2.2, "base_sz": 1, "precision": 4, "ctVal": 100.0, "tickSz": "0.0001", "minSz": "0.01", "risk_per_trade_usd": 15.0},
-    {"instId": "DOGE-USDT-SWAP", "name": "DOGE", "type": "crypto", "ccy": "DOGE", "tier": "tier_2_momentum", "max_leverage": 3, "sl_atr_mult": 2.2, "base_sz": 10, "precision": 4, "ctVal": 1000.0, "tickSz": "0.0001", "minSz": "0.01", "risk_per_trade_usd": 15.0, "conf_floor": 80.0},
-    {"instId": "ARB-USDT-SWAP", "name": "ARB", "type": "crypto", "ccy": "ARB", "tier": "tier_2_momentum", "max_leverage": 3, "sl_atr_mult": 2.2, "base_sz": 1, "precision": 5, "ctVal": 10.0, "tickSz": "0.00001", "minSz": "0.1", "risk_per_trade_usd": 15.0},
-    {"instId": "SUI-USDT-SWAP", "name": "SUI", "type": "crypto", "ccy": "SUI", "tier": "tier_2_momentum", "max_leverage": 3, "sl_atr_mult": 2.2, "base_sz": 50, "precision": 4, "ctVal": 1.0, "tickSz": "0.0001", "minSz": "1", "risk_per_trade_usd": 15.0},
-    {"instId": "LINK-USDT-SWAP", "name": "LINK", "type": "crypto", "ccy": "LINK", "tier": "tier_2_momentum", "max_leverage": 3, "sl_atr_mult": 2.2, "base_sz": 64, "precision": 3, "ctVal": 1.0, "tickSz": "0.001", "minSz": "0.1", "risk_per_trade_usd": 15.0},
-    {"instId": "ADA-USDT-SWAP", "name": "ADA", "type": "crypto", "ccy": "ADA", "tier": "tier_2_momentum", "max_leverage": 3, "sl_atr_mult": 2.2, "base_sz": 1, "precision": 4, "ctVal": 100.0, "tickSz": "0.0001", "minSz": "0.1", "risk_per_trade_usd": 15.0},
-    {"instId": "UNI-USDT-SWAP", "name": "UNI", "type": "crypto", "ccy": "UNI", "tier": "tier_2_momentum", "max_leverage": 3, "sl_atr_mult": 2.2, "base_sz": 1, "precision": 3, "ctVal": 1.0, "tickSz": "0.001", "minSz": "1", "risk_per_trade_usd": 15.0},
+    {"instId": "ARB-USDT-SWAP", "name": "ARB", "type": "crypto", "ccy": "ARB", "tier": "tier_2_momentum", "max_leverage": 6, "sl_atr_mult": 2.2, "base_sz": 1, "precision": 5, "ctVal": 10.0, "tickSz": "0.00001", "minSz": "0.1", "risk_per_trade_usd": 0.0},
+    {"instId": "BTC-USDT-SWAP", "name": "BTC", "type": "crypto", "ccy": "BTC", "tier": "tier_1_bluechip", "max_leverage": 12, "sl_atr_mult": 1.8, "base_sz": 1, "precision": 1, "ctVal": 0.01, "tickSz": "0.1", "minSz": "0.01", "risk_per_trade_usd": 0.0},
+    {"instId": "DOGE-USDT-SWAP", "name": "DOGE", "type": "crypto", "ccy": "DOGE", "tier": "tier_2_momentum", "max_leverage": 6, "sl_atr_mult": 2.2, "base_sz": 1, "precision": 5, "ctVal": 1000.0, "tickSz": "0.00001", "minSz": "0.01", "risk_per_trade_usd": 0.0},
+    {"instId": "ETH-USDT-SWAP", "name": "ETH", "type": "crypto", "ccy": "ETH", "tier": "tier_1_bluechip", "max_leverage": 12, "sl_atr_mult": 1.8, "base_sz": 1, "precision": 2, "ctVal": 0.1, "tickSz": "0.01", "minSz": "0.01", "risk_per_trade_usd": 0.0},
+    {"instId": "SOL-USDT-SWAP", "name": "SOL", "type": "crypto", "ccy": "SOL", "tier": "tier_2_momentum", "max_leverage": 6, "sl_atr_mult": 2.2, "base_sz": 1, "precision": 2, "ctVal": 1.0, "tickSz": "0.01", "minSz": "0.01", "risk_per_trade_usd": 0.0},
+    {"instId": "XRP-USDT-SWAP", "name": "XRP", "type": "crypto", "ccy": "XRP", "tier": "tier_2_momentum", "max_leverage": 6, "sl_atr_mult": 2.2, "base_sz": 1, "precision": 4, "ctVal": 100.0, "tickSz": "0.0001", "minSz": "0.01", "risk_per_trade_usd": 0.0},
 ]
 
 
@@ -184,7 +195,7 @@ def from_okx_instrument(raw: dict[str, Any]) -> dict[str, Any]:
         "ctVal": float(raw.get("ctVal") or 1.0),
         "tickSz": tick_size,
         "minSz": str(raw.get("minSz") or "1"),
-        "risk_per_trade_usd": 15.0,
+        "risk_per_trade_usd": 0.0,
     }
 
 
@@ -387,23 +398,28 @@ def sync_instruments_state() -> None:
             new_insts.append(existing_by_id[inst_id])
         else:
             # New coin baseline
+            # ★ 2026-10「不许假数据」：新币基线**只写系统状态**（"观望/等功能接入"），
+            #   **不写任何市场观测值**。原实现写入 rsi=50.0 / vol_ratio=1.0 /
+            #   obv_flow="NEUTRAL" / market_regime="CHOP" / trend="震荡" —— 看板会把
+            #   它们显示成"RSI 中性、量能正常、区间震荡"，而事实是这个币还没取过数。
+            #   市场类字段一律缺失（`None` / `"--"`），由行情与因子引擎随后填充。
             new_insts.append({
                 "name": target.get("name"),
                 "instId": inst_id,
                 "type": target.get("type", "crypto"),
                 "price": "--",
-                "rsi": 50.0,
-                "rsi_7": 50.0,
-                "vwap_bias": 0.0,
-                "macd_hist": 0.0,
-                "macd_accel": 0.0,
-                "obv_flow": "NEUTRAL",
-                "bb_bandwidth": 0.0,
-                "vol_ratio": 1.0,
-                "market_regime": "CHOP",
-                "structure_1h": "CHOP",
-                "trend_1h": "震荡",
-                "trend_4h": "震荡",
+                "rsi": None,
+                "rsi_7": None,
+                "vwap_bias": None,
+                "macd_hist": None,
+                "macd_accel": None,
+                "obv_flow": None,
+                "bb_bandwidth": None,
+                "vol_ratio": None,
+                "market_regime": None,
+                "structure_1h": None,
+                "trend_1h": None,
+                "trend_4h": None,
                 "score": 0.0,
                 "action": "WAIT",
                 "strategy": "⚪ 观望",

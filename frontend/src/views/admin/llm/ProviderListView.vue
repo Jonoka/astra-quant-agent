@@ -25,7 +25,7 @@ import { fmtDateTime } from '../../../utils/format'
 import { useI18n } from '../../../composables/useI18n'
 import { useLlmCtx } from './injection'
 import { AlertCircle, ArrowDown, ArrowUp, CheckCircle2, Clock, History, Plus,
-  RefreshCw, Save, Search, ShieldAlert, X, Server, Brain, Timer, Route } from 'lucide-vue-next'
+  RefreshCw, Save, Search, ShieldAlert, X, Server, Brain, Timer, Route, Zap, Trash2 } from 'lucide-vue-next'
 import BaseLoadingAnnounce from '../../../components/base/BaseLoadingAnnounce.vue';
 
 const { t } = useI18n()
@@ -53,6 +53,19 @@ const {
   thinkingTimeoutInput,
   toggleFallback,
   toggleProviderQuick,
+  // 结构自检（2026-09-29）：可用性徽标 / 全部测试 / 清理失效条目
+  testAllLoading,
+  testAllModels,
+  testAllResult,
+  cleanupDeadModels,
+  cleanupLoading,
+  cleanupResult,
+  deadModelIds,
+  healthWarnings,
+  providerHealth,
+  cacheStatus,
+  cacheLoading,
+  clearL1Cache,
 } = useLlmCtx()
 
 /** 首次加载中（尚无配置可渲染）→ 骨架 */
@@ -140,11 +153,32 @@ const bandFacts = () => [
 
 <template>
   <div class="pv">
-    <PageHeader :title="t('nav.admin.llm')" :description="t('admin.llm.desc')">
+    <PageHeader :title="t('nav.admin.llm')">
       <template #actions>
         <button type="button" class="btn btn-ghost btn-sm" :disabled="loading" @click="loadConfig">
           <RefreshCw :size="14" :class="loading && 'animate-spin shrink-0'" />
           <span>{{ t('admin.llm.refreshStatus') }}</span>
+        </button>
+        <button
+          type="button"
+          class="btn btn-ghost btn-sm"
+          :disabled="testAllLoading"
+          :title="t('admin.llm.testAllTitle')"
+          @click="testAllModels()"
+        >
+          <ShieldAlert :size="14" :class="testAllLoading && 'animate-spin shrink-0'" />
+          <span>{{ testAllLoading ? t('admin.llm.testingAll') : t('admin.llm.testAll') }}</span>
+        </button>
+        <button
+          v-if="deadModelIds.length"
+          type="button"
+          class="btn btn-ghost btn-sm is-danger"
+          :disabled="cleanupLoading"
+          :title="t('admin.llm.cleanupDeadTitle')"
+          @click="cleanupDeadModels()"
+        >
+          <X :size="14" />
+          <span>{{ t('admin.llm.cleanupDead', undefined, { n: deadModelIds.length }) }}</span>
         </button>
         <button type="button" class="btn btn-primary btn-sm" :title="t('admin.llm.addProviderTitle')" @click="openAddProviderModal">
           <Plus :size="14" />
@@ -153,6 +187,57 @@ const bandFacts = () => [
       </template>
     </PageHeader>
 
+
+    <!-- ══ 结构自检 / 真机全量测试（2026-09-29） ══
+         为什么在列表页：后台此前把三条模型并列显示、其中两条是死的（无密钥 /
+         供应商不存在）却毫无标记，`fallback_model_ids` 又是空的（等于没有回退）。
+         自检结果由后端 `model_health` 下发，真机结论由 `/test-all` 现场探测。 -->
+    <section v-if="healthWarnings.length || testAllResult || cleanupResult" class="card">
+      <header class="card-head">
+        <div>
+          <h2 class="card-title"><ShieldAlert :size="14" />{{ t('admin.llm.selfCheckTitle') }}</h2>
+        </div>
+      </header>
+
+      <div v-if="healthWarnings.length" class="pv-body">
+        <div v-for="w in healthWarnings" :key="w.code" class="pv-kv">
+          <span class="label-caps is-warn">{{ t('admin.llm.selfCheckWarn') }}</span>
+          <span class="pv-kv-v">{{ w.detail }}</span>
+        </div>
+      </div>
+
+      <div v-if="cleanupResult" class="pv-body">
+        <div class="pv-kv">
+          <span class="label-caps">{{ t('admin.llm.cleanupResult') }}</span>
+          <span class="pv-kv-v mono">
+            {{ t('admin.llm.cleanupRemoved', undefined, { n: (cleanupResult.removed || []).length }) }}
+            <template v-if="(cleanupResult.failed || []).length">
+              · {{ t('admin.llm.cleanupFailed', undefined, { n: cleanupResult.failed.length }) }}
+            </template>
+          </span>
+        </div>
+      </div>
+
+      <div v-if="testAllResult" class="pv-body selfcheck-rows">
+        <div v-for="row in testAllResult.rows || []" :key="row.model" class="pv-kv selfcheck-row">
+          <span class="label-caps mono">{{ row.model }}</span>
+          <span class="pv-kv-v mono">
+            <span class="badge" :class="row.ok ? 'badge-up' : (row.skipped ? 'badge-warn' : 'badge-down')">
+              {{ row.ok ? t('admin.llm.selfCheckOk') : (row.skipped ? t('admin.llm.selfCheckSkipped') : t('admin.llm.selfCheckFail')) }}
+            </span>
+            <span class="selfcheck-fmt">{{ row.api_format }}</span>
+            <span v-if="row.latency_ms" class="selfcheck-lat">{{ row.latency_ms }}ms</span>
+            <span
+              v-if="row.error"
+              role="status"
+              aria-live="polite"
+              class="selfcheck-err truncate"
+              :title="row.error"
+            >{{ row.error }}</span>
+          </span>
+        </div>
+      </div>
+    </section>
     <!-- ══ 状态带 ══ -->
     <section class="card band">
       <div v-for="f in bandFacts()" :key="f.label" class="fact">
@@ -167,7 +252,6 @@ const bandFacts = () => [
       <header class="card-head">
         <div>
           <h2 class="card-title"><Clock :size="14" />{{ t('admin.llm.globalTimeoutTitle') }}</h2>
-          <p class="card-sub">{{ t('admin.llm.globalTimeoutDesc') }}</p>
         </div>
         <span class="badge mono">{{ t('admin.llm.currentLimit', undefined, { n: cfg?.thinking_timeout || 120 }) }}</span>
         <button type="button" class="btn btn-primary btn-sm" :disabled="savingSettings" @click="saveGlobalSettings">
@@ -193,7 +277,6 @@ const bandFacts = () => [
       <div class="pv-field">
         <div class="pv-field-head">
           <span class="form-label">{{ t('admin.llm.effort') }}</span>
-          <span class="pv-hint">{{ t('admin.llm.desc') }}</span>
         </div>
         <div class="pv-field-row">
           <div class="pv-presets">
@@ -260,7 +343,6 @@ const bandFacts = () => [
       <header class="card-head">
         <div>
           <h2 class="card-title"><ShieldAlert :size="14" />{{ t('admin.llm.resilienceTitle') }}</h2>
-          <p class="card-sub">{{ t('admin.llm.resilienceDesc') }}</p>
         </div>
         <span class="badge mono">
           {{ t('admin.llm.attemptsChip', undefined, { n: cfg?.request_attempts || 3, m: (cfg?.fallback_model_ids || []).length }) }}
@@ -306,7 +388,6 @@ const bandFacts = () => [
               </button>
             </div>
           </div>
-          <p class="pv-hint block">{{ t('admin.llm.attemptsDesc') }}</p>
         </div>
 
         <!-- 回退链 -->
@@ -383,6 +464,81 @@ const bandFacts = () => [
       </div>
     </section>
 
+    <!-- ══ 2026 大模型前缀缓存与成本加速 ══ -->
+    <section v-if="cacheStatus" class="card">
+      <header class="card-head">
+        <h2 class="card-title">
+          <Zap :size="14" />
+          {{ t('admin.llm.cacheTitle') }}
+        </h2>
+        <span class="badge mono" :class="cacheStatus.model_stats?.cache_hit_rate ? 'badge-up' : ''">
+          {{ cacheStatus.model_stats?.cache_hit_rate != null ? `${cacheStatus.model_stats.cache_hit_rate}%` : '--' }}
+        </span>
+        <button
+          type="button"
+          class="btn btn-ghost btn-sm"
+          :disabled="cacheLoading"
+          :title="t('admin.llm.clearL1CacheTitle')"
+          @click="clearL1Cache"
+        >
+          <Trash2 :size="14" />
+          <span>{{ t('admin.llm.clearL1Cache') }}</span>
+        </button>
+      </header>
+
+      <div class="pv-body">
+        <div class="pv-kv">
+          <span class="label-caps">{{ t('admin.llm.cacheHitRate') }}</span>
+          <span class="pv-kv-v mono" :class="cacheStatus.model_stats?.cache_hit_rate ? 'is-up' : ''">
+            {{ cacheStatus.model_stats?.cache_hit_rate != null ? `${cacheStatus.model_stats.cache_hit_rate}%` : '--' }}
+            ({{ cacheStatus.model_stats?.cache_hit_calls ?? 0 }}/{{ cacheStatus.model_stats?.cache_reporting_calls ?? 0 }})
+          </span>
+        </div>
+
+        <div class="pv-kv">
+          <span class="label-caps">{{ t('admin.llm.cachedTokensTotal') }}</span>
+          <span class="pv-kv-v mono is-accent">
+            {{ Number(cacheStatus.total_saved_tokens ?? 0).toLocaleString() }} Tokens
+          </span>
+        </div>
+
+        <div class="pv-kv">
+          <span class="label-caps">{{ t('admin.llm.estimatedSavings') }}</span>
+          <span class="pv-kv-v mono is-up">
+            ≈ ${{ cacheStatus.estimated_saved_usd ?? '0.00' }} USD
+          </span>
+        </div>
+
+        <div class="pv-kv">
+          <span class="label-caps">{{ t('admin.llm.l1CacheEntries') }}</span>
+          <span class="pv-kv-v mono">
+            {{ cacheStatus.l1_query_cache?.in_memory_entries ?? 0 }} (Hit: {{ cacheStatus.l1_query_cache?.hits ?? 0 }})
+          </span>
+        </div>
+      </div>
+
+      <div class="p-3">
+        <div class="label-caps mb-2">{{ t('admin.llm.protocolMatrix') }}</div>
+        <div class="flex flex-wrap gap-2">
+          <span class="badge mono" :class="cacheStatus.capabilities?.claude_ephemeral ? 'badge-up' : ''">
+            {{ t('admin.llm.claudeEphemeral') }}
+          </span>
+          <span class="badge mono" :class="cacheStatus.capabilities?.deepseek_prefix ? 'badge-up' : ''">
+            {{ t('admin.llm.deepseekPrefix') }}
+          </span>
+          <span class="badge mono" :class="cacheStatus.capabilities?.openai_prefix ? 'badge-up' : ''">
+            {{ t('admin.llm.openaiPrefix') }}
+          </span>
+          <span class="badge mono" :class="cacheStatus.capabilities?.gemini_context ? 'badge-up' : ''">
+            {{ t('admin.llm.geminiContext') }}
+          </span>
+          <span class="badge mono" :class="cacheStatus.capabilities?.session_affinity_active ? 'badge-accent' : ''">
+            {{ t('admin.llm.sessionAffinity') }}
+          </span>
+        </div>
+      </div>
+    </section>
+
     <!-- ══ 供应商矩阵 ══ -->
     <section class="card">
       <header class="card-head">
@@ -436,6 +592,12 @@ const bandFacts = () => [
               >
                 {{ t('admin.llm.brainActive') }}
               </span>
+              <span v-if="providerHealth(prov).dead" class="badge badge-down">
+                {{ t('admin.llm.deadModels', undefined, { n: providerHealth(prov).dead }) }}
+              </span>
+              <span v-else-if="providerHealth(prov).warn" class="badge badge-warn">
+                {{ t('admin.llm.warnModels', undefined, { n: providerHealth(prov).warn }) }}
+              </span>
             </div>
             <span class="pv-meta mono">
               {{ prov.id }} · {{ prov.models_count || 0 }} {{ t('admin.llm.modelsSuffix') }} · {{ prov.group || t('admin.llm.groupOther') }}
@@ -475,6 +637,30 @@ const bandFacts = () => [
 
 
 
+
+/* ══ 结构自检 ══ */
+.selfcheck-rows {
+  grid-template-columns: 1fr;
+}
+.selfcheck-row .pv-kv-v {
+  display: flex;
+  align-items: center;
+  gap: var(--ds-space-2);
+  min-width: 0;
+}
+.selfcheck-fmt {
+  color: var(--ds-color-text-muted);
+}
+.selfcheck-lat {
+  color: var(--ds-color-text-muted);
+}
+.selfcheck-err {
+  max-width: 22ch;
+  color: var(--ds-color-danger-text, var(--ds-color-text-muted));
+}
+.label-caps.is-warn {
+  color: var(--ds-color-warning-text, var(--ds-color-text-muted));
+}
 
 /* ══ 通用块 ══ */
 .pv-body {

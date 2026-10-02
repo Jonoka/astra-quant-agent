@@ -2,17 +2,20 @@
 
 这个模块是 B6 拆分里唯一**零直接测试引用**的（全仓 224 个模块扫描的结果），
 却承担着最关键的一件事：**把「策略身份」压成一个 16 位整包标识**，用于
-归档文件命名与回滚校验（审计 P0-3：`policy_hash` 只覆盖 4 个单元，而归档实际装 6 个，
+归档文件命名与回滚校验（审计 P0-3：`policy_hash` 只覆盖少数单元，而归档实际装更多，
 仅风控/路由不同的两个版本会**同名互相覆盖**）。
+
+2026-10：策略插件系统整套裁撤 —— `extract_interceptors_fingerprint` 与
+`interceptor_config` 投影单元一并移除，本文件同步删除 `ExtractInterceptorsTests`。
 
 本刀钉三类语义：
 
 1. **确定性** —— 同样的输入必须得到同样的哈希；顺序、空白、易变字段都不许改变它。
-2. **注入缝** —— 四个 `extract_*` 在 `root_dir`/显式入参缺省时才回退模块级 ROOT，
-   且本地导入（prompt_library / evolution_shield / interceptor_manager / council_manager）
+2. **注入缝** —— 各 `extract_*` 在 `root_dir`/显式入参缺省时才回退模块级 ROOT，
+   且本地导入（prompt_library / evolution_shield / council_manager）
    都在**调用时**发生；这是 `patch.object(policy_snapshot, "ROOT", 沙箱根)` 能生效的前提
    （失效会回落到真实项目根 ⇒ 回滚写生产 `data/`）。
-3. **失败回落是"显式默认值"而不是崩溃** —— 四个数据源各自读不到时给出**可辨识**的
+3. **失败回落是"显式默认值"而不是崩溃** —— 各数据源读不到时给出**可辨识**的
    缺省指纹，绝不让整包生成失败。
 """
 from __future__ import annotations
@@ -41,7 +44,6 @@ from astra_backend.policy.fingerprints import (  # noqa: E402
     compute_layout_hash,
     extract_council_fingerprint,
     extract_evolution_mind_fingerprint,
-    extract_interceptors_fingerprint,
     extract_prompt_profile_fingerprint,
     package_identity,
     package_restore_diff,
@@ -186,8 +188,8 @@ class ExtractPromptProfileTests(unittest.TestCase):
 
     def test_defaults_when_profile_lacks_fields(self):
         fp = extract_prompt_profile_fingerprint(Path("/nonexistent"), {})
-        self.assertEqual(fp["active_profile_id"], "stable")
-        self.assertEqual(fp["active_profile_name"], "全维度波段强化版")
+        self.assertEqual(fp["active_profile_id"], "allpattern_swing")
+        self.assertEqual(fp["active_profile_name"], "全形态波段策略(提示词样板)")
         self.assertEqual(fp["editor_mode"], "modules")
 
     def test_loads_active_profile_when_not_given(self):
@@ -209,8 +211,8 @@ class ExtractPromptProfileTests(unittest.TestCase):
     def test_unloadable_library_yields_documented_default(self):
         with patch.dict(sys.modules, {"prompt_library": None}):
             fp = extract_prompt_profile_fingerprint(Path("/nonexistent"))
-        self.assertEqual(fp["active_profile_id"], "stable")
-        self.assertEqual(fp["active_profile_name"], "全维度波段强化版")
+        self.assertEqual(fp["active_profile_id"], "allpattern_swing")
+        self.assertEqual(fp["active_profile_name"], "全形态波段策略(提示词样板)")
         self.assertEqual(fp["editor_mode"], "modules")
 
     def test_active_profile_raising_is_also_caught(self):
@@ -219,7 +221,7 @@ class ExtractPromptProfileTests(unittest.TestCase):
             load_active_profile=lambda: {"id": "x"})
         with patch.dict(sys.modules, {"prompt_library": fake}):
             fp = extract_prompt_profile_fingerprint(Path("/nonexistent"))
-        self.assertEqual(fp["active_profile_id"], "stable")
+        self.assertEqual(fp["active_profile_id"], "allpattern_swing")
 
     def test_scripts_dir_is_removed_again_from_sys_path(self):
         before = list(sys.path)
@@ -293,92 +295,6 @@ class ExtractEvolutionMindTests(unittest.TestCase):
             fp = extract_evolution_mind_fingerprint(Path("/fresh/root"))
         self.assertEqual(fp["version"], "v5")
         self.assertEqual(fp["enabled_count"], 1)
-
-
-class ExtractInterceptorsTests(unittest.TestCase):
-    def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self.tmp.cleanup)
-        self.plugins_dir = Path(self.tmp.name) / "plugins" / "interceptors"
-        self.plugins_dir.mkdir(parents=True)
-        (self.plugins_dir / "a.py").write_bytes(b"PLUGIN-A")
-
-    def test_pipeline_keeps_only_enabled_and_preserves_order(self):
-        plugins = [
-            {"filename": "off.py", "enabled": False, "file_hash": "OFF"},
-            {"filename": "a.py", "enabled": True, "file_hash": "HASH-A"},
-            {"filename": "b.py", "enabled": True, "file_hash": "HASH-B"},
-        ]
-        fp = extract_interceptors_fingerprint(Path("/nonexistent"), plugins,
-                                              self.plugins_dir)
-        self.assertEqual(fp["total_count"], 3)
-        self.assertEqual(fp["enabled_count"], 2)
-        self.assertEqual(fp["enabled_plugins"], ["a.py", "b.py"])
-        self.assertEqual([p["order"] for p in fp["pipeline"]], [1, 2])
-        self.assertEqual(fp["plugins_hash"],
-                         _sha8("1:a.py:HASH-A;2:b.py:HASH-B"))
-
-    def test_missing_hash_is_computed_from_disk(self):
-        fp = extract_interceptors_fingerprint(
-            Path("/nonexistent"),
-            [{"filename": "a.py", "enabled": True}],
-            self.plugins_dir)
-        expected = hashlib.sha256(b"PLUGIN-A").hexdigest()[:8]
-        self.assertEqual(fp["pipeline"][0]["file_hash"], expected)
-
-    def test_absent_plugin_file_hashes_as_missing(self):
-        fp = extract_interceptors_fingerprint(
-            Path("/nonexistent"),
-            [{"filename": "ghost.py", "enabled": True}],
-            self.plugins_dir)
-        self.assertEqual(fp["pipeline"][0]["file_hash"], "missing")
-
-    def test_non_dict_entries_are_skipped(self):
-        plugins = ["junk", None, {"filename": "a.py", "enabled": True, "file_hash": "H"}]
-        fp = extract_interceptors_fingerprint(Path("/nonexistent"), plugins,
-                                              self.plugins_dir)
-        self.assertEqual(fp["total_count"], 3)      # 总数仍按原始长度
-        self.assertEqual(fp["enabled_count"], 1)
-        self.assertEqual(fp["pipeline"][0]["order"], 2)
-
-    def test_disabled_entries_do_not_enter_pipeline(self):
-        fp = extract_interceptors_fingerprint(
-            Path("/nonexistent"),
-            [{"filename": "a.py", "enabled": False, "file_hash": "H"}],
-            self.plugins_dir)
-        self.assertEqual(fp["enabled_count"], 0)
-        self.assertEqual(fp["pipeline"], [])
-        self.assertEqual(fp["plugins_hash"], _sha8(""))
-
-    def test_pipeline_hash_is_order_stable(self):
-        plugins = [{"filename": "a.py", "enabled": True, "file_hash": "H"},
-                   {"filename": "b.py", "enabled": True, "file_hash": "G"}]
-        first = extract_interceptors_fingerprint(Path("/x"), plugins, self.plugins_dir)
-        second = extract_interceptors_fingerprint(Path("/y"), plugins, self.plugins_dir)
-        self.assertEqual(first["plugins_hash"], second["plugins_hash"])
-
-    def test_lists_plugins_when_not_given(self):
-        import astra_backend.interceptor_manager as im
-        with patch.object(im, "list_plugins",
-                          lambda create_if_missing=False: [{"filename": "a.py",
-                                                            "enabled": True,
-                                                            "file_hash": "Z"}]):
-            fp = extract_interceptors_fingerprint(Path("/nonexistent"),
-                                                  plugins_dir=self.plugins_dir)
-        self.assertEqual(fp["enabled_plugins"], ["a.py"])
-
-    def test_list_failure_yields_empty_pipeline(self):
-        import astra_backend.interceptor_manager as im
-        with patch.object(im, "list_plugins", side_effect=OSError("no dir")):
-            fp = extract_interceptors_fingerprint(Path("/nonexistent"),
-                                                  plugins_dir=self.plugins_dir)
-        self.assertEqual(fp["total_count"], 0)
-        self.assertEqual(fp["plugins_hash"], _sha8(""))
-
-    def test_non_list_plugins_is_tolerated(self):
-        fp = extract_interceptors_fingerprint(Path("/nonexistent"), "not-a-list",
-                                              self.plugins_dir)
-        self.assertEqual(fp["total_count"], 0)
 
 
 class ExtractCouncilTests(unittest.TestCase):
@@ -480,11 +396,12 @@ class CanonicalisationTests(unittest.TestCase):
         self.assertEqual(list(out["profiles"]), ["b"])
 
     def test_evolution_memory_accepts_list_or_dict(self):
+        # 2026-10：`is_baseline` 随基准机制拆除 ⇒ 指纹不再覆盖该字段。
         lesson = {"id": 1, "category": "c", "rule_text": "r", "enabled": True,
                   "is_baseline": False, "noise": "dropped"}
         self.assertEqual(_canon_evolution_memory([lesson]),
                          [{"id": 1, "category": "c", "rule_text": "r",
-                           "enabled": True, "is_baseline": False}])
+                           "enabled": True}])
         self.assertEqual(_canon_evolution_memory({"lessons": [lesson]}),
                          _canon_evolution_memory([lesson]))
 
@@ -515,7 +432,6 @@ class PackageIdentityTests(unittest.TestCase):
         base = {
             "prompt_config": {"active_profile_id": "p", "profiles": {}},
             "evolution_memory": [{"id": 1, "rule_text": "r"}],
-            "interceptor_config": {"enabled": ["a.py"]},
             "council_config": {"enabled": True, "roles": {}},
             "risk_config": {"max_leverage": 5},
             "venue_routing": {"okx": 1},
@@ -523,10 +439,11 @@ class PackageIdentityTests(unittest.TestCase):
         base.update(overrides)
         return base
 
-    def test_projection_has_exactly_the_six_units(self):
+    def test_projection_has_exactly_the_four_units(self):
+        # 2026-10：策略插件系统整套裁撤 ⇒ `interceptor_config` 不再是投影单元。
         self.assertEqual(sorted(canonical_package_projection(self._payload())),
-                         ["council_config", "evolution_memory", "interceptor_config",
-                          "prompt_config", "risk_config", "venue_routing"])
+                         ["council_config", "evolution_memory",
+                          "prompt_config", "risk_config"])
 
     def test_non_mapping_payload_yields_empty_projection(self):
         projection = canonical_package_projection("junk")
@@ -547,12 +464,10 @@ class PackageIdentityTests(unittest.TestCase):
                           notes="hello", package_hash="deadbeef")
         self.assertEqual(package_identity(a), package_identity(b))
 
-    def test_risk_and_routing_do_change_identity(self):
+    def test_risk_does_change_identity(self):
         base = self._payload()
         self.assertNotEqual(package_identity(base),
                             package_identity(self._payload(risk_config={"max_leverage": 6})))
-        self.assertNotEqual(package_identity(base),
-                            package_identity(self._payload(venue_routing={"okx": 2})))
 
     def test_projection_accepts_any_mapping(self):
         import collections
@@ -566,7 +481,6 @@ class PackageRestoreDiffTests(unittest.TestCase):
         base = {
             "prompt_config": {"active_profile_id": "p", "profiles": {}},
             "evolution_memory": [{"id": 1, "rule_text": "r"}],
-            "interceptor_config": {"enabled": ["a.py"]},
             "council_config": {"enabled": True, "roles": {}},
             "risk_config": {"max_leverage": 5},
             "venue_routing": {"okx": 1},
@@ -580,7 +494,7 @@ class PackageRestoreDiffTests(unittest.TestCase):
 
     def test_genuinely_empty_units_are_never_claimed(self):
         # 归档没装的单元无从承诺 ⇒ 当前有、归档没有**不算**恢复失败
-        archived = self._payload(evolution_memory=[], interceptor_config={},
+        archived = self._payload(evolution_memory=[],
                                  risk_config={}, venue_routing={})
         current = self._payload()
         self.assertEqual(package_restore_diff(archived, current), [])
@@ -591,19 +505,19 @@ class PackageRestoreDiffTests(unittest.TestCase):
         # 但 `_canon_prompt_config({})` 会补成 `{active_profile_id: None,
         # active_style: None, profiles: {}}`、`_canon_council_config({})` 会补成
         # `{enabled: False, consensus_mode: None, timeout_seconds: None, roles: {}}`
-        # —— **两者都非空**，于是"空 ⇒ 跳过"这条对 6 个单元里的这 2 个**不成立**。
+        # —— **两者都非空**，于是"空 ⇒ 跳过"这条对 4 个单元里的这 2 个**不成立**。
         # 后果：归档里写着 `prompt_config: {}` 的包，恢复到任何有提示词配置的当前态，
         # 都会被判成 `prompt_config` 恢复失败（而不是"无从承诺"）。
         archived = self._payload(prompt_config={}, council_config={},
-                                 evolution_memory=[], interceptor_config={})
+                                 evolution_memory=[])
         diff = package_restore_diff(archived, self._payload())
         self.assertEqual(diff, ["prompt_config", "council_config"])
 
     def test_only_two_units_have_non_falsy_canonical_skeleton(self):
         # 用规范化投影本身把上一条的机理钉死：哪几个单元"写空也非空"
         non_falsy = []
-        for unit in ("prompt_config", "evolution_memory", "interceptor_config",
-                     "council_config", "risk_config", "venue_routing"):
+        for unit in ("prompt_config", "evolution_memory",
+                     "council_config", "risk_config"):
             empty = [] if unit == "evolution_memory" else {}
             if canonical_package_projection(self._payload(**{unit: empty}))[unit]:
                 non_falsy.append(unit)
@@ -611,8 +525,8 @@ class PackageRestoreDiffTests(unittest.TestCase):
 
     def test_sequential_units_require_exact_match(self):
         archived = self._payload()
-        diff = package_restore_diff(archived, self._payload(interceptor_config={"enabled": []}))
-        self.assertEqual(diff, ["interceptor_config"])
+        diff = package_restore_diff(archived, self._payload(evolution_memory=[{"id": 2}]))
+        self.assertEqual(diff, ["evolution_memory"])
 
     def test_prompt_and_council_mismatches_are_reported(self):
         archived = self._payload()
@@ -638,31 +552,6 @@ class PackageRestoreDiffTests(unittest.TestCase):
         archived = self._payload(risk_config={"max_leverage": 5})
         diff = package_restore_diff(archived, self._payload(risk_config={}))
         self.assertEqual(diff, ["risk_config.max_leverage"])
-
-    def test_venue_routing_keys_are_checked_too(self):
-        archived = self._payload(venue_routing={"okx": 1})
-        self.assertEqual(package_restore_diff(archived, self._payload(venue_routing={})),
-                         ["venue_routing.okx"])
-
-    def test_non_mapping_dict_unit_is_compared_wholesale(self):
-        # venue_routing 原样透传 ⇒ 列表也能进来；类型不是 Mapping 时整块比较
-        archived = self._payload(venue_routing=["okx"])
-        current = self._payload(venue_routing={"okx": 1})
-        self.assertEqual(package_restore_diff(archived, current), ["venue_routing"])
-
-    def test_non_mapping_current_is_compared_wholesale(self):
-        archived = self._payload(venue_routing={"okx": 1})
-        current = self._payload(venue_routing=["okx"])
-        self.assertEqual(package_restore_diff(archived, current), ["venue_routing"])
-
-    def test_equal_non_mapping_units_pass(self):
-        archived = self._payload(venue_routing=["okx"])
-        current = self._payload(venue_routing=["okx"])
-        self.assertEqual(package_restore_diff(archived, current), [])
-
-    def test_empty_archived_dict_unit_is_skipped(self):
-        archived = self._payload(venue_routing={}, risk_config={})
-        self.assertEqual(package_restore_diff(archived, self._payload()), [])
 
     def test_diff_is_a_list_of_unit_names(self):
         # 归档声称有心法，当前却是空的 ⇒ 必须报出来（这正是恢复校验的意义）

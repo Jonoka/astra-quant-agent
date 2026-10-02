@@ -51,6 +51,33 @@ def submitted_bracket(venue_ctx: Any, px: float, tp_px: float,
     return px, tp_px, sl_px
 
 
+#: 本轮「观望 / 拦单」明细（2026-10 三态可观测性）。
+#:
+#: 为什么是**模块级可变列表**而不是新入参：`execute_entry_scan` 的 41 项同名入参
+#: 被抽取门按 AST 逐字钉住（`scripts/trader/__init__.py` 的契约表），加一个参数会
+#: 牵动签名快照与多处测试缝；而"每轮清空 + 写日志时取走"本就是**纯副作用**，
+#: 与既有的 `submitted_bracket`（同为本模块内的自由名）同一手法。
+#:
+#: 每条记录：`{"name", "source", "confidence", "reason"}`
+#: - `source="model"` 模型主动观望（它自己输出 WAIT）
+#: - `source="gate"`  执行层/物理层拦下了模型的开仓意图
+#: - `source="omitted"` 该标的未出现在模型响应里（契约允许省略，按 fail-closed 兜底）
+ENTRY_DIAGNOSTICS = []          # list[dict]，键见下方说明
+
+
+def _record_entry_diagnostic(name, source, confidence, reason):
+    """记录一条观望/拦单明细（失败**绝不**影响交易：调用方只写不读）。"""
+    try:
+        ENTRY_DIAGNOSTICS.append({
+            "name": str(name or "?"),
+            "source": str(source or "model"),
+            "confidence": float(confidence or 0.0),
+            "reason": str(reason or "")[:60],
+        })
+    except Exception:
+        pass
+
+
 def execute_entry_scan(*,
         all_factors,
         brain_cache,
@@ -92,10 +119,17 @@ def execute_entry_scan(*,
         save_trackers,
         size_for_decision,
         submit_protected_limit_order,
-        trade_open_kwargs):
+        trade_open_kwargs,
+        venue_executed_facts):
+    # 每轮清空：明细只描述**本轮**（调用方写日志时取走，见 scripts/ai_factor_trader.py）
+    ENTRY_DIAGNOSTICS.clear()
     for f in all_factors:
         asset_type = f.get("type", "crypto")
         if not is_tradfi_market_liquid(asset_type):
+            continue
+
+        if f.get("market_data_valid") is False:
+            print(f"[行情闸门] {f['name']} 行情数据不完整或指标缺失，禁止开仓")
             continue
 
         score, action, reasons, strat_tag, strat_desc = evaluate_asset_signal(f)
@@ -121,6 +155,7 @@ def execute_entry_scan(*,
         ai_info = brain_cache.get(inst_id) if isinstance(brain_cache, dict) else None
         if not ai_info or "decision" not in ai_info:
             print(f"[AI Brain 全权拦截] {f['name']} 本轮无有效新鲜 AI 决策，禁止开仓")
+            _record_entry_diagnostic(f.get("name"), "omitted", 0.0, "本轮无有效新鲜 AI 决策")
             continue
 
         ai_decision = ai_info["decision"]
@@ -144,6 +179,14 @@ def execute_entry_scan(*,
             action = "HOLD"
             strat_tag = "🤖 AI观望"
             strat_desc = f"AI大脑判定当前无高确定性机会({ai_reason})"
+            _record_entry_diagnostic(
+                f.get("name"),
+                # 三态优先级：漏答 > 物理层拦单 > 模型主动观望
+                ("omitted" if str(ai_decision.get("decision_source", "model")) == "omitted"
+                 else "gate" if ai_decision.get("gate_blocked")
+                 else "model"),
+                ai_conf,
+                (ai_decision.get("gate_reason") if ai_decision.get("gate_blocked") else ai_reason))
             continue
 
         # Dynamic Equal-Risk Position Size with AI Custom Margin Allocation
@@ -171,6 +214,13 @@ def execute_entry_scan(*,
                   f"已夹至 {ai_lever:g}x")
         step_sz = float(f.get("minSz", 1) or 1)
 
+        # 最小名义面额智能保底：若经过多重折减后保证金略低于 1 张合约门槛，且账户资金完全充足，自动对齐至 1 张面额
+        if ai_margin > 0 and ai_lever >= 1.0 and f.get("price", 0) > 0 and ct_val > 0:
+            min_unit_margin = (float(f["price"]) * float(ct_val) * step_sz) / float(ai_lever)
+            if 0 < ai_margin < min_unit_margin and usdt_available >= min_unit_margin:
+                if ai_margin >= min_unit_margin * 0.65:
+                    ai_margin = round(min_unit_margin, 2)
+
         # If AI planned margin & leverage, calculate custom contract size
         # （四道钳制的顺序见 scripts/trader/sizing.py —— 顺序换了会放大仓位）
         actual_sz = size_for_decision(
@@ -182,7 +232,11 @@ def execute_entry_scan(*,
 
         if actual_sz <= 0:
             if f.get("size_below_exchange_min") or ai_margin > 0:
-                print(f"[仓位跳过] {f['name']} 按风险预算推导的数量低于交易所最小下单量 {step_sz} 张"
+                # 用**最小下单名义**表述（`步长 × 面值 × 现价`）——各币种面值不同，
+                # 张数无法横向比较，钱可以。见 `notifications.money_size_text`。
+                _min_notional = (step_sz * ct_val * float(f.get("price", 0.0) or 0.0))
+                print(f"[仓位跳过] {f['name']} 按风险预算推导的仓位低于交易所最小下单名义 "
+                      f"{_min_notional:.2f}U"
                       f"(可用余额 {usdt_available}, 单笔风险额 {f['risk_per_trade_usd']}U)，本周期不交易该标的")
             continue
 
@@ -196,7 +250,11 @@ def execute_entry_scan(*,
                 if ai_conf >= MIN_ENTRY_CONFIDENCE:
                     allow_entry = True
                 else:
-                    print(f"[首发开多拦截] {f['name']} AI置信度 {ai_conf:.1f}% 未达 80% 门禁，宁缺毋滥，拦截入场")
+                    print(f"[首发开多拦截] {f['name']} AI置信度 {ai_conf:.1f}% "
+                          f"未达 {MIN_ENTRY_CONFIDENCE:g}% 门禁，宁缺毋滥，拦截入场")
+                    _record_entry_diagnostic(
+                        f.get("name"), "gate", ai_conf,
+                        f"置信度 {ai_conf:.1f}% < 门禁 {MIN_ENTRY_CONFIDENCE:g}%")
 
             # Case B: Strict Pyramiding Scale-In (Existing long position in profit/breakeven)
             elif curr_pos and str(curr_pos.get("side", "")).lower() == "long" and inst_id not in pending_inst_ids:
@@ -223,17 +281,18 @@ def execute_entry_scan(*,
                 # 2. Maximum 1 scale-in per position to prevent overconcentration.
                 # 3. Combined margin must not exceed MAX_SINGLE_ASSET_MARGIN.
                 # 4. AI Confidence must be >= 75%.
-                # 5. Calculus Momentum & Probability Gateway: Acceleration a >= -0.25 and Continuation Prob >= 40%
-                c_dyn = f.get("calculus", {})
-                c_accel = float(c_dyn.get("acceleration", 0.0) or 0.0)
-                p_th = c_dyn.get("probability_theory", {})
-                p_cont = float(p_th.get("continuation_prob_pct", 50.0) or 50.0)
-                calculus_accel_ok = (c_accel >= -0.25 and p_cont >= 40.0)
+                # 5. Momentum & Positioning Gateway（2026-10 重钉）：
+                #    原「微积分加速度 a >= -0.25 且 延续概率 >= 40%」；数理链退场后
+                #    改用 **T4 MACD 柱加速度** ＋ **T0 的 OI 四象限**（可观测、可复核）。
+                t4 = f.get("trend_momentum", {}) or {}
+                c_accel = float(t4.get("macd_accel", 0.0) or 0.0)
+                oi_quadrant = str((f.get("smart_money_derivatives", {}) or {})
+                                  .get("oi_price_quadrant", "") or "")
 
                 allow_entry, is_scale_in = pyramiding_gate(
                     is_long=True, f=f, pos_upl=pos_upl, pos_upl_ratio=pos_upl_ratio,
                     pos_avg_px=pos_avg_px, curr_margin=curr_margin, trailing_sl=trailing_sl,
-                    scale_count=scale_count, c_accel=c_accel, p_th=p_th,
+                    scale_count=scale_count, c_accel=c_accel, oi_quadrant=oi_quadrant,
                     ai_margin=ai_margin, actual_sz=actual_sz, ct_val=ct_val,
                     ai_lever=ai_lever, ai_conf=ai_conf,
                     min_scale_in_profit_ratio=MIN_SCALE_IN_PROFIT_RATIO,
@@ -262,10 +321,13 @@ def execute_entry_scan(*,
                     leverage=ai_lever, usdt_available=usdt_available)
                 _side, _pos_side, _venue_ctx = build_order_intent(
                     is_long=True, inst_id=inst_id, actual_sz=actual_sz, ct_val=ct_val,
+                    min_sz=step_sz,
                     limit_px=limit_px, ai_lever=ai_lever,
                     margin_usdt=_order_margin,
                     max_margin_usdt=equity_margin_cap(usdt_available),
                     inst_lever_cap=_inst_lever_cap, ai_conf=ai_conf, ai_info=ai_info)
+                if isinstance(_venue_ctx, dict):
+                    _venue_ctx["atr"] = atr
                 accepted, order_ref = submit_protected_limit_order(
                     inst_id, _side, _pos_side, actual_sz, limit_px, tp_px, sl_px,
                     venue_ctx=_venue_ctx)
@@ -274,24 +336,37 @@ def execute_entry_scan(*,
                     # `submitted_bracket` 的 docstring）；限价档逐位不变。
                     limit_px, tp_px, sl_px = submitted_bracket(
                         _venue_ctx, limit_px, tp_px, sl_px)
+                    # ⚠️ 仓位大小一律用**钱**口径（保证金 + 杠杆），不再说张数：
+                    # 各币种合约面值算法不同（见 `notifications.money_size_text`）。
+                    # 优先用执行层回写的**实提交**保证金；取不到则回落保证金闸门
+                    # 结果 `_order_margin`。
+                    _exe_margin, _exe_notional = venue_executed_facts(_venue_ctx)
+                    _exe_margin = _exe_margin or _order_margin
+                    _exe_notional = _exe_notional or round(
+                        float(_exe_margin or 0.0) * float(ai_lever or 0.0), 2)
                     if is_scale_in:
                         tracker = trackers.get(f"{inst_id}_long", {})
                         tracker["scale_count"] = tracker.get("scale_count", 0) + 1
                         save_trackers(trackers)
                         executed_actions.append(entry_action_message(
-                            is_long=True, is_scale_in=True, name=f["name"], sz=actual_sz,
+                            is_long=True, is_scale_in=True, name=f["name"],
+                            margin_usdt=_exe_margin, leverage=ai_lever,
                             px=limit_px, order_ref=order_ref, tp_px=tp_px, sl_px=sl_px))
                         if notify_trade_open:
                             notify_trade_open(
                                 **trade_open_kwargs(
-                                    is_long=True, is_scale_in=True, name=f["name"], sz=actual_sz,
+                                    is_long=True, is_scale_in=True, name=f["name"],
+                                    margin_usdt=_exe_margin,
                                     px=limit_px, strat_tag=strat_tag, ai_reason=ai_reason,
                                     tp_px=tp_px, sl_px=sl_px),
                                 leverage=int(ai_lever),  # 审计D(2026-09-13)：曾恒写 3——5x 仓实开也通知「3x 杠杆」，票圈谎报
+                                venue=str((_venue_ctx or {}).get("venue") or "okx").lower(),
+                                notional_usdt=_exe_notional,
                             )
                     else:
                         executed_actions.append(entry_action_message(
-                            is_long=True, is_scale_in=False, name=f["name"], sz=actual_sz,
+                            is_long=True, is_scale_in=False, name=f["name"],
+                            margin_usdt=_exe_margin, leverage=ai_lever,
                             px=limit_px, order_ref=order_ref, tp_px=tp_px, sl_px=sl_px))
                         pending_inst_ids.add(inst_id)
                         reserved_slot_count += 1
@@ -299,10 +374,13 @@ def execute_entry_scan(*,
                         if notify_trade_open:
                             notify_trade_open(
                                 **trade_open_kwargs(
-                                    is_long=True, is_scale_in=False, name=f["name"], sz=actual_sz,
+                                    is_long=True, is_scale_in=False, name=f["name"],
+                                    margin_usdt=_exe_margin,
                                     px=limit_px, strat_tag=strat_tag, ai_reason=ai_reason,
                                     tp_px=tp_px, sl_px=sl_px),
                                 leverage=int(ai_lever),  # 审计D(2026-09-13)：曾恒写 3——5x 仓实开也通知「3x 杠杆」，票圈谎报
+                                venue=str((_venue_ctx or {}).get("venue") or "okx").lower(),
+                                notional_usdt=_exe_notional,
                             )
                 else:
                     executed_actions.append(entry_failure_message(
@@ -318,7 +396,11 @@ def execute_entry_scan(*,
                 if ai_conf >= MIN_ENTRY_CONFIDENCE:
                     allow_entry = True
                 else:
-                    print(f"[首发开空拦截] {f['name']} AI置信度 {ai_conf:.1f}% 未达 80% 门禁，宁缺毋滥，拦截入场")
+                    print(f"[首发开空拦截] {f['name']} AI置信度 {ai_conf:.1f}% "
+                          f"未达 {MIN_ENTRY_CONFIDENCE:g}% 门禁，宁缺毋滥，拦截入场")
+                    _record_entry_diagnostic(
+                        f.get("name"), "gate", ai_conf,
+                        f"置信度 {ai_conf:.1f}% < 门禁 {MIN_ENTRY_CONFIDENCE:g}%")
 
             # Case B: Strict Pyramiding Scale-In (Existing short position in profit/breakeven)
             elif curr_pos and str(curr_pos.get("side", "")).lower() == "short" and inst_id not in pending_inst_ids:
@@ -340,14 +422,15 @@ def execute_entry_scan(*,
                                else MAX_SCALE_IN_COUNT)
                 trailing_sl = float(tracker.get("trailingStopPx", 0.0) or 0.0)
 
-                c_dyn = f.get("calculus", {})
-                c_accel = float(c_dyn.get("acceleration", 0.0) or 0.0)
-                p_th = c_dyn.get("probability_theory", {})
+                t4 = f.get("trend_momentum", {}) or {}
+                c_accel = float(t4.get("macd_accel", 0.0) or 0.0)
+                oi_quadrant = str((f.get("smart_money_derivatives", {}) or {})
+                                  .get("oi_price_quadrant", "") or "")
 
                 allow_entry, is_scale_in = pyramiding_gate(
                     is_long=False, f=f, pos_upl=pos_upl, pos_upl_ratio=pos_upl_ratio,
                     pos_avg_px=pos_avg_px, curr_margin=curr_margin, trailing_sl=trailing_sl,
-                    scale_count=scale_count, c_accel=c_accel, p_th=p_th,
+                    scale_count=scale_count, c_accel=c_accel, oi_quadrant=oi_quadrant,
                     ai_margin=ai_margin, actual_sz=actual_sz, ct_val=ct_val,
                     ai_lever=ai_lever, ai_conf=ai_conf,
                     min_scale_in_profit_ratio=MIN_SCALE_IN_PROFIT_RATIO,
@@ -376,10 +459,13 @@ def execute_entry_scan(*,
                     leverage=ai_lever, usdt_available=usdt_available)
                 _side, _pos_side, _venue_ctx = build_order_intent(
                     is_long=False, inst_id=inst_id, actual_sz=actual_sz, ct_val=ct_val,
+                    min_sz=step_sz,
                     limit_px=limit_px, ai_lever=ai_lever,
                     margin_usdt=_order_margin,
                     max_margin_usdt=equity_margin_cap(usdt_available),
                     inst_lever_cap=_inst_lever_cap, ai_conf=ai_conf, ai_info=ai_info)
+                if isinstance(_venue_ctx, dict):
+                    _venue_ctx["atr"] = atr
                 accepted, order_ref = submit_protected_limit_order(
                     inst_id, _side, _pos_side, actual_sz, limit_px, tp_px, sl_px,
                     venue_ctx=_venue_ctx)
@@ -388,24 +474,34 @@ def execute_entry_scan(*,
                     # `submitted_bracket` 的 docstring）；限价档逐位不变。
                     limit_px, tp_px, sl_px = submitted_bracket(
                         _venue_ctx, limit_px, tp_px, sl_px)
+                    # 同多头分支：仓位大小一律**钱**口径（保证金 + 杠杆），不说张数。
+                    _exe_margin, _exe_notional = venue_executed_facts(_venue_ctx)
+                    _exe_margin = _exe_margin or _order_margin
+                    _exe_notional = _exe_notional or round(
+                        float(_exe_margin or 0.0) * float(ai_lever or 0.0), 2)
                     if is_scale_in:
                         tracker = trackers.get(f"{inst_id}_short", {})
                         tracker["scale_count"] = tracker.get("scale_count", 0) + 1
                         save_trackers(trackers)
                         executed_actions.append(entry_action_message(
-                            is_long=False, is_scale_in=True, name=f["name"], sz=actual_sz,
+                            is_long=False, is_scale_in=True, name=f["name"],
+                            margin_usdt=_exe_margin, leverage=ai_lever,
                             px=limit_px, order_ref=order_ref, tp_px=tp_px, sl_px=sl_px))
                         if notify_trade_open:
                             notify_trade_open(
                                 **trade_open_kwargs(
-                                    is_long=False, is_scale_in=True, name=f["name"], sz=actual_sz,
+                                    is_long=False, is_scale_in=True, name=f["name"],
+                                    margin_usdt=_exe_margin,
                                     px=limit_px, strat_tag=strat_tag, ai_reason=ai_reason,
                                     tp_px=tp_px, sl_px=sl_px),
                                 leverage=int(ai_lever),  # 审计D(2026-09-13)：曾恒写 3——5x 仓实开也通知「3x 杠杆」，票圈谎报
+                                venue=str((_venue_ctx or {}).get("venue") or "okx").lower(),
+                                notional_usdt=_exe_notional,
                             )
                     else:
                         executed_actions.append(entry_action_message(
-                            is_long=False, is_scale_in=False, name=f["name"], sz=actual_sz,
+                            is_long=False, is_scale_in=False, name=f["name"],
+                            margin_usdt=_exe_margin, leverage=ai_lever,
                             px=limit_px, order_ref=order_ref, tp_px=tp_px, sl_px=sl_px))
                         pending_inst_ids.add(inst_id)
                         reserved_slot_count += 1
@@ -413,10 +509,13 @@ def execute_entry_scan(*,
                         if notify_trade_open:
                             notify_trade_open(
                                 **trade_open_kwargs(
-                                    is_long=False, is_scale_in=False, name=f["name"], sz=actual_sz,
+                                    is_long=False, is_scale_in=False, name=f["name"],
+                                    margin_usdt=_exe_margin,
                                     px=limit_px, strat_tag=strat_tag, ai_reason=ai_reason,
                                     tp_px=tp_px, sl_px=sl_px),
                                 leverage=int(ai_lever),  # 审计D(2026-09-13)：曾恒写 3——5x 仓实开也通知「3x 杠杆」，票圈谎报
+                                venue=str((_venue_ctx or {}).get("venue") or "okx").lower(),
+                                notional_usdt=_exe_notional,
                             )
                 else:
                     executed_actions.append(entry_failure_message(

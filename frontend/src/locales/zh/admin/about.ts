@@ -1,5 +1,6 @@
 /** 关于与更新页文案 */
 export const zhAdminAbout = {
+  title: '版本与更新',
   intro: "确认版本状态，执行安全快进更新。",
   badge: "治理 · 3/3",
   loading: "正在加载组件与版本数据...",
@@ -19,6 +20,11 @@ export const zhAdminAbout = {
   behind: "落后 {n} 提交",
   upToDate: "已最新",
   ahead: "(领先 {n})",
+  statusDirty: "工作区已修改",
+  dirtyFoot: "HEAD {commit} (未提交)",
+  uncommittedChanges: "(未提交本地修改)",
+  dirtyAlertTitle: "检测到本地工作区存在未提交代码修改 (Dirty)",
+  dirtyAlertDesc: "当前工作区有文件处于编辑但未提交状态。为保护本地劳动成果不被覆盖，远程自动更新已被安全锁定；版本对比仅基于 HEAD 提交，若需将修改固化为正式版本，请先执行 Git 提交 (Commit)。",
   connecting: "正在连接远端...",
   checkUpdate: "检查远端更新",
   runUpdate: "执行安全更新",
@@ -36,19 +42,19 @@ export const zhAdminAbout = {
   checkUpToDate: "当前代码已是最新，与远端主分支保持同步。",
   updateSuccess: "系统更新成功！",
   updateNoop: "当前分支已是最新。",
+  commitsTitle: "待同步更新内容 (最新提交)：",
 
   // ── 推倒重来新增（批 8）──
-  productTitle: '产品信息',
+  productTitle: '机构级产品信息',
+  pitchTitle: '系统核心工程定位',
+  pitchBody: '多模型对抗交叉质询、7层高频量化因子微积分验证、确定性物理风控一票否决的 OKX 永续合约自主量化交易操作系统。',
   bandVersion: '系统版本',
   bandControlPlane: '网关控制面',
   bandRuntime: '运行环境',
-  bandSyncGap: '待同步差额',  // ── 批 41：本地化写死文案（更新检查失败）──
+  bandSyncGap: '待同步差额',
   updateCheckFailed: '更新检查失败：{msg}（无法确认是否落后，安全补丁可能静默脱班）',
 
   // ── 注册/返佣通道（2026-09）──
-  // 三条地址来自后端 `/api/v1/admin/about` 的 `channels`（可被 OKX_INVITE_URL /
-  // GATE_INVITE_URL / BINANCE_INVITE_URL 覆盖）；OKX 经纪商 code 与**实发订单上的
-  // tag 同源**。此处只放界面 chrome，链接与 code 一律来自接口，不在前端硬编码。
   channelsTitle: '注册通道',
   channelsSub: '开户与费率绑定入口',
   channelsLead: '经下列入口注册可绑定对应交易所的费率与返佣；老用户满足交易所的召回条件时同样可绑定。',

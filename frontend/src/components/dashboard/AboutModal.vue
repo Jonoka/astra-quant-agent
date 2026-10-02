@@ -40,6 +40,13 @@ onMounted(loadChannels);
       </div>
     </template>
 
+    <!-- 核心定位金句 -->
+    <div class="card-flat p-3 mb-3 border-l-2 border-emerald-400 bg-emerald-500/5">
+      <p class="text-xs italic leading-relaxed text-[var(--ink-1)]">
+        {{ t('dash.about.pitch') }}
+      </p>
+    </div>
+
     <!-- 架构 -->
     <div class="card-flat p-3.5">
       <p class="section-title mb-2 !text-sm">
@@ -112,7 +119,7 @@ onMounted(loadChannels);
         class="card-flat flex items-center justify-between gap-2 px-3 py-2.5"
       >
         <div class="min-w-0">
-          <p class="t-label">{{ t('dash.about.community.channel', undefined, { venue: ch.name }) }}</p>
+          <p class="t-label">{{ t('dash.about.community.channel', undefined, { channel: ch.name }) }}</p>
           <p class="num truncate text-sm font-semibold" style="color: var(--brand, #3b82f6)">
             {{ ch.code || ch.name }}
           </p>

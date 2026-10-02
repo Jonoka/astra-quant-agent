@@ -13,7 +13,6 @@ export interface AccountSummary {
   pos_upl_total?: number
   margin_usage_pct?: number
   risk_level?: string
-  currency?: string
   initial_capital?: number
   cum_net_pnl?: number
   cum_realized_pnl?: number
@@ -109,20 +108,74 @@ export interface InstrumentFactor {
   stop_loss_price?: number
   risk_reward_ratio?: string
   reason?: string
+  /**
+   * ★ 2026-10 三态可观测性：把「模型主动观望 / 物理层拦单 / 模型漏答」分开。
+   * `decision_source === 'omitted'` = 该标的压根没出现在模型响应里（契约允许省略），
+   * 后端按 fail-closed 兜底为 WAIT —— 它**不是**模型的裁决，展示上必须区分。
+   * 缺字段（旧缓存）按 `model` / `false` 处理，向后兼容。
+   */
+  decision_source?: 'model' | 'omitted'
+  gate_blocked?: boolean
+  gate_reason?: string
+  model_reason?: string
   fundingRate?: number
   oiUsd?: number
   lsRatio?: number
   market_regime?: string
   atr_pct?: number
   adx_1h?: number
-  calculus?: {
-    velocity_1h?: number
-    accel_1h?: number
-    jerk_1h?: number
-    impulse_1h?: number
-    energy_1h?: number
-    action_area_1h?: number
-    state_1h?: string
+  /**
+   * ★ 2026-10：原 `calculus`（velocity/accel/jerk/impulse）随数理系统退场，
+   * 换成 7 梯队里前端真正会看的五块。数值字段缺失为 `null`/`undefined`，
+   * 枚举字段缺失为 `"--"` —— 展示层一律按「未知」渲染，**不得填假 0**。
+   */
+  momentum?: {
+    macd_hist_1h?: number | null
+    macd_accel_1h?: number | null
+    /** ★ 2026-10：归一化口径（占现价 %）。绝对 MACD 是价格单位，两位小数下
+     *  低价币会显示成 -0.00/0.00（看着像"没有动能"）⇒ 展示与排序都用这两个键。 */
+    macd_hist_pct_1h?: number | null
+    macd_accel_pct_1h?: number | null
+    macd_momentum_state?: string
+    macd_divergence?: string
+    rsi_1h?: number
+    rsi_15m?: number
+    rsi_zone?: string
+  }
+  orderflow?: {
+    cvd_5m_usd?: number | null
+    cvd_1h_usd?: number | null
+    taker_buy_sell_ratio?: number | null
+    cvd_divergence?: string
+  }
+  microstructure?: {
+    obi_pct?: number | null
+    /** 多笔档（numOrders≥3）口径的 OBI；抵消触价档被单笔可撤挂单支配的抖动 */
+    obi_robust_pct?: number | null
+    /** 两侧多笔档是否足够；false ⇒ 后端打分/信号均**不采信** OBI */
+    depth_reliable?: boolean | null
+    depth_bias?: string
+    bid_ask_depth_ratio?: number | null
+    spread_bps?: number | null
+  }
+  value_area?: {
+    vwap_24h?: number | null
+    vwap_bias_pct?: number | null
+    vah?: number | null
+    val?: number | null
+    vpvr_poc?: number | null
+    value_area_position?: string
+    vwap_extreme_band?: string
+  }
+  derivatives?: {
+    funding_rate_pct?: number | null
+    next_funding_rate_pct?: number | null
+    funding_crowding?: string
+    oi_chg_1h_pct?: number | null
+    oi_price_quadrant?: string
+    elite_divergence?: string
+    liquidation_bias?: string
+    basis_annualized_pct?: number | null
   }
   smart_money?: {
     weighted_long_pct?: number
@@ -139,51 +192,21 @@ export interface InstrumentFactor {
     stop_loss_price: number
     risk_reward_ratio: string
     summary_reason: string
-    venue_decision?: VenueDecisionEvidence | null
+    /** 2026-10 三态：`model` 模型给出裁决 / `omitted` 该标的未出现在模型响应里 */
+    decision_source?: 'model' | 'omitted'
+    /** 物理层是否拦下了模型的开仓意图（拦单时 `gate_reason` 有原文） */
+    gate_blocked?: boolean
+    gate_reason?: string
+    /** 模型自己的原话（与展示用 `summary_reason` 区分开） */
+    model_reason?: string
   }
   thought_process?: {
     market_structure?: string
-    calculus_dynamics?: string
-    math_prob_rationale?: string
+    factor_evidence?: string
     volume_and_oi?: string
     risk_reward_evaluation?: string
   }
   position?: any
-  /**
-   * US-004 · 选所决策证据（US-003 路由落盘 → 决策缓存 → /api/all 透传）。
-   * 后端未接线/老快照时为 null/undefined——消费端必须优雅降级（缺 ≠ 0）。
-   */
-  venue_decision?: VenueDecisionEvidence | null
-}
-
-/** 被淘汰的候选交易所及淘汰阶段（venue_router._stage_of 口径） */
-export interface VenueRejectedRow {
-  venue?: string
-  stage?: string
-  reason?: string
-}
-
-/** US-004 · venue_decision 段的线上结构（纯附加字段，逐键可选） */
-export interface VenueDecisionEvidence {
-  /** 手动选所优先项：'auto' = 评分路由 */
-  preferred_venue?: string
-  /** 中选交易所；null = 全部候选被硬筛淘汰 */
-  venue?: string | null
-  /** OK / OK_HYSTERESIS / ALL_REJECTED / NO_CANDIDATES */
-  reason_code?: string
-  /** 逐所评分/判定明细（人读文本） */
-  reasons?: string[]
-  /** 被淘汰候选及原因 */
-  rejected?: VenueRejectedRow[]
-  hysteresis_applied?: boolean
-  /** 多所分配切片（分配开关 off 时为 null） */
-  allocation?: Array<{ venue?: string; amount_usdt?: number | null }> | null
-  decided_utc?: string
-  /** selected / rejected / budget_rejected / budget_error */
-  outcome?: string
-  skip_reason?: string
-  executed_venue?: string | null
-  budget?: Record<string, unknown> | null
 }
 
 /**
@@ -210,19 +233,10 @@ export interface LLMRuntime {
   api_format: string
 }
 
-export interface MarketRegimeData {
-  regime_id: string
-  regime_name: string
-  regime_tag: string
-  trend_score: number
-  volatility_score: number
-  oscillation_score: number
-  shock_risk: boolean
-  dominant_direction: string
-  recommended_action: string
-  recommended_profile: string
-  summary_text: string
-}
+// ★ 2026-10 已退役：`MarketRegimeData`（全市场宏观体制）随退役数理引擎一并移除。
+//   该块的数据源是已退役的 `calculus_engine`→`calculus/regime.py`，且缺数据时凭空编结论
+//   （写死 `atr_pct=1.5`/`adx=20.0` 兜底；实盘 `calculus` 块已不存在）。提示词与看板
+//   两处都已停用 ⇒ 后端不再签发该字段，前端也不再声明它（跨层契约门会强制两边一致）。
 
 export interface DashboardResponse {
   timestamp: string
@@ -238,7 +252,6 @@ export interface DashboardResponse {
   factors: InstrumentFactor[]
   macro_assessment?: string
   llm_runtime?: LLMRuntime
-  market_regime?: MarketRegimeData
   logs: string[]
   trades: any[]
   ai_last_prompt?: string
@@ -252,8 +265,6 @@ export interface DashboardResponse {
   data_health?: any
   state_snapshot?: any
   environment?: 'demo' | 'live'
-  venue_environments?: Record<string, string>
-  is_mixed_environment?: boolean
   /** US-004 · 组合风险占用（预算/已预留/可用余量；未接入时为缺省） */
   portfolio_risk?: PortfolioRiskRow | null
   [key: string]: any

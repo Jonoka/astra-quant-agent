@@ -97,7 +97,14 @@ class FactorTelemetryTest(unittest.TestCase):
         self.assertIs(f.get("sentiment_available"), True,
                       "文件可读且该币在册 ⇒ 即使分数为 0 也是「真中性」")
 
-    def test_calculus_failure_records_reason_and_warns(self):
+    def test_the_retired_calculus_block_is_inert_and_never_warns(self):
+        """★ 2026-10 重钉（反向断言）：动力学退场后**不许**再有失败/告警路径。
+
+        原来这条守的是"引擎炸了必须把原因写进 `calculus.error` 并告警"。
+        现在整条链不再被调用 ⇒ 真正要守的性质是：注入一个**会炸的**引擎，
+        结果必须**完全不受影响**（没有 `error`、没有"动力学"告警）——
+        否则说明还有人在调用它。
+        """
         broken = types.ModuleType("calculus_engine")
 
         def _boom(*a, **k):
@@ -108,13 +115,9 @@ class FactorTelemetryTest(unittest.TestCase):
             with warnings.catch_warnings(record=True) as caught:
                 warnings.simplefilter("always")
                 f = _run_factors(self.news)
-        calc = f.get("calculus") or {}
-        self.assertIs(calc.get("valid"), False, "退化形状必须自陈 valid=False")
-        self.assertIn("error", calc, "必须把失败原因写进结构化字段，而不是只留在日志")
-        self.assertIn("engine exploded", str(calc["error"]))
+        self.assertNotIn("calculus", f, "calculus 占位已彻底剥离，不得再出现在因子字典中")
         msgs = [str(w.message) for w in caught if issubclass(w.category, RuntimeWarning)]
-        self.assertTrue(any("动力学" in m for m in msgs), msgs)
-
+        self.assertFalse(any("动力学" in m for m in msgs), msgs)
 
 class TrackerTelemetryTest(unittest.TestCase):
     def setUp(self):
@@ -250,6 +253,7 @@ class SignalJournalIsolationTest(unittest.TestCase):
         leftovers = [n for n in os.listdir(self.tmp) if n != "signal_journal.json"]
         self.assertEqual(leftovers, [], f"原子写不得留临时文件：{leftovers}")
 
+
 class CycleDisclosureSummaryTest(unittest.TestCase):
     """周期披露汇总（第 50 刀）：每轮必须留下**一条可检索**的"跳过/未核验"行。
 
@@ -283,25 +287,9 @@ class CycleDisclosureSummaryTest(unittest.TestCase):
         self.assertIn("a", line)
         self.assertNotIn("e", line, "只展示前 3 条明细（避免刷屏）")
 
-    def test_watchdog_report_counts_errors_and_critical(self):
-        rep = {"errors": [{"stage": "list"}], "critical": [{"venue": "gate"}, {"venue": "x"}]}
-        line = self._sum(watchdog_report=rep)
-        self.assertIn("跨所保护：错误=1 严重缺口=2", line)
-
-    def test_clean_watchdog_report_adds_no_clause(self):
-        line = self._sum(watchdog_report={"errors": [], "critical": []})
-        self.assertNotIn("跨所保护", line)
-
-    def test_disabled_watchdog_is_disclosed_as_not_running(self):
-        """未开闸的加固层是"没在跑的保护" —— 应当被看见（但不算错误）。"""
-        line = self._sum(watchdog_enabled=False)
-        self.assertIn("跨所保护巡检未开闸", line)
-        self.assertIn("本轮无跳过/未核验项", line)
-
     def test_reporter_never_raises_on_garbage_input(self):
         """报告器不得成为新的单点故障（本仓固有约束）。"""
         for kw in ({"broken_venues": None, "shape_violations": None},
-                   {"watchdog_report": MagicMock()},
                    {"broken_venues": [None, ""], "shape_violations": [None]},
                    {"entries_blocked": None}):
             with self.subTest(kw=sorted(kw)):
@@ -318,10 +306,10 @@ class CycleDisclosureSummaryTest(unittest.TestCase):
         self.assertIn("write_cycle_disclosure_snapshot(", src)
         self.assertIn("path=CYCLE_DISCLOSURE_FILE", src)
         for kw in ("broken_venues=_BROKEN_VENUES", "entries_blocked=entries_blocked",
-                   "shape_violations=_shape_violations", "watchdog_report=_wd_report",
-                   "watchdog_enabled=ASTRA_VENUE_PROTECTION_WATCHDOG"):
+                   "shape_violations=_shape_violations"):
             with self.subTest(arg=kw):
                 self.assertIn(kw, src, f"汇总缺参数 {kw} ⇒ 该路披露不会被汇总")
+
 
 class CycleDisclosurePayloadAndSnapshotTest(unittest.TestCase):
     """披露载荷（结构化）+ 快照落盘（第 51 刀）。
@@ -335,7 +323,6 @@ class CycleDisclosurePayloadAndSnapshotTest(unittest.TestCase):
         clean = cycle_disclosure_payload()
         self.assertTrue(clean["clean"])
         self.assertEqual(clean["broken_venue_count"], 0)
-        self.assertFalse(clean["watchdog_enabled"] is None)
         dirty = cycle_disclosure_payload(broken_venues=["gate"], entries_blocked=True,
                                          shape_violations=["x", "y"])
         self.assertFalse(dirty["clean"])
@@ -345,11 +332,9 @@ class CycleDisclosurePayloadAndSnapshotTest(unittest.TestCase):
 
     def test_payload_tolerates_garbage(self):
         from scripts.trader.cycle_stages import cycle_disclosure_payload
-        p = cycle_disclosure_payload(broken_venues=None, shape_violations=[None],
-                                     watchdog_report=MagicMock())
+        p = cycle_disclosure_payload(broken_venues=None, shape_violations=[None])
         self.assertEqual(p["broken_venue_count"], 0)
         self.assertEqual(p["shape_violation_count"], 1)     # None 也如实计入（不假装没发生）
-        self.assertEqual(p["watchdog_errors"], 0)           # 非 dict ⇒ 不猜、不计
 
     def test_snapshot_is_written_atomically_with_freshness_stamp(self):
         import json as _json
@@ -376,3 +361,7 @@ class CycleDisclosurePayloadAndSnapshotTest(unittest.TestCase):
             raise OSError("磁盘满")
         self.assertFalse(write_cycle_disclosure_snapshot(
             path="/proc/nonexistent/x.json", payload={}, _atomic_write_json=boom))
+
+
+if __name__ == "__main__":
+    unittest.main()

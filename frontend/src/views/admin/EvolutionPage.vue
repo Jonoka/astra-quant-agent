@@ -72,15 +72,101 @@ const evolutionStartTime = ref('2026-09-01 00:00:00');
 const activeTradesCount = ref<number | null>(null);
 const savingStartTime = ref(false);
 
+// 自进化独立模型配置
+const evoConfig = ref<{
+  model_id: string;
+  effective_model_id: string;
+  reasoning_effort: string;
+  thinking_timeout: number;
+  analysis_depth: string;
+  available_models: Array<{
+    id: string;
+    name: string;
+    provider_name: string;
+    capabilities: string[];
+    reasoning_effort: string;
+    has_key: boolean;
+  }>;
+}>({
+  model_id: 'auto',
+  effective_model_id: 'auto',
+  reasoning_effort: 'high',
+  thinking_timeout: 300,
+  analysis_depth: 'deep',
+  available_models: [],
+});
+const savingEvoModel = ref(false);
+const testingEvoModel = ref(false);
+const testModelResult = ref<any>(null);
+
 async function loadEvolutionConfig() {
   try {
-    const res = await api('/api/v1/admin/evolution/config');
+    const res = await api<any>('/api/v1/admin/evolution/config');
     if (res?.evolution_start_time) {
       evolutionStartTime.value = res.evolution_start_time;
       activeTradesCount.value = res.active_trades_count ?? null;
     }
+    if (res) {
+      evoConfig.value.model_id = res.model_id || 'auto';
+      evoConfig.value.effective_model_id = res.effective_model_id || 'auto';
+      evoConfig.value.reasoning_effort = res.reasoning_effort || 'high';
+      evoConfig.value.thinking_timeout = Number(res.thinking_timeout) || 300;
+      evoConfig.value.analysis_depth = res.analysis_depth || 'deep';
+      evoConfig.value.available_models = Array.isArray(res.available_models) ? res.available_models : [];
+    }
   } catch {
     // ignore
+  }
+}
+
+async function saveEvolutionModelConfig() {
+  savingEvoModel.value = true;
+  try {
+    const res = await api<any>('/api/v1/admin/evolution/config', {
+      method: 'PUT',
+      body: JSON.stringify({
+        model_id: evoConfig.value.model_id,
+        reasoning_effort: evoConfig.value.reasoning_effort,
+        thinking_timeout: evoConfig.value.thinking_timeout,
+        analysis_depth: evoConfig.value.analysis_depth,
+      }),
+    });
+    if (res?.effect) {
+      toast.ok(res.effect);
+    } else {
+      toast.ok(t('admin.evolution.modelSaved'));
+    }
+    await loadEvolutionConfig();
+  } catch (e: any) {
+    toast.err(e.message);
+  } finally {
+    savingEvoModel.value = false;
+  }
+}
+
+async function probeEvolutionModel() {
+  testingEvoModel.value = true;
+  testModelResult.value = null;
+  try {
+    const res = await api<any>('/api/v1/admin/evolution/test-model', {
+      method: 'POST',
+      body: JSON.stringify({
+        model_id: evoConfig.value.model_id,
+        reasoning_effort: evoConfig.value.reasoning_effort,
+        thinking_timeout: 45,
+      }),
+    });
+    testModelResult.value = res;
+    if (res?.ok) {
+      toast.ok(res.message || t('admin.evolution.testModelOk'));
+    } else {
+      toast.err(res?.message || t('admin.evolution.testModelFailed'));
+    }
+  } catch (e: any) {
+    testModelResult.value = { ok: false, message: e.message };
+    toast.err(e.message);
+  } finally {
+    testingEvoModel.value = false;
   }
 }
 
@@ -281,6 +367,33 @@ async function deleteMemoryItem(idx: number, lessonId: string) {
   }
 }
 
+const hasDisabledLessons = computed(() => structuredLessons.value.some((l: any) => !l.enabled));
+
+async function purgeDisabledLessons() {
+  const disabled = structuredLessons.value.filter((l: any) => !l.enabled);
+  if (!disabled.length) return;
+  const _ok = await ask({
+    title: t('admin.evolution.purgeDisabledTitle'),
+    desc: t('admin.evolution.purgeDisabledDesc', undefined, { n: disabled.length }),
+    danger: true,
+    okText: t('common.del'),
+  });
+  if (!_ok) return;
+  busy.value = 'delete';
+  try {
+    for (const item of disabled) {
+      await api(`/api/v1/admin/memory/0?lesson_id=${encodeURIComponent(item.id)}&expected_version=${encodeURIComponent(expectedMemoryVersion())}`, { method: 'DELETE' });
+    }
+    toast.ok(t('admin.evolution.purgeDisabledOk', undefined, { n: disabled.length }));
+  } catch (e: any) {
+    memoryVersion.value = null;
+    toast.err(t('admin.evolution.purgeDisabledFailed', undefined, { msg: e.message }));
+  } finally {
+    busy.value = '';
+    await refreshMemory();
+  }
+}
+
 async function savePipelineModules() {
   if (!selectedProfile.value) return;
   busy.value = 'save';
@@ -353,12 +466,29 @@ function evoStatusBadgeClass(status?: string, error?: string): string {
   return resolveEvolutionStatus(status, error).adminBadgeClass;
 }
 
+/**
+ * 复盘失败时徽章上显示的**文案**（2026-09-30）。
+ *
+ * ⚠️ 用户报障：「自进化看起来也没更新啊」——真实情况是本周期复盘**失败**了
+ * （主模型输出 JSON 里有个裸换行 → `JSONDecodeError`；唯一回退模型欠费 402），
+ * 而页面把 `llm_error` **只用在徽章配色上**，文字照旧显示 `NO_CHANGE`
+ * （报告里的 `change_status` 默认值），错误详情一个字都不显示 ⇒ 用户看到的是
+ * "跑过了、没变化"，而不是"跑失败了、原因是……"。
+ *
+ * `resolveEvolutionStatus` 是唯一事实源（它已把非空 `llm_error` 判成 FAILED）。
+ */
+function evoStatusLabel(status?: string, error?: string): string {
+  const resolved = resolveEvolutionStatus(status, error);
+  if (resolved.category === 'FAILED') return t('admin.evolution.statusFailed');
+  return resolved.key || 'NO_CHANGE';
+}
+
 onMounted(loadData);
 </script>
 
 <template>
   <div class="evo">
-    <PageHeader :title="t('nav.admin.evolution')" :description="t('admin.evolution.desc')">
+    <PageHeader :title="t('nav.admin.evolution')">
       <template #actions>
         <span class="dsh-pill">
           <span class="dsh-status-dot active" aria-hidden="true" />
@@ -427,7 +557,10 @@ onMounted(loadData);
                 class="badge"
                 :class="evoStatusBadgeClass(evolutionReport.change_status, evolutionReport.llm_error)"
               >
-                {{ evolutionReport.change_status || 'NO_CHANGE' }}
+                {{ evoStatusLabel(evolutionReport.change_status, evolutionReport.llm_error) }}
+              </span>
+              <span v-if="evoConfig.effective_model_id" class="badge mono text-3xs">
+                {{ t('admin.evolution.usedModel') }} {{ evoConfig.effective_model_id }}
               </span>
             </div>
             <span class="evo-rep-time mono">
@@ -459,6 +592,21 @@ onMounted(loadData);
           <div v-if="evolutionReport.memory_overwrites_reason" class="evo-verdict">
             <span class="label-caps">{{ t('admin.evolution.verdictReason') }}</span>
             <p>{{ evolutionReport.memory_overwrites_reason }}</p>
+          </div>
+
+          <!--
+            复盘失败必须**可见**（2026-09-30）。
+            以前 `llm_error` 只参与徽章配色，文字仍是 `NO_CHANGE`、洞察面板空则整块隐藏 ⇒
+            用户看到的是"跑过了、没变化"，而真相是"这一轮失败了、原因是……"。
+            这里用 alert 明确区分"失败未更新"与"NO_CHANGE"，并给出可操作原因
+            （例如回退模型欠费 402）。
+          -->
+          <div v-if="evolutionReport.llm_error" class="evo-failure" role="alert">
+            <span class="label-caps evo-failure-title">
+              {{ t('admin.evolution.failedTitle') }}
+            </span>
+            <p class="evo-failure-note">{{ t('admin.evolution.failedNote') }}</p>
+            <pre class="log-panel evo-failure-detail mono" tabindex="0">{{ evolutionReport.llm_error }}</pre>
           </div>
 
           <!-- 洞见日志面板 -->
@@ -522,6 +670,118 @@ onMounted(loadData);
               <span class="fact-foot">{{ t('admin.evolution.halfLifeSub') }}</span>
             </div>
           </template>
+        </section>
+
+        <!-- 自进化专属推理引擎配置 -->
+        <section class="card">
+          <header class="card-head">
+            <div>
+              <h2 class="card-title"><Brain :size="14" />{{ t('admin.evolution.modelSectionTitle') }}</h2>
+              <p class="card-sub">{{ t('admin.evolution.modelSectionDesc') }}</p>
+            </div>
+            <div class="flex items-center gap-2">
+              <button
+                type="button"
+                class="btn btn-quiet btn-sm"
+                :disabled="testingEvoModel || savingEvoModel"
+                @click="probeEvolutionModel"
+              >
+                <Loader2 v-if="testingEvoModel" :size="14" class="animate-spin shrink-0" />
+                <Terminal v-else :size="14" />
+                <span>{{ testingEvoModel ? t('admin.evolution.testingModel') : t('admin.evolution.testModelBtn') }}</span>
+              </button>
+              <button
+                type="button"
+                class="btn btn-primary btn-sm"
+                :disabled="savingEvoModel || testingEvoModel"
+                @click="saveEvolutionModelConfig"
+              >
+                <Loader2 v-if="savingEvoModel" :size="14" class="animate-spin shrink-0" />
+                <Save v-else :size="14" />
+                <span>{{ savingEvoModel ? t('admin.evolution.savingModelConfig') : t('admin.evolution.saveModelConfig') }}</span>
+              </button>
+            </div>
+          </header>
+
+          <div class="space-y-4 p-4">
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div class="space-y-1.5">
+                <label class="label-caps">{{ t('admin.evolution.modelSelectLabel') }}</label>
+                <select
+                  v-model="evoConfig.model_id"
+                  class="field text-xs mono"
+                  :aria-label="t('admin.evolution.modelSelectAria')"
+                >
+                  <option value="auto">⚡ {{ t('admin.evolution.followMainBrain') }}</option>
+                  <option
+                    v-for="m in evoConfig.available_models"
+                    :key="m.id"
+                    :value="m.id"
+                  >
+                    {{ m.name }} · {{ m.provider_name }} ({{ m.reasoning_effort || 'high' }})
+                  </option>
+                </select>
+                <p class="text-4xs text-[var(--ink-3)] font-mono">
+                  {{ t('admin.evolution.effectiveModelTag') }} <b>{{ evoConfig.effective_model_id || 'auto' }}</b>
+                </p>
+              </div>
+
+              <div class="space-y-1.5">
+                <label class="label-caps">{{ t('admin.evolution.reasoningEffortLabel') }}</label>
+                <select
+                  v-model="evoConfig.reasoning_effort"
+                  class="field text-xs"
+                  :aria-label="t('admin.evolution.reasoningEffortLabel')"
+                >
+                  <option value="low">{{ t('admin.evolution.effortLow') }}</option>
+                  <option value="medium">{{ t('admin.evolution.effortMed') }}</option>
+                  <option value="high">{{ t('admin.evolution.effortHigh') }}</option>
+                  <option value="max">{{ t('admin.evolution.effortMax') }}</option>
+                </select>
+              </div>
+            </div>
+
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-4 pt-1">
+              <div class="space-y-1.5">
+                <label class="label-caps">{{ t('admin.evolution.timeoutLabel') }} ({{ t('admin.evolution.timeoutUnit') }})</label>
+                <input
+                  v-model.number="evoConfig.thinking_timeout"
+                  type="number"
+                  inputmode="numeric"
+                  min="60"
+                  max="600"
+                  step="30"
+                  class="field num text-xs"
+                  :aria-label="t('admin.evolution.timeoutLabel')"
+                />
+              </div>
+
+              <div class="space-y-1.5">
+                <label class="label-caps">{{ t('admin.evolution.depthLabel') }}</label>
+                <select
+                  v-model="evoConfig.analysis_depth"
+                  class="field text-xs"
+                  :aria-label="t('admin.evolution.depthLabel')"
+                >
+                  <option value="deep">{{ t('admin.evolution.depthDeep') }}</option>
+                  <option value="standard">{{ t('admin.evolution.depthStandard') }}</option>
+                </select>
+              </div>
+            </div>
+
+            <div
+              v-if="testModelResult"
+              class="p-2.5 rounded text-xs"
+              :class="testModelResult.ok ? 'bg-emerald-500/10 border border-emerald-500/20 text-emerald-400' : 'bg-rose-500/10 border border-rose-500/20 text-rose-400'"
+            >
+              <div class="flex items-center gap-1.5">
+                <span class="font-medium">{{ testModelResult.message }}</span>
+                <span v-if="testModelResult.reply_sample" class="ml-2 font-mono text-3xs text-[var(--ink-2)] truncate">
+                  ↳ {{ testModelResult.reply_sample }}
+                </span>
+              </div>
+            </div>
+          </div>
         </section>
 
         <!-- 复盘样本时间范围过滤 -->
@@ -599,6 +859,17 @@ onMounted(loadData);
               <h2 class="card-title"><Brain :size="14" />{{ t('admin.evolution.lifecycle') }}</h2>
               <p class="card-sub">{{ t('admin.evolution.lifecycleHint') }}</p>
             </div>
+            <button
+              v-if="hasDisabledLessons && auth.isSuperadmin"
+              type="button"
+              class="btn btn-ghost btn-sm is-danger"
+              :disabled="busy !== '' || loading"
+              :title="t('admin.evolution.purgeDisabledTitle')"
+              @click="purgeDisabledLessons"
+            >
+              <Trash2 :size="13" />
+              <span>{{ t('admin.evolution.purgeDisabled') }}</span>
+            </button>
           </header>
 
           <!-- 新增心法 -->
@@ -638,8 +909,10 @@ onMounted(loadData);
               :class="{ 'is-off': !item.enabled }"
             >
               <div class="evo-lesson-head">
-                <span class="badge" :class="item.is_baseline ? 'badge-accent' : 'badge-up'">
-                  {{ item.is_baseline ? t('admin.evolution.baselineBadge') : t('admin.evolution.aiBadge') }}
+                <!-- 2026-10：基准机制已拆除，不再有"官方黄金基准"徽章（系统不预设心法）。
+                     所有条目一律是 AI 实战自进化或手工录入的产物。 -->
+                <span class="badge badge-up">
+                  {{ t('admin.evolution.aiBadge') }}
                 </span>
                 <span class="badge">{{ item.category }}</span>
                 <span class="badge badge-up mono">{{ t('admin.evolution.score') }} {{ item.health_score }}</span>
@@ -759,6 +1032,17 @@ onMounted(loadData);
       initial-focus="input"
       @close="closeRunDialog"
     >
+      <div v-if="evoConfig.effective_model_id" class="mb-3 p-2.5 rounded bg-[var(--surface-sunken)] border border-[var(--border-subtle)] text-xs space-y-1">
+        <div class="flex items-center justify-between">
+          <span class="text-[var(--ink-3)]">{{ t('admin.evolution.executingModel') }}</span>
+          <span class="font-mono font-medium text-[var(--ink-1)]">{{ evoConfig.effective_model_id }}</span>
+        </div>
+        <div class="flex items-center justify-between">
+          <span class="text-[var(--ink-3)]">{{ t('admin.evolution.timeoutLabel') }}</span>
+          <span class="font-mono text-[var(--ink-2)]">{{ evoConfig.thinking_timeout }}s ({{ evoConfig.reasoning_effort }})</span>
+        </div>
+      </div>
+
       <label class="field-stack">
         <span class="form-label">{{ t('admin.evolution.runConfirmPhrase') }}</span>
         <code class="evo-phrase">{{ RUN_PHRASE }}</code>
@@ -868,6 +1152,40 @@ onMounted(loadData);
 .evo-verdict {
   padding: var(--ds-space-3) var(--ds-space-4);
   border-bottom: 1px solid var(--ds-color-border-default);
+}
+/* 复盘失败横幅：与 `.state-block.is-error` 同一套错误 token，但**内联**而不是居中空态
+   （它是报告卡里的一条诊断，不是"这里什么都没有"的占位）。 */
+.evo-failure {
+  margin: var(--ds-space-3) var(--ds-space-4);
+  padding: var(--ds-space-3);
+  border: 1px solid var(--down-line);
+  border-radius: var(--r-card);
+  background-color: var(--down-bg);
+}
+.evo-failure-title {
+  color: var(--down);
+}
+/* 横幅内说明行：形状与 `.evo-verdict p` 同为「--text-xs + text-secondary」，
+   属**语义 delta**（错误语义块），已在 tests/panelDescPrimitive.test.mjs 的
+   DESC_SHAPE_ALLOWED 登记。
+   ⚠️ 这条规则**不能省**：省掉 `evo-failure-note` 就成了"模板里写了但编译产物里没规则"
+   的死类，`deadUtilities`/编译产物死类门当场翻红（实测：一次 stale dist 把它藏住了，
+   重新 build 后才暴露）。两条门要同时满足 —— 登记 + 有规则。 */
+.evo-failure-note {
+  margin-top: 4px;
+  font-size: var(--text-xs);
+  line-height: var(--leading-body);
+  color: var(--ds-color-text-secondary);
+}
+/* 错误详情：等宽块本体**全部复用** `.log-panel`（inset 底 + 边框 + 圆角 + mono）。
+   这里只补两条与"说明行形状"无关的 delta。
+   ⚠️ 刻意**不写** font-size / line-height / color —— `panelDescPrimitive` 门把
+   "margin-top + font-size + line-height + color" 四条同现判成"又自造了一条说明行"，
+   实测本文件因这两条规则翻红；`color` 也不是真正的语义 delta（沿用本体即可）。 */
+.evo-failure-detail {
+  margin-top: var(--ds-space-2);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 .evo-verdict p {
   margin-top: 4px;

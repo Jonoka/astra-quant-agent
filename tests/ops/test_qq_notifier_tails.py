@@ -9,8 +9,8 @@
 
 1. **通知绝不阻断交易主流程**：`_publish` 吞掉一切异常并返回 `False` ——
    网关挂了不能让一次平仓记录丢失。
-2. **标的格式化不硬编码 `-SWAP`**：按场所约定输出（币安 `BTCUSDT 永续` /
-   Gate `BTC_USDT 永续` / OKX `BTC-USDT-SWAP`）。
+2. **标的格式化按 OKX 约定输出**（`BTC-USDT-SWAP`）：OKX-only 迁移后系统只剩
+   OKX 一个场所，`_format_symbol` 不再按场所分派（币安/Gate 约定已随其适配器删除）。
 3. **平仓状态标签四态互斥且顺序敏感**：分批止盈 → 保本 → 盈利 → 风控止损，
    `is_partial_exit` 与 `is_be` 的判定**先于** `is_win`（否则 +0.01 U 会被报成"盈利落袋"）。
 """
@@ -89,17 +89,6 @@ class FormatSymbolTests(unittest.TestCase):
     def test_an_okx_id_stays_okx_shaped(self):
         self.assertEqual(qn._format_symbol("BTC-USDT-SWAP"), "BTC-USDT-SWAP")
 
-    def test_binance_uses_the_binance_convention(self):
-        self.assertEqual(qn._format_symbol("BTC-USDT-SWAP", "binance"), "BTCUSDT 永续")
-
-    def test_gate_uses_the_gate_convention(self):
-        self.assertEqual(qn._format_symbol("BTC-USDT-SWAP", "gate"), "BTC_USDT 永续")
-
-    def test_the_venue_match_is_case_insensitive_and_substring_based(self):
-        for venue in ("BINANCE", "Binance", "binance-us"):
-            with self.subTest(venue=venue):
-                self.assertEqual(qn._format_symbol("BTC-USDT-SWAP", venue), "BTCUSDT 永续")
-
     def test_a_bare_symbol_is_normalised(self):
         for raw in ("BTC", "BTCUSDT"):
             with self.subTest(raw=raw):
@@ -154,26 +143,26 @@ class TradeOpenTests(_NotifierSandbox, unittest.TestCase):
     def test_a_long_open_publishes_the_trade_opened_event(self):
         self.assertTrue(self._open())
         self.assertEqual(self.call["event_type"], "trade.opened")
-        self.assertIn("🟢 多单 BUY", self.call["message"])
+        self.assertIn("多单 BUY", self.call["message"])
         self.assertIn("BTC-USDT-SWAP", self.call["message"])
 
     def test_a_short_side_is_detected_from_the_english_spelling(self):
         self._open(side="SELL_SHORT")
-        self.assertIn("🔴 空单 SELL", self.call["message"])
+        self.assertIn("空单 SELL", self.call["message"])
 
     def test_the_venue_name_is_upper_cased_in_the_header(self):
         self._open(venue="binance")
         self.assertIn("执行交易所：BINANCE", self.call["message"])
-        self.assertIn("BTCUSDT 永续", self.call["message"])
+        self.assertIn("BTC-USDT-SWAP", self.call["message"])
 
     def test_a_policy_version_suppresses_the_strategy_line(self):
         self._open(policy_version="v7.9.2")
-        self.assertIn("🏷️ 策略版本：v7.9.2", self.call["message"])
-        self.assertNotIn("🎯 触发策略", self.call["message"])
+        self.assertIn("策略版本：v7.9.2", self.call["message"])
+        self.assertNotIn("触发策略", self.call["message"])
 
     def test_the_strategy_line_is_used_without_a_policy_version(self):
         self._open()
-        self.assertIn("🎯 触发策略：低吸", self.call["message"])
+        self.assertIn("触发策略：低吸", self.call["message"])
 
     def test_the_council_line_joins_role_and_confidence(self):
         self._open(council_role="技术席", confidence=88.5)
@@ -191,14 +180,20 @@ class TradeOpenTests(_NotifierSandbox, unittest.TestCase):
         self._open(margin_usdt=25.5)
         self.assertIn("保证金 25.50 U", self.call["message"])
 
-    def test_a_zero_margin_falls_back_to_the_estimate(self):
-        # `margin_usdt and margin_usdt > 0` ⇒ 0 是 falsy ⇒ 走预估分支
+    def test_a_zero_margin_never_fabricates_an_estimate(self):
+        """★ 没给保证金就**只说杠杆**，绝不用张数反推金额。
+
+        旧实现用 `sz × px ÷ leverage` 造「预估保证金」—— 三所数量单位不同、
+        各币种面值算法也不同，算出来的是假数（实测把 49.9U 说成 6.72U）。
+        """
         self._open(margin_usdt=0, sz=5, px=100.0, leverage=5)
-        self.assertIn("预估保证金", self.call["message"])
+        self.assertNotIn("预估保证金", self.call["message"])
+        self.assertNotIn("张", self.call["message"])
+        self.assertIn("5x 杠杆", self.call["message"])
 
     def test_the_notional_is_shown_when_positive(self):
         self._open(notional_usdt=1234.5)
-        self.assertIn("货值 ~1234.5 U", self.call["message"])
+        self.assertIn("名义敞口 ~1234.5 U", self.call["message"])
 
     def test_the_long_rr_is_auto_deduced(self):
         self._open(px=100.0, tp_px=110.0, sl_px=95.0)
@@ -258,7 +253,7 @@ class TradeOpenTests(_NotifierSandbox, unittest.TestCase):
 
     def test_the_market_regime_is_shown(self):
         self._open(market_regime="趋势上行")
-        self.assertIn("🌐 宏观体制：趋势上行", self.call["message"])
+        self.assertIn("宏观体制：趋势上行", self.call["message"])
 
     def test_unknown_kwargs_are_tolerated(self):
         # `**kwargs: Any` —— 调用方加字段不许炸
@@ -284,38 +279,38 @@ class TradeCloseTests(_NotifierSandbox, unittest.TestCase):
 
     def test_a_profit_close_is_tagged_as_profit(self):
         self._close()
-        self.assertIn("🎉 【盈利落袋】", self.call["title"])
+        self.assertIn("【盈利落袋】", self.call["title"])
 
     def test_a_loss_close_is_tagged_as_stop_loss(self):
         # ★ 第 217–220 行
         self._close(pnl=-10.0, stage="止损")
-        self.assertIn("🛡️ 【风控止损】", self.call["title"])
+        self.assertIn("【风控止损】", self.call["title"])
         self.assertIn("-10.0000 USDT", self.call["message"])
 
     def test_a_near_zero_result_is_tagged_as_breakeven(self):
         # ★ 第 210–212 行 —— |net| < 0.05
         self._close(pnl=0.01, stage="平仓")
-        self.assertIn("⚖️ 【保本结清】", self.call["title"])
+        self.assertIn("【保本结清】", self.call["title"])
         self.assertIn("保本移损退出", self.call["message"])
 
     def test_an_exact_zero_is_breakeven(self):
         self._close(pnl=0.0)
-        self.assertIn("⚖️ 【保本结清】", self.call["title"])
+        self.assertIn("【保本结清】", self.call["title"])
 
     def test_a_breakeven_stage_forces_the_breakeven_tag(self):
         # 金额不为零但 stage 含"保本" ⇒ 仍按保本报
         self._close(pnl=5.0, stage="保本移损")
-        self.assertIn("⚖️ 【保本结清】", self.call["title"])
+        self.assertIn("【保本结清】", self.call["title"])
 
     def test_the_breakeven_boundary_is_exclusive(self):
         # |net| == 0.05 **不**算保本（`< 0.05`）
         self._close(pnl=0.05)
-        self.assertIn("🎉 【盈利落袋】", self.call["title"])
+        self.assertIn("【盈利落袋】", self.call["title"])
 
     def test_a_partial_exit_is_tagged_as_scale_out(self):
         # ★ 第 206–209 行 —— 判定先于 is_be/is_win
         self._close(pnl=0.01, stage="分批止盈")
-        self.assertIn("🎉 【阶梯止盈 TP1 达成】", self.call["title"])
+        self.assertIn("【阶梯止盈 TP1 达成】", self.call["title"])
         self.assertIn("首批 50% 利润落袋", self.call["message"])
 
     def test_the_partial_flag_alone_triggers_the_scale_out_tag(self):
@@ -356,7 +351,7 @@ class TradeCloseTests(_NotifierSandbox, unittest.TestCase):
 
     def test_the_side_line_is_only_shown_when_provided(self):
         self._close(side="空")
-        self.assertIn("🔴 空单", self.call["message"])
+        self.assertIn("空单", self.call["message"])
         self.capture.calls.clear()
         self._close()
         self.assertNotIn("持仓方向", self.call["message"])
@@ -367,12 +362,12 @@ class TradeCloseTests(_NotifierSandbox, unittest.TestCase):
 
     def test_a_zero_entry_price_omits_the_comparison(self):
         self._close(entry_px=0)
-        self.assertIn("🏁 退出价格：110.0", self.call["message"])
+        self.assertIn("退出价格：110.0", self.call["message"])
         self.assertNotIn("开仓均价", self.call["message"])
 
     def test_the_duration_line_is_optional(self):
         self._close(duration_str="2时30分")
-        self.assertIn("⏱️ 持仓时长：2时30分", self.call["message"])
+        self.assertIn("持仓时长：2时30分", self.call["message"])
 
     def test_a_partial_exit_explains_the_follow_up_protection(self):
         self._close(is_partial=True)
@@ -409,11 +404,11 @@ class SlUpdatedTests(_NotifierSandbox, unittest.TestCase):
     def test_the_current_price_line_shows_the_profit_percentage(self):
         # ★ 第 293/294 行
         self._sl(cur_px=105.0, profit_pct=5.0)
-        self.assertIn("📈 当前市价：105.0 (+5.00%)", self.call["message"])
+        self.assertIn("当前市价：105.0 (+5.00%)", self.call["message"])
 
     def test_the_current_price_line_without_a_percentage(self):
         self._sl(cur_px=105.0, profit_pct=None)
-        self.assertIn("📈 当前市价：105.0", self.call["message"])
+        self.assertIn("当前市价：105.0", self.call["message"])
         self.assertNotIn("(+", self.call["message"])
 
     def test_a_zero_current_price_omits_the_line(self):
@@ -422,7 +417,7 @@ class SlUpdatedTests(_NotifierSandbox, unittest.TestCase):
 
     def test_the_side_label_handles_the_english_spelling(self):
         self._sl(side="short")
-        self.assertIn("🔴 空单", self.call["message"])
+        self.assertIn("空单", self.call["message"])
 
     def test_the_default_reason_mentions_the_breakeven_move(self):
         self._sl()
@@ -436,33 +431,6 @@ class SlUpdatedTests(_NotifierSandbox, unittest.TestCase):
     def test_a_non_okx_venue_prefixes_the_title(self):
         self._sl(venue="gate")
         self.assertIn("[GATE] ", self.call["title"])
-
-
-# ───────────────────── 拦截 / 熔断 / 简报 / 复盘 ─────────────────────
-class InterceptorBlockedTests(_NotifierSandbox, unittest.TestCase):
-    def _blk(self, **over):
-        kw = {"inst": "BTC-USDT-SWAP", "action": "BUY_LONG",
-              "interceptor_name": "POSITION_CAP", "reason": "超出同向上限"}
-        kw.update(over)
-        return qn.notify_interceptor_blocked(**kw)
-
-    def test_a_long_proposal_is_labelled(self):
-        self._blk()
-        self.assertIn("🟢 追多", self.call["message"])
-        self.assertIn("POSITION_CAP", self.call["message"])
-
-    def test_a_short_proposal_is_labelled(self):
-        self._blk(action="SELL_SHORT")
-        self.assertIn("🔴 追空", self.call["message"])
-
-    def test_the_fail_closed_stance_is_stated(self):
-        self._blk()
-        self.assertIn("Fail-Closed 强制降级观望", self.call["message"])
-
-    def test_the_event_type_and_priority(self):
-        self._blk()
-        self.assertEqual(self.call["event_type"], "risk.interceptor_blocked")
-        self.assertEqual(self.call["priority"], 70)
 
 
 class CircuitBreakerNoticeTests(_NotifierSandbox, unittest.TestCase):
@@ -499,7 +467,7 @@ class EvolutionReportTests(_NotifierSandbox, unittest.TestCase):
     def test_the_title_and_payload(self):
         qn.notify_evolution_report(55.0, 20, "s", "l")
         self.assertEqual(self.call["event_type"], "evolution.completed")
-        self.assertEqual(self.call["title"], "🧬 【AI 大脑自进化完成】胜率 55.0%")
+        self.assertEqual(self.call["title"], "【AI策略自进化完成】胜率 55.0%")
         self.assertEqual(self.call["payload"], {"winrate": 55.0, "total_trades": 20})
 
     def test_the_priority_is_sixty(self):
@@ -517,7 +485,6 @@ class CrossCuttingTests(_NotifierSandbox, unittest.TestCase):
             lambda: qn.notify_trade_open("BTC-USDT-SWAP", "多", 1, 100.0, "s", "r"),
             lambda: qn.notify_trade_close("BTC-USDT-SWAP", 1.0, "止盈", 101.0),
             lambda: qn.notify_sl_updated("BTC-USDT-SWAP", "多", 95.0, 100.0),
-            lambda: qn.notify_interceptor_blocked("BTC-USDT-SWAP", "BUY_LONG", "I", "r"),
             lambda: qn.notify_circuit_breaker("e", "r"),
             lambda: qn.notify_daily_summary("s"),
             lambda: qn.notify_evolution_report(1.0, 1, "s", "l"),

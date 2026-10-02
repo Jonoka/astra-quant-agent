@@ -7,6 +7,7 @@
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import socket
 import time
@@ -56,7 +57,8 @@ def _is_transient_http(code: int, body: str) -> bool:
 def _parse_llm_response(target_format: str, res_json: Dict[str, Any]) -> Tuple[str, str, Dict[str, Any]]:
     content = ""
     reasoning_content = ""
-    usage = res_json.get("usage", {}) if isinstance(res_json, dict) else {}
+    raw_usage = res_json.get("usage", {}) if isinstance(res_json, dict) else {}
+    usage = dict(raw_usage) if isinstance(raw_usage, dict) else {}
 
     # Protocol 1: Claude Messages Response
     if target_format == "claude_messages":
@@ -89,6 +91,56 @@ def _parse_llm_response(target_format: str, res_json: Dict[str, Any]) -> Tuple[s
         content = str(msg.get("content", "")).strip()
         reasoning_content = str(msg.get("reasoning_content") or "").strip()
 
+    # 规范化提取各厂商 Prompt Caching 缓存命中指标（OpenAI, DeepSeek, Claude, Gemini, Qwen）
+    #
+    # 三种形态都要认（2026-09-29 实测）：
+    #   1) Chat Completions：usage.prompt_tokens_details.cached_tokens（且**无命中时该字段整段省略**）
+    #   2) Responses：usage.input_tokens_details.cached_tokens（**始终存在**，0 或 N）—— 本仓生产
+    #      切到 /responses 后靠它把"上游说 0"与"上游什么都没说"分开；
+    #   3) Anthropic Messages：usage.cache_read_input_tokens / cache_creation_input_tokens；
+    #      DeepSeek：prompt_cache_hit_tokens；Gemini 原生：cached_content_token_count。
+    prompt_details = usage.get("prompt_tokens_details", {}) if isinstance(usage.get("prompt_tokens_details"), dict) else {}
+    input_details = usage.get("input_tokens_details", {}) if isinstance(usage.get("input_tokens_details"), dict) else {}
+    # ⚠️ 不能用 `a or b or c` 串：**显式的 0 是"上报了 0"，不是"没上报"**。
+    # Anthropic 在无命中时给的正是 `cache_read_input_tokens: 0`，用 or 会把"命中 0"
+    # 误判成"上游没上报"，于是又回到"不可判定 ≠ 0"的反面。
+    _candidates = (
+        prompt_details.get("cached_tokens") if "cached_tokens" in prompt_details else None,
+        input_details.get("cached_tokens") if "cached_tokens" in input_details else None,
+        usage.get("prompt_cache_hit_tokens"),
+        usage.get("cache_read_input_tokens"),
+        usage.get("cached_content_token_count"),
+        usage.get("cached_tokens"),
+    )
+    cached_tokens = next((value for value in _candidates if value is not None), None)
+    #: 是否**真的上报过**缓存指标：False ⇒ 上游对本响应只字未提（不可判定 ≠ 0）。
+    usage["cache_reported"] = cached_tokens is not None
+    if cached_tokens is not None:
+        try:
+            usage["cached_tokens"] = int(cached_tokens)
+        except (TypeError, ValueError):
+            pass
+    cache_creation = usage.get("cache_creation_input_tokens")
+    if cache_creation is not None:
+        try:
+            usage["cache_creation_tokens"] = int(cache_creation)
+        except (TypeError, ValueError):
+            pass
+
+    # 2026 缓存效能归一化：计算命中率 (0.0% ~ 100.0%)
+    input_t = usage.get("prompt_tokens") or usage.get("input_tokens") or 0
+    if isinstance(input_t, (int, float)) and input_t > 0 and usage.get("cached_tokens") is not None:
+        usage["cache_hit_ratio"] = round(float(usage["cached_tokens"]) / float(input_t) * 100.0, 1)
+
+    # 截断显性化：Responses 用 status/incomplete_details，Chat 用 finish_reason=length。
+    # 只做标注、不改控制流 —— 硬门禁仍是决策层的 JSON 校验。
+    if target_format == "openai_responses":
+        status = str(res_json.get("status") or "").strip().lower()
+        usage["truncated"] = bool(status and status not in ("completed", "success"))
+    else:
+        finish = str((res_json.get("choices") or [{}])[0].get("finish_reason") or "").strip().lower()
+        usage["truncated"] = finish == "length"
+
     return content, reasoning_content, usage
 
 
@@ -117,6 +169,13 @@ def build_request_spec(
     rtype = reasoning_type if reasoning_type != "auto" else _detect_reasoning_type(model)
     effort = (reasoning_effort or "auto").strip().lower()
 
+    # 2026 会话亲和性标识（Session Affinity）：防止反代或中转集群轮询不同 Key 打散服务端显存 KV Cache
+    first_sys = next((str(m.get("content") or "") for m in messages if m.get("role") == "system"), "")
+    if not first_sys and messages:
+        first_sys = str(messages[0].get("content") or "")
+    affinity_seed = f"{model}:{first_sys[:300]}"
+    affinity_id = f"astra-{hashlib.sha256(affinity_seed.encode('utf-8')).hexdigest()[:16]}"
+
     # Protocol 1: Anthropic Claude Messages API
     if api_format == "claude_messages":
         endpoint = _join_api_path(cleaned_url, custom_path or "/messages")
@@ -125,6 +184,8 @@ def build_request_spec(
             "Content-Type": "application/json",
             "User-Agent": "AstraQuant/8.3 (Claude-Messages)",
             "anthropic-version": "2023-06-01",
+            "anthropic-beta": "prompt-caching-2024-07-31",
+            "X-Session-ID": affinity_id,
         }
         if api_key:
             headers["x-api-key"] = api_key
@@ -139,7 +200,18 @@ def build_request_spec(
             "messages": chat_messages,
         }
         if system_chunks:
-            payload["system"] = "\n\n".join(system_chunks)
+            sys_combined = "\n\n".join(system_chunks)
+            # 2026 Claude Prompt Caching: >=1000 字符长系统提示词注入 ephemeral 缓存断点
+            if len(sys_combined) >= 1000:
+                payload["system"] = [
+                    {
+                        "type": "text",
+                        "text": sys_combined,
+                        "cache_control": {"type": "ephemeral"},
+                    }
+                ]
+            else:
+                payload["system"] = sys_combined
 
         if effort in ("max", "xhigh", "high", "medium", "low"):
             budget_map = {
@@ -169,6 +241,7 @@ def build_request_spec(
         headers = {
             "Content-Type": "application/json",
             "User-Agent": "AstraQuant/8.3 (OpenAI-Responses)",
+            "X-Session-ID": affinity_id,
         }
         if api_key:
             headers["Authorization"] = f"Bearer {api_key}"
@@ -176,6 +249,7 @@ def build_request_spec(
         payload: Dict[str, Any] = {
             "model": model,
             "input": messages,
+            "user": affinity_id,
         }
         if response_format and response_format.get("type") == "json_object":
             payload["text"] = {"format": {"type": "json_object"}}
@@ -191,6 +265,7 @@ def build_request_spec(
         headers = {
             "Content-Type": "application/json",
             "User-Agent": "AstraQuant/8.3 (OpenAI-Chat)",
+            "X-Session-ID": affinity_id,
         }
         if api_key:
             headers["Authorization"] = f"Bearer {api_key}"
@@ -198,15 +273,19 @@ def build_request_spec(
         payload: Dict[str, Any] = {
             "model": model,
             "messages": messages,
+            "user": affinity_id,
         }
 
         # Temperature handling for reasoning models vs normal models
         is_reasoning_model = (
             rtype in ("deepseek_reasoner", "standard_effort")
-            or m_lower.startswith(("o1", "o3", "o4"))
+            or m_lower.startswith(("o1", "o3", "o4", "gpt-5", "gpt-6", "chatgpt-6"))
+            or "gpt-5" in m_lower or "gpt-6" in m_lower or "chatgpt-6" in m_lower
+            or "deepseek-v4" in m_lower or "v4.1" in m_lower
             or "reasoner" in m_lower
             or "-r1" in m_lower
             or "qwen3" in m_lower or "qwen-3" in m_lower or "qwq" in m_lower
+            or "kimi-k" in m_lower or "glm-5" in m_lower
         )
         if not is_reasoning_model:
             if temperature is not None:
@@ -216,10 +295,16 @@ def build_request_spec(
                 payload["temperature"] = temperature
 
         # Standard reasoning effort parameter (supports max, xhigh, high, medium, low, minimal, none)
-        if rtype == "standard_effort" or (rtype == "auto" and ("gemini" in m_lower or "qwen3" in m_lower or "qwen-3" in m_lower or "qwq" in m_lower or m_lower.startswith(("o1", "o3", "o4", "gpt-5", "gpt-6")) or "gpt-5" in m_lower or "gpt-6" in m_lower)):
+        if rtype == "standard_effort" or (rtype == "auto" and (
+            "gemini" in m_lower or "qwen3" in m_lower or "qwen-3" in m_lower or "qwq" in m_lower
+            or m_lower.startswith(("o1", "o3", "o4", "gpt-5", "gpt-6", "chatgpt-6"))
+            or "gpt-5" in m_lower or "gpt-6" in m_lower or "chatgpt-6" in m_lower
+            or "deepseek-v4" in m_lower or "v4.1" in m_lower
+            or "kimi-k" in m_lower or "glm-5" in m_lower
+        )):
             if effort in ("max", "xhigh", "high", "medium", "low", "minimal"):
                 payload["reasoning_effort"] = effort
-            elif effort == "none" and ("gemini" in m_lower or "gpt" in m_lower):
+            elif effort == "none":
                 payload["reasoning_effort"] = "none"
 
         if response_format and rtype != "deepseek_reasoner":

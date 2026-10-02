@@ -1,6 +1,6 @@
 <script setup lang="ts">
 /**
- * NewsView.vue · DeepSeek Harness 风格舆情快讯与重大黑天鹅情报看板
+ * NewsView.vue · AstraQuant 全球舆情快讯与黑天鹅情报看板
  * 包含：重大黑天鹅熔断预警带、币种情绪极性矩阵（支持移动端折叠与防挤压排版）、多源情报流（OKX/金十/全球宏观）与关键词检索
  */
 import { computed, ref } from 'vue';
@@ -32,7 +32,7 @@ const searchQuery = ref<string>('');
 const isBandCollapsed = ref<boolean>(false);
 
 const cryptoNewsCount = computed(() => rawNews.value.filter((item) =>
-  (item.platforms || []).some((p: string) => ['Cointelegraph', 'CoinDesk', 'TheBlock', 'Binance'].some((k) => p.includes(k))) || (item.coins && item.coins.length > 0)
+  (item.platforms || []).some((p: string) => ['Cointelegraph', 'CoinDesk', 'TheBlock'].some((k) => p.includes(k))) || (item.coins && item.coins.length > 0)
 ).length);
 
 const jin10NewsCount = computed(() => rawNews.value.filter((item) =>
@@ -97,7 +97,7 @@ const filteredNews = computed(() => {
   let list = rawNews.value;
   if (selectedSource.value === 'crypto') {
     list = list.filter((item) =>
-      (item.platforms || []).some((p: string) => ['Cointelegraph', 'CoinDesk', 'TheBlock', 'Binance'].some((k) => p.includes(k))) || (item.coins && item.coins.length > 0)
+      (item.platforms || []).some((p: string) => ['Cointelegraph', 'CoinDesk', 'TheBlock'].some((k) => p.includes(k))) || (item.coins && item.coins.length > 0)
     );
   } else if (selectedSource.value === 'jin10') {
     list = list.filter((item) => (item.platforms || []).some((p: string) => p.includes('金十')));
@@ -163,9 +163,6 @@ function toggleCoinFilter(sym: string) {
           <span class="inline-block h-1.5 w-1.5 rounded-full shrink-0" :class="macro.includes('多') ? 'bg-[var(--up)] animate-pulse' : macro.includes('空') ? 'bg-[var(--down)] animate-pulse' : 'bg-[var(--ink-3)]'" />
           <span>{{ macro }}</span>
         </span>
-        <span class="hidden lg:inline text-3xs text-[var(--ink-3)] whitespace-nowrap">
-          · {{ t('dash.news.desc') }}
-        </span>
       </div>
 
       <!-- 信源状态与新鲜度：防溢出保护 + 优雅换行 -->
@@ -221,7 +218,6 @@ function toggleCoinFilter(sym: string) {
               <Flame class="h-3.5 w-3.5 text-[var(--accent)] shrink-0" />
               {{ t('dash.news.band.title') }}
             </h2>
-            <p class="text-3xs text-[var(--ink-3)] truncate hidden sm:inline">{{ t('dash.news.band.desc') }}</p>
           </div>
 
           <div class="flex items-center gap-1.5 shrink-0">
@@ -323,10 +319,10 @@ function toggleCoinFilter(sym: string) {
       <!-- 舆情快讯情报流 (News Stream) -->
       <div class="dsh-card overflow-hidden min-h-[480px] flex flex-col">
         <!-- 筛选与搜索栏 -->
-        <header class="dsh-card-header flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2.5">
-          <!-- 来源 Tab 组：移动端横向滑动 -->
-          <div class="overflow-x-auto -mx-1 px-1">
-            <div class="seg shrink-0 whitespace-nowrap" role="tablist" :aria-label="t('dash.news.feed.source')">
+        <header class="dsh-card-header flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2.5 min-w-0">
+          <!-- 来源 Tab 组：移动端横向滑动，带防越界与平滑手势 -->
+          <div class="w-full sm:w-auto min-w-0 max-w-full overflow-x-auto scrollbar-none -mx-1 px-1 py-0.5" style="-webkit-overflow-scrolling: touch;">
+            <div class="seg inline-flex shrink-0 whitespace-nowrap" role="tablist" :aria-label="t('dash.news.feed.source')">
               <button
                 v-for="(f, fi) in sourceFilters"
                 :key="f.key"
@@ -443,7 +439,7 @@ function toggleCoinFilter(sym: string) {
             <h3 class="text-xs font-bold text-[var(--ink-strong)] leading-snug">
               {{ item.title }}
             </h3>
-            <p v-if="item.summary" class="text-xs text-[var(--ink-2)] leading-relaxed font-sans">
+            <p v-if="item.summary && item.summary.trim() !== item.title.trim() && !item.summary.includes(item.title)" class="text-xs text-[var(--ink-2)] leading-relaxed font-sans">
               {{ item.summary }}
             </p>
           </article>

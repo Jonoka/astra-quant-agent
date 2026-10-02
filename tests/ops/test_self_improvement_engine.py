@@ -11,7 +11,7 @@
 | ★ **回退选模先同网关** | 模型池可能横跨多域名，先把配置**打桩打掉**再读真实配置没有任何意义；死域上的席位回退过去也是 400/504 ⇒ 优先同 `base_url` 的健康成员，其次异域名 |
 | ★ **快照 join 的四条铁律** | ①方向必须一致（拒空头快照当多头成因）；②允许 `[-6h, +20min]` 的首巡检窗口；③**开仓 20 分钟之后的快照绝不是因果现场**；④早于 6 小时算过期证据。窗口内**取最接近的** |
 | ★ **心法归一不许落回 `str(dict)`** | `_coerce_display_str` 要处理模型 schema 漂移：自序列化 JSON 字符串、`{dimension, analysis}`、`{action_type, action}`、纯列表 —— 否则前端渲染成 `[object Object]`（2026-09-09 用户截图那个事故）|
-| ★ **基准心法是宪法级** | `merge_memory_with_constitution`：ADD 为纯追加并去重；REVISE/INVALIDATE 可整理战术层，但**被省略的基准心法由宿主原样补回**（大模型无权物理删除宪法级记忆）|
+| ★ **心法合并只做追加与去重** | `merge_lesson_texts`（2026-10 起；原名 `merge_memory_with_constitution`）：ADD 为纯追加并去重；REVISE/INVALIDATE 采用模型清单。**原「基准心法由宿主强制补回」已随基准机制整体拆除**（用户要求系统不再预设任何心法）|
 | ★ **证据不足就保留旧心法** | `resolve_memory_update`：`NO_CHANGE` **或提案为空** ⇒ 一律保留既有清单（`preserve=True`）；非法状态码静默归到 `NO_CHANGE` |
 
 ## 封闭性
@@ -383,21 +383,28 @@ class EvolutionFallbackModelTests(_Base):
         self.assertIn("配置读不到", self._log())
 
     def test_it_never_writes_the_global_config(self):
-        """本函数只**读**配置选一个候选，绝不改写全局的 `fallback_model_ids`。
+        """回退选模**只读**配置，绝不改写全局的 `fallback_model_ids`。
 
         ⚠️ 不能拿源码文本断言（函数 docstring 里就写着 `fallback_model_ids` 这个词），
         改用 AST 看它**实际调用了哪些函数**。
+
+        2026-09-30：候选枚举抽到 `_evolution_fallback_candidates` 后，本门跟着**调用链**
+        一起看 —— 只检查 `evolution_fallback_model` 会漏掉真正读配置的那个函数，
+        门就变成了"通过但不设防"。现在两个函数都在断言面内（比抽取前更严）。
         """
         import ast
         tree = ast.parse(Path(SIE.__file__).read_text(encoding="utf-8"))
-        node = next(n for n in tree.body
-                    if isinstance(n, ast.FunctionDef) and n.name == "evolution_fallback_model")
+        nodes = [n for n in tree.body
+                 if isinstance(n, ast.FunctionDef)
+                 and n.name in ("evolution_fallback_model", "_evolution_fallback_candidates")]
+        self.assertEqual(len(nodes), 2, "回退选模的实现函数不见了（壳 + 候选枚举）")
         called = set()
-        for sub in ast.walk(node):
-            if isinstance(sub, ast.Call):
-                name = getattr(sub.func, "attr", None) or getattr(sub.func, "id", None)
-                if name:
-                    called.add(name)
+        for node in nodes:
+            for sub in ast.walk(node):
+                if isinstance(sub, ast.Call):
+                    name = getattr(sub.func, "attr", None) or getattr(sub.func, "id", None)
+                    if name:
+                        called.add(name)
         self.assertIn("init_llm_config", called, "必须真的是在读配置")
         for banned in ("save", "save_config", "write", "dump", "update", "set_config"):
             self.assertNotIn(banned, called)
@@ -610,76 +617,83 @@ class ResolveMemoryUpdateTests(unittest.TestCase):
                 self.assertEqual(SIE.resolve_memory_update(status, ["x"], [])[0], status)
 
 
-class MergeMemoryWithConstitutionTests(unittest.TestCase):
-    def _lesson(self, text, baseline=False, enabled=True):
-        return {"rule_text": text, "is_baseline": baseline, "enabled": enabled}
+class MergeLessonTextsTests(unittest.TestCase):
+    """心法合并（2026-10 起**只做去重与追加**）。
+
+    历史：本类原名 `MergeMemoryWithConstitutionTests`，钉的是「基准心法宪法级保护」
+    —— 模型省略/试图删除的 `is_baseline` 条目由宿主强制补回（`readded`）。
+    用户已要求系统不再预设任何心法，基准机制整体拆除，故**补回行为不复存在**，
+    本类改为钉"仍然需要的那部分"：ADD 纯追加、去重、脏输入容忍。
+
+    ⚠️ 反向判据（新增）：合并函数**不得**再有任何"宿主强制补回"行为 ——
+    否则等于把预设保护偷偷加回来。
+    """
+
+    def _lesson(self, text, enabled=True):
+        return {"rule_text": text, "enabled": enabled}
+
+    def test_returns_a_plain_list_not_a_pair(self):
+        """★ 契约已变：不再返回 `(清单, 补回清单)` 二元组。"""
+        out = SIE.merge_lesson_texts("ADD", ["新"], [self._lesson("旧")])
+        self.assertIsInstance(out, list)
 
     def test_add_appends_new_items_after_the_existing_ones(self):
-        final, readded = SIE.merge_memory_with_constitution(
-            "ADD", ["新"], [self._lesson("旧")])
-        self.assertEqual(final, ["旧", "新"])
-        self.assertEqual(readded, [])
+        self.assertEqual(SIE.merge_lesson_texts("ADD", ["新"], [self._lesson("旧")]),
+                         ["旧", "新"])
 
     def test_add_deduplicates(self):
-        final, _ = SIE.merge_memory_with_constitution(
-            "ADD", ["旧", "新", "新"], [self._lesson("旧")])
-        self.assertEqual(final, ["旧", "新"])
+        self.assertEqual(SIE.merge_lesson_texts("ADD", ["旧", "新", "新"], [self._lesson("旧")]),
+                         ["旧", "新"])
 
-    def test_revise_keeps_only_the_proposed_items_plus_the_baselines(self):
-        final, readded = SIE.merge_memory_with_constitution(
-            "REVISE", ["战术新解"], [self._lesson("战术旧解"), self._lesson("基准", True)])
-        self.assertEqual(final, ["战术新解", "基准"])
-        self.assertEqual(readded, ["基准"])
+    def test_revise_takes_only_the_proposed_items(self):
+        """★ REVISE 下不再有"基准保留"：模型没复述的条目一律不在最终清单里。
 
-    def test_an_omitted_baseline_is_readded(self):
-        """★ 大模型无权物理删除宪法级记忆。"""
-        final, readded = SIE.merge_memory_with_constitution(
-            "INVALIDATE", [], [self._lesson("基准甲", True), self._lesson("基准乙", True)])
-        self.assertEqual(final, ["基准甲", "基准乙"])
-        self.assertEqual(readded, ["基准甲", "基准乙"])
+        （它们不会蒸发 —— `_review_candidates` 会把漏述的启用条目落成**停用存档**。）
+        """
+        out = SIE.merge_lesson_texts("REVISE", ["战术新解"],
+                                     [self._lesson("战术旧解"), self._lesson("另一条")])
+        self.assertEqual(out, ["战术新解"])
 
-    def test_a_baseline_the_model_kept_is_not_readded(self):
-        final, readded = SIE.merge_memory_with_constitution(
-            "REVISE", ["基准甲"], [self._lesson("基准甲", True)])
-        self.assertEqual(final, ["基准甲"])
-        self.assertEqual(readded, [])
+    def test_only_add_keeps_existing_and_it_is_a_general_contract(self):
+        """★ ADD 的"保留现有"是**通用契约**（对所有条目一视同仁），不是基准特权。
+
+        被拆掉的"宿主强制补回"只存在于 REVISE/INVALIDATE —— 那才是不管模型说什么
+        都硬塞回来的行为。ADD 保留现有条目是为了不让一次追加把库清空，
+        与"某条心法级别更高"无关（现在也没有级别这回事了）。
+        """
+        existing = [self._lesson("旧甲"), self._lesson("旧乙")]
+        self.assertEqual(SIE.merge_lesson_texts("ADD", ["新"], existing),
+                         ["旧甲", "旧乙", "新"])
+
+    def test_revise_and_invalidate_never_readd_anything(self):
+        """★ 反向判据：这两个状态下的最终清单**只由模型给出**，宿主一个字都不加。"""
+        for status in ("REVISE", "INVALIDATE", "NO_CHANGE"):
+            with self.subTest(status=status):
+                out = SIE.merge_lesson_texts(status, [], [self._lesson("旧甲"), self._lesson("旧乙")])
+                self.assertEqual(out, [], f"{status} 下不得补回任何未复述条目")
 
     def test_disabled_lessons_are_ignored(self):
-        final, readded = SIE.merge_memory_with_constitution(
-            "REVISE", [], [self._lesson("停用", False, enabled=False),
-                           self._lesson("启用", True, enabled=True)])
-        self.assertEqual(final, ["启用"])
-        self.assertEqual(readded, ["启用"])
+        out = SIE.merge_lesson_texts(
+            "ADD", [], [self._lesson("停用", enabled=False), self._lesson("启用")])
+        self.assertEqual(out, ["启用"])
 
     def test_non_dict_lessons_are_ignored(self):
-        final, _ = SIE.merge_memory_with_constitution(
-            "ADD", ["新"], ["junk", None, self._lesson("旧")])
-        self.assertEqual(final, ["旧", "新"])
+        self.assertEqual(SIE.merge_lesson_texts("ADD", ["新"], ["junk", None, self._lesson("旧")]),
+                         ["旧", "新"])
 
     def test_lessons_without_rule_text_are_ignored(self):
-        final, _ = SIE.merge_memory_with_constitution(
-            "ADD", ["新"], [{"rule_text": "  "}, {"is_baseline": True}, self._lesson("旧")])
-        self.assertEqual(final, ["旧", "新"])
+        self.assertEqual(SIE.merge_lesson_texts("ADD", ["新"], [{"rule_text": "  "}, {}, self._lesson("旧")]),
+                         ["旧", "新"])
 
     def test_object_memory_items_are_flattened(self):
-        final, _ = SIE.merge_memory_with_constitution(
-            "ADD", [{"dimension": "仓位", "analysis": "分批建仓"}], [])
-        self.assertEqual(final, ["【仓位】分批建仓"])
-
-    def test_empty_proposals_for_revise_leave_only_the_baselines(self):
-        final, readded = SIE.merge_memory_with_constitution(
-            "REVISE", [], [self._lesson("战术"), self._lesson("基准", True)])
-        self.assertEqual(final, ["基准"])
-        self.assertEqual(readded, ["基准"])
+        self.assertEqual(SIE.merge_lesson_texts("ADD", [{"dimension": "仓位", "analysis": "分批建仓"}], []),
+                         ["【仓位】分批建仓"])
 
     def test_none_existing_lessons_is_tolerated(self):
-        final, readded = SIE.merge_memory_with_constitution("ADD", ["新"], None)
-        self.assertEqual(final, ["新"])
-        self.assertEqual(readded, [])
+        self.assertEqual(SIE.merge_lesson_texts("ADD", ["新"], None), ["新"])
 
     def test_none_proposals_is_tolerated(self):
-        final, _ = SIE.merge_memory_with_constitution("REVISE", None, [self._lesson("旧")])
-        self.assertEqual(final, [])
+        self.assertEqual(SIE.merge_lesson_texts("REVISE", None, [self._lesson("旧")]), [])
 
 
 class CoerceDisplayStrTests(unittest.TestCase):
@@ -911,12 +925,22 @@ class LoadClosedTradesTests(_Base):
         self.assertIn("读取交易台账异常", self._log())
 
     def test_the_snapshot_observability_is_classified(self):
-        """`velocity` 是 17 个 DYNAMICS_FIELDS 之一；1/17 ⇒ PARTIAL（阈值 15）。
+        """`macd_hist` 是 18 个 DYNAMICS_FIELDS 之一；1/18 ⇒ PARTIAL（阈值 16）。
+
+        ★ 2026-10：字段表由 17 项微积分字段换成 18 项 7 梯队因子字段，
+        判据仍按"真实非空计数"，只是字段集换了。
 
         ⚠️ 别拿 `{"v": 1.0}` 这种想当然的短名 —— 它不在字段表里，会被判成 PRICE_ONLY。
+        ⚠️ 也别再拿 `velocity`：它已随数理链退场，**不算证据**（下一条专门钉住）。
         """
-        self._ledger(_trade(signal_snapshot={"velocity": 1.0}))
+        self._ledger(_trade(signal_snapshot={"macd_hist": 1.0}))
         self.assertEqual(SIE.load_closed_trades()[0]["snapshot_observability"], "PARTIAL")
+
+    def test_retired_dynamics_fields_are_not_evidence_any_more(self):
+        """⚠️ 反向断言：填满已退役的动力学字段 ⇒ 仍判 PRICE_ONLY（它们不再算证据）。"""
+        from scripts.evolution.observability import RETIRED_DYNAMICS_FIELDS
+        self._ledger(_trade(signal_snapshot={k: 1.0 for k in RETIRED_DYNAMICS_FIELDS}))
+        self.assertEqual(SIE.load_closed_trades()[0]["snapshot_observability"], "PRICE_ONLY")
 
     def test_a_full_dynamics_snapshot_is_fully_observed(self):
         from scripts.evolution.observability import DYNAMICS_FIELDS
@@ -946,33 +970,19 @@ class LoadClosedTradesTests(_Base):
         self._ledger(_trade())
         self.assertEqual(SIE.load_closed_trades()[0]["entry_snapshot"], {"velocity": 2.0})
 
-    def test_the_calculus_file_is_used_as_the_last_resort(self):
+    def test_the_calculus_file_is_never_read_even_if_present(self):
+        """★ 反向守卫（2026-10）：数理退役后，哪怕旁边放着 calculus_snapshot.json，
+        load_closed_trades 也绝不得去读它、更不得凭空构造 mock 传给 build_signal_snapshot。
+        无开仓快照的平仓单必须诚实标 NONE。
+        """
         self._write_json(self.data / "calculus_snapshot.json",
                          {"instruments": [{"name": "BTC", "calculus": {"v": 3.0}}]})
         self._ledger(_trade())
         with mock.patch("scripts.trader.signal_snapshot.build_signal_snapshot",
-                        return_value={"v": 9.0}) as build:
+                        side_effect=AssertionError("绝不得调用 build_signal_snapshot 兜底")):
             row = SIE.load_closed_trades()[0]
-        self.assertTrue(build.called)
-        self.assertEqual(row["entry_snapshot"], {"v": 9.0})
-
-    def test_a_calculus_snapshot_build_failure_is_swallowed(self):
-        self._write_json(self.data / "calculus_snapshot.json",
-                         {"instruments": [{"name": "BTC", "calculus": {}}]})
-        self._ledger(_trade())
-        with mock.patch("scripts.trader.signal_snapshot.build_signal_snapshot",
-                        side_effect=RuntimeError("算不出来")):
-            row = SIE.load_closed_trades()[0]
+        self.assertIsNone(row["entry_snapshot"])
         self.assertEqual(row["snapshot_observability"], "NONE")
-
-    def test_the_instid_form_is_matched_in_the_calculus_file(self):
-        self._write_json(self.data / "calculus_snapshot.json",
-                         {"instruments": [{"instId": "BTC-USDT-SWAP", "calculus": {}}]})
-        self._ledger(_trade())
-        with mock.patch("scripts.trader.signal_snapshot.build_signal_snapshot",
-                        return_value={"v": 1.0}) as build:
-            SIE.load_closed_trades()
-        self.assertTrue(build.called)
 
     def test_an_empty_ledger_list_yields_no_trades(self):
         self._ledger()
@@ -1045,12 +1055,17 @@ class ComposeEvolutionPromptsTests(_Base):
         self.assertIn("ETH", user)
 
     def test_both_prompts_end_with_the_host_constitution(self):
-        """★ profile 只能调风格，永远无法删改证据纪律与基准心法保护。"""
+        """★ profile 只能调风格，永远无法删改宿主宪章（证据纪律）。
+
+        2026-10：宪章里原「基准心法保护」一条已随基准机制拆除，改为
+        「长期记忆库不含任何系统预设心法」的行为纪律；结尾文案随之更新。
+        """
         system, user, _, _ = SIE.compose_evolution_prompts(self._trades(1.0))
         self.assertIn("宿主宪章", system)
         self.assertIn("宿主宪章", user)
-        self.assertTrue(system.rstrip().endswith("永不覆盖或清空长期记忆。"))
-        self.assertTrue(user.rstrip().endswith("永不覆盖或清空长期记忆。"))
+        self.assertIn("不含任何系统预设心法", system)
+        self.assertTrue(system.rstrip().endswith("不得因为'它一直在'而保留。"))
+        self.assertTrue(user.rstrip().endswith("不得因为'它一直在'而保留。"))
 
     def test_the_layout_is_applied_for_both_slots(self):
         SIE.compose_evolution_prompts(self._trades(1.0))
@@ -1075,8 +1090,28 @@ class ComposeEvolutionPromptsTests(_Base):
         self.assertIn("\"net_pnl\": 1.0", user)
 
     def test_the_system_prompt_declares_the_json_contract(self):
+        """复盘提示词体系必须声明严格 JSON 输出契约。
+
+        ★ 2026-09-30 由提示词来源迁移重钉：原锚点 `只输出严格 JSON` 出自代码常量
+        `EVOLUTION_SYSTEM_PROMPT`，该常量已清空为 `""`（正文迁入
+        `data/prompt_library.json`）。契约声明现在由 JSON 模块「记忆更新规则」承载。
+
+        ⚠️ 为什么不再对 `compose_evolution_prompts()` 的返回值断言：本类 setUp
+        **刻意把 `apply_module_layout` stub 成恒等函数**
+        （`side_effect=lambda text, *a, **k: text`），目的是只测"组装"、不测布局。
+        正文既然已不在代码里，stub 之后 system 里就只剩宿主宪章 —— 对着它断言
+        `必须输出严格 JSON 对象` 永远为假。故改为分层断言：**事实源**（JSON 模块）
+        钉契约声明，**组装结果**钉宿主宪章兜底。
+        """
+        import prompt_library as pl
+        mods = pl.get_profile("allpattern_swing")["pipelines"]["evolution_system"]
+        self.assertTrue(mods, "evolution_system 管线为空 —— 定位错了对象")
+        body = "\n".join(str(m.get("content") or "") for m in mods)
+        self.assertIn("必须输出严格 JSON 对象", body, "JSON 契约声明不在事实源里")
+        self.assertIn("不得输出 Markdown", body)
+        # 组装结果：宿主宪章必须仍然兜底（这部分是代码所有，不受 stub 影响）
         system, _, _, _ = SIE.compose_evolution_prompts([])
-        self.assertIn("只输出严格 JSON", system)
+        self.assertIn("宿主宪章", system, "宿主宪章必须始终在复盘 System 提示词里")
 
 
 class CallLlmEvolutionReviewTests(_Base):
@@ -1294,9 +1329,11 @@ class RunSelfEvolutionTests(_Base):
                           "evolution_actions": ["乙"], "ai_long_term_memory": []}))
         self.fallback = self._start(mock.patch.object(SIE, "evolution_fallback_model",
                                                       return_value=None))
+        # 2026-10：`apply_memory_review` 不再有 `constitution_readded`（基准机制已拆）
+        # ⇒ 返回值从 3 元组变 2 元组。
         self.apply_review = self._start(mock.patch.object(
             SIE, "apply_memory_review",
-            return_value=(["补回"], False, ["退役"])))
+            return_value=(False, ["退役"])))
         # ⚠️ 桩要把 ledger_revision **回显**进载荷 —— 主编排的缓存判据就是比对它，
         #    返回一个不带该键的定值就等于"每次台账都变了"，缓存永远不命中。
         self.report = self._start(mock.patch.object(
@@ -1420,6 +1457,77 @@ class RunSelfEvolutionTests(_Base):
         self.assertEqual(self.review.call_count, 1)
         self.assertIn("超预算", self._log())
 
+    # ---------------------------------------------------------------- 复盘恢复链
+    # 2026-09-30 事故：主模型回复只错在"字符串里裸换行"（JSONDecodeError），
+    # 而唯一回退模型欠费 402 ⇒ 整轮复盘落成无解释的 NO_CHANGE + insights: []，
+    # 用户侧表现为"自进化看起来没更新"。以下四条钉住新的恢复链。
+
+    def test_a_parse_failure_retries_the_same_model_before_spending_the_fallback(self):
+        """格式类失败 ⇒ 同模型带修复指令重试一次，**不消耗回退位**。"""
+        self.review.side_effect = [
+            {"__llm_error__": "JSONDecodeError: Invalid control character at: line 26 column 126"},
+            {"change_status": "ADD", "diagnosis_insights": ["修好了"]},
+        ]
+        self.fallback.return_value = "backup-model"
+        SIE.run_self_evolution(force=True)
+        self.assertEqual(self.review.call_count, 2, "应当只重试一次")
+        second = self.review.call_args_list[1][1]
+        self.assertIsNone(second.get("model_override"),
+                          "格式类失败应先用**同模型**修，而不是换模型")
+        self.assertIn("repair_hint", second)
+        self.assertIn("格式修复要求", second["repair_hint"])
+        self.assertIn("格式修复重试成功", self._log())
+        self.assertNotIn("回退模型 backup-model 复盘完成", self._log())
+
+    def test_a_transport_failure_still_goes_straight_to_the_fallback(self):
+        """非格式类（网关/超时）⇒ 沿用既有"换一个模型试一次"策略。"""
+        self.review.side_effect = [{"__llm_error__": "RuntimeError: 504"}, {"change_status": "ADD"}]
+        self.fallback.return_value = "backup-model"
+        SIE.run_self_evolution(force=True)
+        self.assertEqual(self.review.call_args_list[1][1]["model_override"], "backup-model")
+        self.assertNotIn("repair_hint", self.review.call_args_list[1][1])
+
+    def test_a_billing_dead_fallback_is_skipped_for_the_next_candidate(self):
+        """★ 欠费候选不该吃掉全部回退机会：402 ⇒ 跳过并试下一个候选。"""
+        self.review.side_effect = [
+            {"__llm_error__": "RuntimeError: 504"},
+            {"__llm_error__": "LLM 网关返回 HTTP 402（模型 glm-5.3-flash）：余额不足"},
+            {"change_status": "ADD"},
+        ]
+        self.fallback.return_value = "glm-5.3-flash"
+        with mock.patch.object(SIE, "evolution_fallback_models",
+                               return_value=["glm-5.3-flash", "gemini-3.8-flash"]):
+            SIE.run_self_evolution(force=True)
+        self.assertEqual(self.review.call_count, 3)
+        self.assertEqual(self.review.call_args_list[2][1]["model_override"], "gemini-3.8-flash")
+        self.assertIn("计费/鉴权不可用，跳过", self._log())
+        self.assertIn("回退模型 gemini-3.8-flash 复盘完成", self._log())
+
+    def test_an_exhausted_fallback_chain_surfaces_an_actionable_reason(self):
+        """全链失败 ⇒ 把回退诊断并进 `llm_error`，管理页才能显示"为什么没更新"。"""
+        self.review.side_effect = [
+            {"__llm_error__": "JSONDecodeError: Unterminated string"},
+            {"__llm_error__": "JSONDecodeError: Unterminated string"},
+            {"__llm_error__": "LLM 网关返回 HTTP 402（模型 glm-5.3-flash）：余额不足"},
+        ]
+        self.fallback.return_value = "glm-5.3-flash"
+        with mock.patch.object(SIE, "evolution_fallback_models",
+                               return_value=["glm-5.3-flash"]):
+            SIE.run_self_evolution(force=True)
+        error = self.report.call_args[1]["llm_review"]["__llm_error__"]
+        self.assertIn("Unterminated string", error, "原始错误必须保留（既有可观测性契约）")
+        self.assertIn("回退尝试", error)
+        self.assertIn("402", error, "欠费这个**可操作**原因必须透出")
+        self.assertIn("余额不足", error)
+
+    def test_error_classification_covers_the_three_recovery_branches(self):
+        self.assertEqual(SIE.classify_evolution_llm_error(
+            "JSONDecodeError: Invalid control character at: line 26 column 126"), "parse")
+        self.assertEqual(SIE.classify_evolution_llm_error(
+            "LLM 网关返回 HTTP 402（模型 glm-5.3-flash）：余额不足"), "billing")
+        self.assertEqual(SIE.classify_evolution_llm_error("HTTP 504 网关超时"), "transport")
+        self.assertEqual(SIE.classify_evolution_llm_error(""), "transport")
+
     def test_a_non_dict_review_is_tolerated(self):
         self.review.return_value = "不是 dict"
         SIE.run_self_evolution(force=True)
@@ -1456,7 +1564,7 @@ class RunSelfEvolutionTests(_Base):
         self.assertIn("Markdown mirror sync skipped", self._log())
 
     def test_the_notification_is_sent_with_the_top_lesson(self):
-        self.apply_review.return_value = (["补回"], False, ["退役"])
+        self.apply_review.return_value = (False, ["退役"])
         SIE.run_self_evolution(force=True)
         self.assertTrue(self.notify.called)
         self.assertEqual(self.notify.call_args[0][0], 50.0)
@@ -1481,8 +1589,7 @@ class RunSelfEvolutionTests(_Base):
     def test_the_apply_review_helper_receives_the_facade_callables(self):
         SIE.run_self_evolution(force=True)
         kwargs = self.apply_review.call_args[1]
-        self.assertIs(kwargs["merge_memory_with_constitution"],
-                      SIE.merge_memory_with_constitution)
+        self.assertIs(kwargs["merge_lesson_texts"], SIE.merge_lesson_texts)
         self.assertIs(kwargs["log_msg"], SIE.log_msg)
 
     def test_the_cycle_is_guarded_by_the_single_flight_lock(self):
@@ -1499,3 +1606,248 @@ class RunSelfEvolutionTests(_Base):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# =====================================================================
+# 回退模型"计费/鉴权"冷却（2026-09-30）
+#
+# 背景（真机实测）：`glm-5.3-flash` 自 2026-09-13 起每次都回 HTTP 402 欠费，
+# 却因为它是**唯一**回退候选，被每一轮复盘反复尝试 —— 白花一次调用与数秒延迟，
+# 还把"回退尝试记录"污染成噪音。冷却让它在窗口内不再被选中。
+#
+# ⚠️ 边界（与 astra_backend/llm/model_health.py 的分工）：那是**结构**自检，明确
+# 拒绝把一次 402 写成永久"死条目"（"充值后它仍然是死的"会让配置页撒谎）。
+# 这里是**运行态**，故必须带时限、且任何一次成功立即解除。
+# =====================================================================
+
+class EvolutionModelCooldownTests(_Base):
+    def setUp(self):
+        super().setUp()
+        self.cooldown_path = str(self.data / "evolution_model_cooldown.json")
+        self._start(mock.patch.dict(os.environ, {
+            "ASTRA_EVOLUTION_MODEL_COOLDOWN_FILE": self.cooldown_path,
+            "ASTRA_EVOLUTION_MODEL_COOLDOWN_SECONDS": "3600",
+        }))
+    def _config_via_manager(self, models, active="gemini-3.8-flash"):
+        """`_evolution_fallback_candidates` 是**函数内** import llm_manager 再取配置的。"""
+        fake = mock.MagicMock()
+        fake.init_llm_config.return_value = {"active_model_id": active, "models": models}
+        self._start(mock.patch.dict(sys.modules, {"astra_backend.llm_manager": fake}))
+        return fake
+
+    def _models(self):
+        return [{"id": "gemini-3.8-flash", "base_url": "https://cpa/v1"},
+                {"id": "glm-5.3-flash", "base_url": "https://other/v1"}]
+
+    def test_a_billing_failure_puts_the_candidate_in_cooldown(self):
+        self.assertTrue(SIE.note_model_billing_failure("glm-5.3-flash", "HTTP 402 余额不足"))
+        self.assertTrue(SIE.model_in_cooldown("glm-5.3-flash"))
+        self.assertIn("glm-5.3-flash", SIE.load_model_cooldowns())
+        self.assertIn("402", json.loads(Path(self.cooldown_path).read_text(encoding="utf-8"))["last_reason"])
+
+    def test_a_cooled_down_candidate_is_not_offered_again(self):
+        """★ 核心价值：欠费候选**不再**占用每一轮的回退位。"""
+        self._config_via_manager(self._models())
+        self.assertEqual(SIE._evolution_fallback_candidates(), ["glm-5.3-flash"])
+        SIE.note_model_billing_failure("glm-5.3-flash", "HTTP 402 余额不足")
+        self.assertEqual(SIE._evolution_fallback_candidates(), [],
+                         "冷却中的候选不得再被提供")
+        self.assertIsNone(SIE.evolution_fallback_model())
+
+    def test_the_cooldown_is_time_bounded_not_a_permanent_verdict(self):
+        """★ 与 model_health 的边界：这不是判死 —— 窗口一过必须自动回到候选表。"""
+        now = 1_000_000.0
+        SIE.note_model_billing_failure("glm-5.3-flash", "402", now=now)
+        self.assertTrue(SIE.model_in_cooldown("glm-5.3-flash", now=now + 10))
+        self.assertFalse(SIE.model_in_cooldown("glm-5.3-flash", now=now + 3601),
+                         "窗口过期后必须自动恢复（充值后就能重新用）")
+        self.assertEqual(SIE.load_model_cooldowns(now + 3601), {},
+                         "过期项要顺带剔除，不留垃圾状态")
+
+    def test_a_successful_call_clears_the_cooldown(self):
+        SIE.note_model_billing_failure("glm-5.3-flash", "402")
+        self.assertTrue(SIE.model_in_cooldown("glm-5.3-flash"))
+        self.assertTrue(SIE.clear_model_cooldown("glm-5.3-flash"))
+        self.assertFalse(SIE.model_in_cooldown("glm-5.3-flash"))
+        self.assertFalse(SIE.clear_model_cooldown("glm-5.3-flash"), "重复清除返回 False")
+
+    def test_a_corrupt_cooldown_file_never_breaks_the_chain(self):
+        """状态文件坏掉绝不能停掉整条回退链（fail-open 到"无冷却"）。"""
+        Path(self.cooldown_path).write_text("{ 不是 JSON", encoding="utf-8")
+        self._config_via_manager(self._models())
+        self.assertEqual(SIE.load_model_cooldowns(), {})
+        self.assertEqual(SIE._evolution_fallback_candidates(), ["glm-5.3-flash"])
+
+    def test_a_zero_window_disables_the_cooldown_entirely(self):
+        self._start(mock.patch.dict(os.environ,
+                                    {"ASTRA_EVOLUTION_MODEL_COOLDOWN_SECONDS": "0"}))
+        self.assertEqual(SIE.note_model_billing_failure("glm-5.3-flash", "402"), 0.0)
+        self.assertFalse(SIE.model_in_cooldown("glm-5.3-flash"))
+
+    def test_the_cooldown_only_touches_the_evolution_engine(self):
+        """冷却不得写回用户配置，也不得出现在结构自检报告里（分工边界）。"""
+        SIE.note_model_billing_failure("glm-5.3-flash", "402")
+        from astra_backend.llm import model_health
+        report = model_health.audit_llm_config({
+            "active_model_id": "gemini-3.8-flash",
+            "models": [{"id": "glm-5.3-flash", "api_key": "k", "base_url": "https://x/v1"}],
+            "providers": [],
+        })
+        self.assertEqual(report["models"]["glm-5.3-flash"]["status"], "ok",
+                         "运行态冷却绝不能污染结构自检（否则配置页会撒谎）")
+
+
+class CooldownWiringTests(RunSelfEvolutionTests):
+    """冷却与恢复链的**集成**行为（复用主编排的完整打桩面）。"""
+
+    def setUp(self):
+        super().setUp()
+        self.cooldown_path = str(self.data / "evolution_model_cooldown.json")
+        self._start(mock.patch.dict(os.environ, {
+            "ASTRA_EVOLUTION_MODEL_COOLDOWN_FILE": self.cooldown_path,
+            "ASTRA_EVOLUTION_MODEL_COOLDOWN_SECONDS": "3600",
+        }))
+
+    def test_a_402_fallback_is_recorded_in_cooldown(self):
+        self.review.side_effect = [
+            {"__llm_error__": "RuntimeError: 504"},
+            {"__llm_error__": "LLM 网关返回 HTTP 402（模型 glm-5.3-flash）：余额不足"},
+        ]
+        self.fallback.return_value = "glm-5.3-flash"
+        with mock.patch.object(SIE, "evolution_fallback_models",
+                               return_value=["glm-5.3-flash"]):
+            SIE.run_self_evolution(force=True)
+        self.assertTrue(SIE.model_in_cooldown("glm-5.3-flash"),
+                        "402 之后该候选必须进入冷却")
+        self.assertIn("进入冷却", self._log())
+
+    def test_a_successful_fallback_clears_a_previous_cooldown(self):
+        SIE.note_model_billing_failure("glm-5.3-flash", "402")
+        self.review.side_effect = [
+            {"__llm_error__": "RuntimeError: 504"},
+            {"change_status": "ADD", "diagnosis_insights": ["甲"]},
+        ]
+        self.fallback.return_value = "glm-5.3-flash"
+        with mock.patch.object(SIE, "evolution_fallback_models",
+                               return_value=["glm-5.3-flash"]):
+            SIE.run_self_evolution(force=True)
+        self.assertFalse(SIE.model_in_cooldown("glm-5.3-flash"),
+                         "成功一次即解除冷却（不是永久判死）")
+
+
+# =====================================================================
+# LLM 全链失败时的**确定性兜底认知**（2026-09-30）
+#
+# 背景：主模型一个裸换行 + 唯一回退模型欠费 ⇒ 整轮落成 `insights: []`，
+# 用户看到"本轮没有产出任何新认知"，像是系统没干活。而台账事实本来就够用。
+#
+# 边界（Code is Law）：兜底只报**可观测事实**，恒 `NO_CHANGE`，绝不写心法。
+# =====================================================================
+
+class DeterministicInsightTests(_Base):
+    def _trade(self, pnl, inst="BTC", reason="止盈", hours=1.0, fee=1.0):
+        opened = datetime.datetime(2026, 9, 20, 8, 0, 0)
+        closed = opened + datetime.timedelta(hours=hours)
+        return {"inst": inst, "side": "long",
+                "open_time": opened.strftime(_BJ_FORMAT),
+                "time": closed.strftime(_BJ_FORMAT),
+                "strategy": "⚡ 趋势", "margin": "--", "gross_pnl": pnl, "fee": fee,
+                "net_pnl": pnl, "exit_reason": reason,
+                "snapshot_observability": "PRICE_ONLY", "entry_snapshot": None}
+
+    def test_every_insight_is_marked_as_locally_derived(self):
+        """★ 必须一眼可辨"这条不是模型说的" —— 否则兜底会被误当成模型结论。"""
+        insights = SIE.derive_deterministic_insights([self._trade(5.0) for _ in range(12)])
+        self.assertTrue(insights)
+        for line in insights:
+            self.assertTrue(line.startswith("[本地台账推导]"), line)
+
+    def test_an_empty_ledger_is_reported_not_silently_empty(self):
+        """空账本也要给一句可读结论，不能返回空数组（那就又回到"什么都没说"）。"""
+        insights = SIE.derive_deterministic_insights([], None)
+        self.assertEqual(len(insights), 1)
+        self.assertIn("没有可观测的已平仓交易", insights[0])
+
+    def test_a_small_sample_makes_no_structural_claim(self):
+        """★ 防小样本幻觉：样本不足时只报样本量，不产出结构结论。"""
+        insights = SIE.derive_deterministic_insights([self._trade(5.0) for _ in range(3)])
+        self.assertEqual(len(insights), 1)
+        self.assertIn("证据不足", insights[0])
+        self.assertIn("不形成结构性结论", insights[0])
+
+    def test_it_reports_the_win_loss_asymmetry(self):
+        """★ 本仓真实台账正是这个形态：胜率 50%、均亏是均盈的 2.2 倍。"""
+        trades = ([self._trade(+14.0) for _ in range(5)]
+                  + [self._trade(-31.0) for _ in range(5)])
+        joined = " ".join(SIE.derive_deterministic_insights(trades))
+        self.assertIn("赢小输大", joined)
+        self.assertIn("2.21", joined, "必须给出倍率，不能只说『亏损较大』")
+
+    def test_it_reports_the_time_stop_overrun(self):
+        """快节奏取向的判据：有多少笔超过了执行层的时间止损阈值。"""
+        trades = ([self._trade(+5.0, hours=1.0) for _ in range(8)]
+                  + [self._trade(-5.0, hours=12.0) for _ in range(4)])
+        joined = " ".join(SIE.derive_deterministic_insights(trades, time_stop_hours=8.0))
+        self.assertIn("持仓时长", joined)
+        self.assertIn("超过 8h", joined)
+        self.assertIn("4 笔", joined)
+
+    def test_it_names_the_worst_and_best_instrument(self):
+        trades = ([self._trade(-9.0, inst="BTC") for _ in range(6)]
+                  + [self._trade(+7.0, inst="ARB") for _ in range(6)])
+        joined = " ".join(SIE.derive_deterministic_insights(trades))
+        self.assertIn("最差 BTC", joined)
+        self.assertIn("最好 ARB", joined)
+
+    def test_it_tolerates_missing_and_malformed_fields(self):
+        """台账字段缺失/格式错不能把兜底本身打挂（那会比没有兜底更糟）。"""
+        trades = [{"net_pnl": 1.0}, {"net_pnl": None, "fee": "x"},
+                  {"inst": "ETH", "net_pnl": -2.0, "open_time": "坏", "time": "坏"}]
+        insights = SIE.derive_deterministic_insights(trades)
+        self.assertTrue(insights, "字段缺失也要产出结论，而不是抛错")
+
+
+class DeterministicFallbackWiringTests(RunSelfEvolutionTests):
+    def test_an_exhausted_chain_still_yields_insights(self):
+        """★ 用户报障的那一格：全链失败时 `insights` 不能再是空的。"""
+        self.review.return_value = {"__llm_error__": "JSONDecodeError: Invalid control character"}
+        self.fallback.return_value = None
+        SIE.run_self_evolution(force=True)
+        insights = self.report.call_args[1]["insights"]
+        self.assertTrue(insights, "LLM 挂了也必须产出可读认知")
+        self.assertTrue(all(s.startswith("[本地台账推导]") for s in insights))
+        self.assertIn("兜底", self._log())
+
+    def test_the_fallback_insights_never_change_memory(self):
+        """★ Code is Law：兜底路径恒 NO_CHANGE，且**绝不提出**任何心法改动。
+
+        ⚠️ 这里刻意断言 `llm_review.ai_long_term_memory` 为空，而不是断言
+        `preserve_existing_memory`：后者在编排末尾会被 `apply_memory_review` 的返回值
+        覆盖，而本用例把那个函数打桩了 —— 断言它就等于在断言替身的返回值（真空断言）。
+        "兜底不改记忆"的真正保证是：兜底**不产出任何记忆提案** + `change_status=NO_CHANGE`。
+        """
+        self.review.return_value = {"__llm_error__": "RuntimeError: 504"}
+        self.fallback.return_value = None
+        SIE.run_self_evolution(force=True)
+        self.assertEqual(self.report.call_args[1]["change_status"], "NO_CHANGE")
+        self.assertTrue(self.report.call_args[1]["insights"],
+                        "先确认兜底**真的跑了** —— 否则下面那条断言会因为「什么都没发生」而假通过")
+        self.assertFalse(self.report.call_args[1]["llm_review"].get("ai_long_term_memory"),
+                         "兜底路径不得提出任何长期心法（它只报台账事实）")
+
+    def test_a_successful_llm_review_is_not_overwritten_by_fallbacks(self):
+        """模型好好的时候，兜底一个字都不许插进来。"""
+        self.review.return_value = {"change_status": "ADD",
+                                    "diagnosis_insights": ["模型结论"],
+                                    "evolution_actions": [], "ai_long_term_memory": []}
+        SIE.run_self_evolution(force=True)
+        self.assertEqual(self.report.call_args[1]["insights"], ["模型结论"])
+
+    def test_the_original_error_stays_visible_next_to_the_fallback_insights(self):
+        """兜底认知**不掩盖**失败原因：两者必须同时可见。"""
+        self.review.return_value = {"__llm_error__": "JSONDecodeError: Unterminated string"}
+        self.fallback.return_value = None
+        SIE.run_self_evolution(force=True)
+        llm_error = self.report.call_args[1]["llm_review"]["__llm_error__"]
+        self.assertIn("Unterminated string", llm_error)
+        self.assertTrue(self.report.call_args[1]["insights"])

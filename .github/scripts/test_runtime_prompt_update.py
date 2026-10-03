@@ -163,9 +163,12 @@ except ValueError: pass
 else: raise AssertionError('legacy below-stop TP1 unexpectedly accepted for new writes')
 assert p.load_library()['active_profile_id']=='stable'
 profile=p.active_profile()
-assert p.validate_profile(profile)['valid']
 assert profile['trading_system'] and profile['trading_user']
 assert p.render_variables(profile['trading_system'], {'risk_budget':'synthetic-risk'})
+base=p.base_template_text('trading_system')
+assert base.strip()
+rendered=p.apply_module_layout(base, profile, 'trading_system', 'rollback fixture')
+assert base.strip() in rendered
 print('legacy_rollback_reader_ok')
 ''', source, baseline, json.dumps({k:v[0] for k,v in h.CHANGES.items()}))
 

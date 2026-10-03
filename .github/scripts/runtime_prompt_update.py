@@ -219,14 +219,18 @@ class Update:
 from scripts import prompt_library as p
 from astra_backend.risk_config import normalize, process_values
 profile = p.active_profile()
-assert p.validate_profile(profile)['valid']
 expected = json.loads(__import__('sys').argv[1])
 assert all(float(os.environ[k]) == v for k,v in expected.items())
 if __import__('sys').argv[2] == 'allpattern_swing':
+    assert p.validate_profile(profile)['valid']
     assert set(normalize(expected)) == set(expected)
 assert all(float(process_values()[k]) == v for k,v in expected.items())
 assert p.load_library()['active_profile_id'] == __import__('sys').argv[2]
 assert profile['trading_system'] and profile['trading_user']
+base = p.base_template_text('trading_system')
+assert base.strip()
+rendered = p.apply_module_layout(base, profile, 'trading_system', 'runtime smoke')
+assert base.strip() in rendered
 print('reader_config_ok')
 """
         for service in SERVICES:

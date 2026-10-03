@@ -53,7 +53,7 @@ mkdir -p data logs backups
 #
 # 2026-09-27 把内部代号全量改名。**配置契约是硬切**（旧的 `R20_*` 不再被读取），
 # 但运行态数据不能硬切：库名/凭证库/锁/心跳还叫 `r20_*` 时直接启动，
-# 系统会"认不出自己的台账与凭证"—— 表现为**空的持仓台账 + 三所全部 NOT READY**，
+# 系统会"认不出自己的台账与凭证"—— 表现为**空的持仓台账 + 账户凭证 NOT READY**，
 # 而且不报错、只是安静地用新库跑起来。这是最难排查的一类事故。
 #
 # 故在此 fail-closed：检测到未迁移就停在这里，并把该敲的命令原样打出来。
@@ -94,6 +94,8 @@ if [ "$NEED_BUILD" = "1" ]; then
         cd "$ROOT_DIR"
     else
         echo "⚠️ Warning: npm is not installed. Please build frontend manually via 'cd frontend && npm install && npm run build'."
+        echo "   👉 推荐方案：直接使用 Docker 一键启动，无需在宿主机安装 Node.js/npm："
+        echo "      ./deploy/docker-start.sh"
     fi
 fi
 

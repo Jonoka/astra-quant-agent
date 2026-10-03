@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-ASTRA AI Brain Six-Crypto Quantitative Trading Decision Engine (ai_brain_trader.py)
-Batch ingests six crypto perpetuals into one macro-context LLM call.
+ASTRA AI Brain Quantitative Trading Decision Engine (ai_brain_trader.py)
+Batch ingests crypto perpetuals from the instrument pool into one macro-context LLM call.
 Maintains a validated live decision cache and durable Web audit history.
 """
 
@@ -426,6 +426,19 @@ READONLY_OUTPUT_SCHEMA = """==== 【严格 JSON 规范契约与完整输出骨�
       "market_structure": "4H大势多头，1H均线回踩企稳",
       "factor_evidence": "1H MACD柱=45.2加速度+12.8，RSI=61.5，CVD=+680万U，OBI=+28.5%，VWAP上方0.44%，费率0.0036%，R:R=2.5",
       "volume_and_oi": "量能缩量企稳，主力净流入"
+    },
+    "ETH-USDT-SWAP": {
+      "action": "SELL_SHORT",
+      "confidence": 85.0,
+      "leverage": 3,
+      "margin_usdt": 100.0,
+      "entry_price": 2720.0,
+      "take_profit_price": 2600.0,
+      "stop_loss_price": 2780.0,
+      "summary_reason": "顶背离遇阻承压放量做空",
+      "market_structure": "4H震荡偏弱，1H反弹遇阻承压",
+      "factor_evidence": "1H MACD柱=-8.5加速度-1.2，RSI=68.2，CVD=-420万U，OBI=-35.0%，VWAP下方0.52%，费率0.0082%，R:R=2.0",
+      "volume_and_oi": "反弹缩量受阻，主力净流出"
     }
   }
 }
@@ -501,16 +514,16 @@ def build_risk_budget_text(usdt_available: float = None) -> str:
         + (f"{rc.MAX_CONCURRENT_POSITIONS_CAP} 笔 (执行层硬拦截)\n" if rc.MAX_CONCURRENT_POSITIONS_CAP > 0
            else "未单独设限 (0=不额外收紧；实际受标的池容量与同向上限约束)\n")
         + (
-            f"- 组合风险总预算(跨所合算): {rc.PORTFOLIO_RISK_BUDGET_USDT:.2f} USDT (执行层按总名义敞口强制)\n"
+            f"- 组合风险总预算: {rc.PORTFOLIO_RISK_BUDGET_USDT:.2f} USDT (执行层按总名义敞口强制)\n"
             if rc.PORTFOLIO_RISK_BUDGET_USDT > 0 else
-            "- 组合风险总预算(跨所合算): 未设上限 (0=引擎不封顶，仅受单标的/同向/并发上限约束)\n"
+            "- 组合风险总预算: 未设上限 (0=引擎不封顶，仅受单标的/同向/并发上限约束)\n"
         )
         # 审计 P2-1：同向敞口上限现已真执行（下单前入场闸门拒开），
         # 这里必须同源披露，否则"提示词口径 == 代码口径"又多一处例外。
         + (
-            f"- 跨所同向敞口上限: {rc.MAX_TOTAL_EXPOSURE_USDT:.2f} USDT (同一标同方向跨所合计名义额，含本单；超出执行层拒开)\n"
+            f"- 同向敞口上限: {rc.MAX_TOTAL_EXPOSURE_USDT:.2f} USDT (同一标同方向合计名义额，含本单；超出执行层拒开)\n"
             if rc.MAX_TOTAL_EXPOSURE_USDT > 0 else
-            "- 跨所同向敞口上限: 未设上限 (0=不限制；仍受单标的/同向/并发上限约束)\n"
+            "- 同向敞口上限: 未设上限 (0=不限制；仍受单标的/同向/并发上限约束)\n"
         )
         + f"- 最长持仓时间: {rc.TIME_STOP_HOURS:g} 小时 (超时且横盘无突破将被时间止损离场；横盘判定带宽 ±{rc.TIME_STOP_ATR_BAND:.0%} ATR)\n"
         f"- 单笔杠杆区间: {rc.MIN_LEVERAGE:g}x ~ {rc.MAX_LEVERAGE:g}x (在区间内按信号强度自主裁决；区间外执行层自动钳制)\n"
@@ -724,7 +737,7 @@ def execute_batch_ai_brain_cycle(
     usdt_available: float = None,
     policy_snapshot: Optional[Dict[str, Any]] = None,
 ) -> Optional[Dict[str, Any]]:
-    """Fetch all six crypto symbols, call the LLM once, then persist an auditable result."""
+    """Fetch all symbols in the instrument pool, call the LLM once, then persist an auditable result."""
     base_url, api_key = get_cpa_client_config()
     if not api_key:
         print("[AI Brain Batch] Error: CPA API Key not found")

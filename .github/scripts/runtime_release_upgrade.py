@@ -241,7 +241,9 @@ def upgrade_lock(path):
 
 
 def request(base, path, token=None, expected=200):
-    headers = {"X-Astra-Session": token} if token else {}
+    headers = {"User-Agent": "AstraQuant-Deployment/1.0"}
+    if token:
+        headers["X-Astra-Session"] = token
     req = Request(base + path, headers=headers)
     try:
         response = urlopen(req, timeout=15)

@@ -56,7 +56,12 @@ print(json.dumps(admin.login('cioperator', sys.stdin.read())))
 
 def verify_prompt_rendering(pl, data: Path, profile_id: str, markers: dict[str, str]) -> None:
     """Exercise real read/render entry points without allowing persisted rewrites."""
-    before = digests(data)
+    # SQLite connections can checkpoint/remove WAL sidecars during lazy imports.
+    # Database read/write/integrity preservation is asserted independently below;
+    # this gate owns the prompt files and absence of a newly created overlay.
+    prompt_files = ("prompt_library.json", "prompt_library.local.json")
+    before = {name: (data / name).read_bytes() if (data / name).exists() else None
+              for name in prompt_files}
     with patch.object(pl, "BASELINE_FILE", data / "prompt_library.json"), \
          patch.object(pl, "LOCAL_FILE", data / "prompt_library.local.json"):
         active = pl.active_profile()
@@ -77,7 +82,9 @@ def verify_prompt_rendering(pl, data: Path, profile_id: str, markers: dict[str, 
                 assert rendered.count(schema_modules[0]["content"]) == 1, "Current schema not rendered exactly once"
         # Repeat through the public reader to catch accidental lazy migrations.
         assert pl.active_profile()["id"] == profile_id
-    assert digests(data) == before, "Read/render rewrote configuration or created a local overlay"
+    after = {name: (data / name).read_bytes() if (data / name).exists() else None
+             for name in prompt_files}
+    assert after == before, "Read/render rewrote prompt configuration or created a local overlay"
 
 
 def main(source: Path, previous: Path) -> None:

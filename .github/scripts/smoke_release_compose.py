@@ -50,6 +50,8 @@ def main(source: Path, image: str, previous: Path) -> None:
     assert labels["org.opencontainers.image.revision"] == os.environ["SOURCE_SHA"]
     assert labels["org.opencontainers.image.version"] == os.environ["SOURCE_VERSION"]
     assert labels["org.opencontainers.image.source"] == "https://github.com/" + os.environ["SOURCE_REPOSITORY"]
+    assert labels["io.jonoka.astra.build-recipe-sha256"] == os.environ["BUILD_RECIPE_SHA256"], \
+        "Image build recipe differs from the reviewed derived recipe"
     with tempfile.TemporaryDirectory(prefix="astra-compose-smoke-") as tmp:
         root = Path(tmp)
         for directory in ("data", "logs", "backups"):
@@ -110,6 +112,8 @@ def main(source: Path, image: str, previous: Path) -> None:
             stable_probe()
             assert http("/")
             assert http("/admin/login")
+            assert http("/images/dashboard_preview.png") == (source / "docs/images/dashboard_preview.png").read_bytes(), \
+                "Official landing preview asset missing or changed in image"
             assert http("/api/v1/admin/auth/status")["initialized"] is True
             http("/api/v1/admin/auth/me", expected=401)
             http("/api/v1/admin/auth/init", payload={"username": "secondadmin", "password": password}, expected=403)

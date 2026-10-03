@@ -1,0 +1,67 @@
+name: Verify prompt intraday update
+on:
+  workflow_dispatch:
+  push:
+    branches: [codex/prompts-intraday]
+    paths:
+      - .github/scripts/runtime_prompt_update.py
+      - .github/scripts/test_runtime_prompt_update.py
+      - .github/workflows/verify-prompt-update.yml
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: ci
+      - name: Require scoped branch
+        run: test "$GITHUB_REF" = refs/heads/codex/prompts-intraday
+      - uses: actions/checkout@v4
+        with:
+          repository: 0xethanq/astra-quant-agent
+          ref: a913957689a920c6e0eba835d1570d7d83e7f4a9
+          path: source
+      - uses: actions/checkout@v4
+        with:
+          repository: 0xethanq/astra-quant-agent
+          ref: 73841f2dbb3f4b3d3eb8e76b3b69775c55e32aff
+          path: legacy
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install hosted dependencies
+        run: python -m pip install -r source/requirements.txt
+      - name: Validate exact six-key fixture and regressions
+        env:
+          OFFICIAL_SOURCE: ${{ github.workspace }}/source
+          LEGACY_SOURCE: ${{ github.workspace }}/legacy
+        run: |
+          test "$(git -C source rev-parse HEAD)" = a913957689a920c6e0eba835d1570d7d83e7f4a9
+          test "$(git -C legacy rev-parse HEAD)" = 73841f2dbb3f4b3d3eb8e76b3b69775c55e32aff
+          sudo -E "$(which python)" - <<'PY'
+          import sys, os, hashlib, unittest
+          from pathlib import Path
+          sys.path.insert(0, 'ci/.github/scripts')
+          import runtime_prompt_update as h
+          # Official subprocess loads this synthetic env, never real credentials.
+          for k, v in h.CHANGES.items(): os.environ[k] = v[1]
+          suite=unittest.defaultTestLoader.discover('ci/.github/scripts', pattern='test_runtime_prompt_update.py')
+          assert suite.countTestCases() >= 10
+          result=unittest.TextTestRunner(verbosity=2).run(suite)
+          assert result.wasSuccessful() and result.testsRun > len(result.skipped)
+          print('helper_sha256',h.sha(Path('ci/.github/scripts/runtime_prompt_update.py').read_bytes()))
+          PY
+      - name: Official prompt contracts
+        working-directory: source
+        run: |
+          python - <<'PY'
+          import unittest
+          for target in ('test_prompt_library_two_files.py','test_prompt_source_of_truth.py'):
+              suite=unittest.defaultTestLoader.discover('tests/llm',pattern=target)
+              assert suite.countTestCases()>0
+              result=unittest.TextTestRunner(verbosity=2).run(suite)
+              assert result.wasSuccessful() and result.testsRun>len(result.skipped)
+          PY

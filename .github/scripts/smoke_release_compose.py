@@ -38,9 +38,9 @@ def http(path: str, *, payload=None, token=None, expected=200):
 
 def main(source: Path, image: str, previous: Path) -> None:
     assert "/app/plugins" not in (source / "docker-compose.yml").read_text(encoding="utf-8"), \
-        "v8.5 Compose must not restore the removed plugin bind"
-    assert "/app/plugins" in (previous / "docker-compose.yml").read_text(encoding="utf-8"), \
-        "Prior-release fixture does not establish the plugin-mount transition"
+        "Release Compose must not restore the removed plugin bind"
+    assert (source / "docker-compose.yml").read_bytes() == (previous / "docker-compose.yml").read_bytes(), \
+        "v8.5.1-to-v8.6.0 Compose contract unexpectedly changed"
     metadata = json.loads(command(["docker", "image", "inspect", image]))[0]
     expected_image_id = os.environ.get("EXPECTED_IMAGE_ID")
     if expected_image_id:

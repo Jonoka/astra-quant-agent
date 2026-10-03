@@ -1,4 +1,4 @@
-"""Restricted v8.4.0 -> v8.5.1 runtime cutover; never builds or migrates data.
+"""Restricted v8.5.1 -> v8.6.0 runtime cutover; never builds or migrates data.
 
 Run as root on the approved host, after hosted checks and image pull. The JSON
 manifest is an operator attestation, not a substitute for successful hosted CI.
@@ -31,9 +31,9 @@ BACKUPS = Path("/opt/r20-quantum-trader-backups")
 PROJECT = "r20-quantum-trader"
 SERVICES = ("backend", "gateway")
 NAMES = tuple("astraquant-" + service for service in SERVICES)
-PREVIOUS = "6617cabc2ab1d5fb21d556697c46d1220f4e4f77"
-RELEASE = "a913957689a920c6e0eba835d1570d7d83e7f4a9"
-OLD_IMAGE = "ghcr.io/jonoka/astra-quant-agent@sha256:9a040bf42485a79db88052f25fa87fc85a549a9b5bbfa02f58582f7851eeb352"
+PREVIOUS = "a913957689a920c6e0eba835d1570d7d83e7f4a9"
+RELEASE = "1b332aa58dfc58bfde8bbdaff0faeeb86631313f"
+OLD_IMAGE = "ghcr.io/jonoka/astra-quant-agent@sha256:878f03e298a37615903c9fc629c8e12c5a9b65f238c9dd269dd2a85c745c197c"
 IMAGE_RE = r"ghcr\.io/jonoka/astra-quant-agent@sha256:[0-9a-f]{64}"
 WRITABLE = (".env", "data", "logs", "backups", ".archive", "plugins")
 OVERRIDE = "docker-compose.override.yml"
@@ -46,6 +46,7 @@ CONFIG = (
     "data/prompt_library.local.json", "data/risk_config.json",
     "data/council_config.json", "data/notification_schedule.json",
     "data/evolution_config.json", "data/trading_session.json",
+    "data/instrument_pool.json",
     "data/astra_secrets.enc", "data/.astra_secret_key",
     "data/astra_backup_secrets.enc", "data/.astra_backup_secret_key",
 )
@@ -98,7 +99,7 @@ def operation_path(path):
     plain_path(path)
     plain_path(ROOT)
     plain_path(BACKUPS)
-    require(path.parent == BACKUPS and re.fullmatch(r"upgrade-v8\.5\.1-[A-Za-z0-9_-]+", path.name),
+    require(path.parent == BACKUPS and re.fullmatch(r"upgrade-v8\.6\.0-[A-Za-z0-9_-]+", path.name),
             "operation_path")
     require(path.is_dir() and path.stat().st_uid == 0 and
             stat.S_IMODE(path.stat().st_mode) == 0o700, "operation_permissions")
@@ -113,6 +114,20 @@ def relative_path(value):
             "." not in path.parts and "\\" not in value and path.as_posix() == value,
             "manifest_relative_path")
     return path
+
+
+def source_representation(actual, reference):
+    """Accept raw bytes or exclusively the proven UTF-8 LF-to-CRLF checkout."""
+    if actual == reference:
+        return "raw"
+    try:
+        text = reference.decode("utf-8", errors="strict")
+        actual.decode("utf-8", errors="strict")
+    except UnicodeError:
+        raise GateError("previous_runtime_source_drift") from None
+    require(all(ord(c) >= 32 and ord(c) != 127 or c in "\n\t" for c in text) and "\n" in text and
+            actual == reference.replace(b"\n", b"\r\n"), "previous_runtime_source_drift")
+    return "proven_utf8_crlf"
 
 
 def tree_manifest(root):
@@ -273,10 +288,6 @@ def env_gate(root):
             "effective_safe_flags")
     for key in ("ASTRA_ADMIN_DB", "ASTRA_QUANT_DB", "ASTRA_GATEWAY_DB"):
         require(not values.get(key), "external_database_path")
-    # v8.4 cannot enforce the new optional trading-hours control.
-    session = root / "data/trading_session.json"
-    if session.exists():
-        require(json.loads(session.read_bytes()).get("enabled") is False, "rollback_trading_hours")
 
 
 def db_state(root):
@@ -305,10 +316,7 @@ def db_state(root):
 
 
 def compatible_databases(before, after):
-    """The pinned upgrade adds only telemetry columns/table to existing SQLite DBs."""
-    additions = {"cached_tokens": ["cached_tokens", "INTEGER", 0, None, 0],
-                 "cache_status": ["cache_status", "TEXT", 1, "''", 0],
-                 "usage_keys": ["usage_keys", "TEXT", 1, "''", 0]}
+    """Both pinned releases own identical SQLite schemas; reject migrations."""
     for name, old in before.items():
         require(name in after, "database_removed")
         new = after[name]
@@ -318,14 +326,12 @@ def compatible_databases(before, after):
             prior = {c[0]: c for c in values["columns"]}
             require(all(columns.get(k) == c for k, c in prior.items()), "database_column_changed")
             extra = {k: c for k, c in columns.items() if k not in prior}
-            require(not extra or (name == "data/astra_gateway.db" and table == "model_calls" and
-                    all(additions.get(k) == c for k, c in extra.items())), "unknown_database_migration")
+            require(not extra, "unknown_database_migration")
             if name == "data/astra_quant.db" and table != "sqlite_sequence":
                 require(new["tables"][table]["rows"] >= values["rows"], "trading_rows_lost")
-        require(all(index in new["indexes"] for index in old["indexes"]), "database_index_changed")
+        require(new["indexes"] == old["indexes"], "database_index_changed")
         extra_tables = set(new["tables"]) - set(old["tables"])
-        require(not extra_tables or (name == "data/astra_gateway.db" and
-                extra_tables <= {"llm_query_cache"}), "unknown_database_table")
+        require(not extra_tables, "unknown_database_table")
 
 
 def admin_identity(root):
@@ -422,7 +428,7 @@ class Upgrade:
         require(image in metadata["RepoDigests"] and metadata["Os"] == "linux" and
                 metadata["Architecture"] == "amd64", "image_digest_platform")
         require(labels["org.opencontainers.image.revision"] == (PREVIOUS if previous else RELEASE) and
-                labels["org.opencontainers.image.version"] == ("v8.4.0" if previous else "v8.5.1") and
+                labels["org.opencontainers.image.version"] == ("v8.5.1" if previous else "v8.6.0") and
                 labels["org.opencontainers.image.source"] == "https://github.com/0xethanq/astra-quant-agent",
                 "image_source_version")
         return metadata["Id"]
@@ -453,17 +459,9 @@ class Upgrade:
         old, new = self.op / "source-previous", self.op / "source-release"
         require(source_literal(old / "astra_backend/admin_auth.py", "SCHEMA") ==
                 source_literal(new / "astra_backend/admin_auth.py", "SCHEMA"), "administrator_schema_changed")
-        for name in ("scripts/db_manager.py", "astra_backend/risk_reservation.py"):
+        for name in ("scripts/db_manager.py", "astra_backend/risk_reservation.py",
+                     "astra_gateway/store.py", "Dockerfile", "docker-compose.yml"):
             require(digest(old / name) == digest(new / name), "trading_schema_source_changed")
-        require(source_literal(new / "astra_gateway/store.py", "MIGRATION_COLUMNS") == (
-            ("cached_tokens", "INTEGER"), ("cache_status", "TEXT NOT NULL DEFAULT ''"),
-            ("usage_keys", "TEXT NOT NULL DEFAULT ''")), "unknown_gateway_migration")
-        old_schema = source_literal(old / "astra_gateway/store.py", "SCHEMA")
-        new_schema = source_literal(new / "astra_gateway/store.py", "SCHEMA")
-        for line in ("  cached_tokens INTEGER,\n", "  cache_status TEXT NOT NULL DEFAULT '',\n",
-                     "  usage_keys TEXT NOT NULL DEFAULT '',\n"):
-            new_schema = new_schema.replace(line, "")
-        require(old_schema == new_schema, "gateway_schema_not_additive")
 
     def guard(self, root):
         # Record every non-writable source/custom file, plus stable configuration.
@@ -484,11 +482,17 @@ class Upgrade:
         require(tree_manifest(self.op / "candidate") == self.state["candidate"], "candidate_drift")
 
     def source_runtime(self):
+        evidence = {}
         for name, expected in self.manifest["source_files"]["previous"].items():
             if Path(name).parts[0] in (*WRITABLE, ".github"):
                 continue
             path = ROOT / name
-            require(path.is_file() and digest(path) == expected, "previous_runtime_source_drift")
+            require(path.is_file(), "previous_runtime_source_drift")
+            reference = (self.op / "source-previous" / name).read_bytes()
+            require(sha(reference) == expected, "raw_source_drift")
+            actual = path.read_bytes()
+            evidence[name] = {"sha256": sha(actual), "reference_sha256": expected,
+                              "representation": source_representation(actual, reference)}
         known = {Path(n).parts[0] for n in self.manifest["source_files"]["previous"]}
         extras = sorted(p.name for p in ROOT.iterdir()
                         if p.name not in known | set(WRITABLE) | {".git", OVERRIDE})
@@ -499,6 +503,7 @@ class Upgrade:
             if path.is_file() and top in known - set(WRITABLE) - {".github"}:
                 require(name in self.manifest["source_files"]["previous"] or
                         "__pycache__" in path.parts, "custom_nested_source_requires_review")
+        self.save("previous-source-representations.json", evidence)
         return extras
 
     def validate_compose(self, candidate):
@@ -513,12 +518,11 @@ class Upgrade:
             require(spec["image"] == OLD_IMAGE, "compose_previous_image")
             spec["image"] = self.image
             volumes = spec["volumes"]
-            require({v["target"] for v in volumes} == {"/app/" + n for n in (".env", "data", "logs", "backups", "plugins")},
+            require(len(volumes) == 4 and {v["target"] for v in volumes} == {"/app/" + n for n in (".env", "data", "logs", "backups")},
                     "compose_mount_set")
             for volume in volumes:
                 require(volume["type"] == "bind" and not volume.get("read_only", False) and
                         volume["source"] == str(ROOT / volume["target"].removeprefix("/app/")), "compose_mount")
-            spec["volumes"] = [v for v in volumes if v["target"] != "/app/plugins"]
         require(after == expected, "compose_unexpected_change")
 
     def runtime(self, previous, baseline=None):
@@ -532,14 +536,14 @@ class Upgrade:
             require(c["state"] == "running" and c["health"] == "healthy" and c["restart"] == 0,
                     "runtime_health_restart")
             mounts = {m["Destination"]: m for m in c["mounts"]}
-            targets = (".env", "data", "logs", "backups") + (("plugins",) if previous else ())
+            targets = (".env", "data", "logs", "backups")
             require(len(c["mounts"]) == len(targets) and set(mounts) == {"/app/" + n for n in targets}, "runtime_mount_set")
             require(all(mounts["/app/" + n]["Type"] == "bind" and mounts["/app/" + n]["RW"] and
                         mounts["/app/" + n]["Source"] == str(ROOT / n) for n in targets), "runtime_mount")
             require(c["healthcheck"] and c["healthcheck"]["Test"][0] == "CMD-SHELL", "runtime_healthcheck")
             if baseline:
                 old = baseline[name]
-                expected_mounts = [m for m in old["mounts"] if previous or m["Destination"] != "/app/plugins"]
+                expected_mounts = old["mounts"]
                 require(c["mounts"] == expected_mounts and c["ports"] == old["ports"] and
                         c["healthcheck"] == old["healthcheck"], "runtime_mount_port_healthcheck_drift")
         if baseline:
@@ -547,7 +551,7 @@ class Upgrade:
         return now
 
     def endpoints(self, previous):
-        version = "8.4.0" if previous else "8.5.1"
+        version = "8.5.1" if previous else "8.6.0"
         local = "http://127.0.0.1:8080"
         h = request(local, "/api/v1/health")
         require(h["version"] == version and h["status"] == "ok", "local_health")
@@ -592,6 +596,41 @@ print(json.dumps({'workers':workers,'backends':backends,'owner':owner,'held':hel
             result[service] = value
         return result
 
+    def strategy_reader(self, previous=False):
+        # Actual application readers only; no job, model, order or evolution call.
+        code = r'''import json, hashlib
+from pathlib import Path
+from scripts import risk_constants as risk, instrument_pool as pool, prompt_library as pl
+expected = {'MIN_ENTRY_CONFIDENCE':75.0,'MIN_RISK_REWARD_RATIO':1.6,
+ 'TIME_STOP_HOURS':4.0,'STOP_COOLDOWN_MINUTES':15,'SCALE_OUT_TRIGGER_ATR':2.2,
+ 'SCALE_OUT_RATIO':0.4,'MAX_SAME_DIRECTION_POSITIONS':3,'MIN_LEVERAGE':2.0,
+ 'MAX_LEVERAGE':5.0,'RISK_PER_TRADE_EQUITY_RATIO':0.02,'MAX_MARGIN_EQUITY_RATIO':0.2,
+ 'SINGLE_ASSET_EQUITY_RATIO':0.3,'MAX_SINGLE_ASSET_MARGIN':600.0,
+ 'DAILY_LOSS_EQUITY_RATIO':0.05,'MAX_DAILY_LOSS_USDT':150.0}
+assert all(getattr(risk,k) == v for k,v in expected.items())
+paths = [Path('/app/data') / n for n in ('instrument_pool.json','prompt_library.json','prompt_library.local.json')]
+before = [p.read_bytes() if p.exists() else None for p in paths]
+items = pool.load_instruments()
+assert pool.pool_is_trustworthy()
+assert [i['name'] for i in items] == ['BTC','ETH','SOL','XRP','DOGE','ARB','SUI','LINK','ADA','UNI']
+profile = pl.active_profile()
+assert profile['id'] == 'allpattern_swing'
+base = pl.base_template_text('trading_system')
+modules = pl.text_to_modules(base,'base')
+assert len(modules) == 1 and 'macro_assessment' in modules[0]['content']
+rendered = pl.apply_module_layout(base,profile,'trading_system','upgrade')
+assert rendered.count(modules[0]['content']) == 1
+assert before == [p.read_bytes() if p.exists() else None for p in paths]
+print(json.dumps({'risk':expected,'pool':[i['name'] for i in items],
+ 'profile':profile['id'],'schema_sha256':hashlib.sha256(modules[0]['content'].encode()).hexdigest(),
+ 'rendered_sha256':hashlib.sha256(rendered.encode()).hexdigest()}))
+'''
+        result = json.loads(run("docker", "exec", NAMES[0], "python3", "-c", code))
+        self.save("previous-strategy-reader.json" if previous else "release-strategy-reader.json", result)
+        if not previous and self.state.get("prompt_refreshed"):
+            require(digest(ROOT / PROMPT) == digest(self.op / "source-release" / PROMPT), "refreshed_prompt_drift")
+        return result
+
     def capacity(self):
         import shutil
         require(ROOT.stat().st_dev == self.op.stat().st_dev, "atomic_rename_filesystem")
@@ -609,6 +648,7 @@ print(json.dumps({'workers':workers,'backends':backends,'owner':owner,'held':hel
         baseline = self.runtime(True)
         endpoints = self.endpoints(True)
         self.worker_state()
+        self.strategy_reader(previous=True)
         self.image_metadata(False)  # Must already have been pulled by digest.
         databases = db_state(ROOT)
         guard = self.guard(ROOT)
@@ -710,6 +750,7 @@ print(json.dumps({'workers':workers,'backends':backends,'owner':owner,'held':hel
 
     def verify(self, previous=False):
         require(self.state and self.manifest_sha == self.state["manifest_sha"], "operation_state_identity")
+        self.strategy_reader(previous)
         samples = []
         first_workers = None
         for index in range(7):
@@ -831,7 +872,7 @@ def main():
     parser.add_argument("operation", type=Path)
     parser.add_argument("--session-fd", type=int, default=None,
                         help="Inherited descriptor containing an existing session token; never a token argument")
-    parser.add_argument("--previous", action="store_true", help="Verify recovered v8.4.0")
+    parser.add_argument("--previous", action="store_true", help="Verify recovered v8.5.1")
     args = parser.parse_args()
     os.umask(0o077)
     try:

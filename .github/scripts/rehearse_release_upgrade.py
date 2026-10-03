@@ -1,4 +1,4 @@
-"""Hosted synthetic v8.4-to-v8.5 preservation and real prompt-renderer rehearsal.
+"""Hosted synthetic v8.5.1-to-v8.6.0 preservation and renderer rehearsal.
 
 No production fixtures, network/model calls, or trading jobs are used.
 """
@@ -7,6 +7,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import os
 from pathlib import Path
 import shutil
 import sqlite3
@@ -19,6 +20,45 @@ from cryptography.fernet import Fernet
 
 
 SCHEMA_TITLE = "严格 JSON 规范契约与完整输出骨架 (JSON Schema)"
+
+SAVED_RISK = {
+    "ASTRA_MIN_ENTRY_CONFIDENCE": ("MIN_ENTRY_CONFIDENCE", 75.0),
+    "ASTRA_MIN_RISK_REWARD": ("MIN_RISK_REWARD_RATIO", 1.6),
+    "ASTRA_TIME_STOP_HOURS": ("TIME_STOP_HOURS", 4.0),
+    "ASTRA_STOP_COOLDOWN_MINUTES": ("STOP_COOLDOWN_MINUTES", 15),
+    "ASTRA_SCALE_OUT_TRIGGER_ATR": ("SCALE_OUT_TRIGGER_ATR", 2.2),
+    "ASTRA_SCALE_OUT_RATIO": ("SCALE_OUT_RATIO", 0.4),
+    "ASTRA_MAX_SAME_DIRECTION_POSITIONS": ("MAX_SAME_DIRECTION_POSITIONS", 3),
+    "ASTRA_MIN_LEVERAGE": ("MIN_LEVERAGE", 2.0),
+    "ASTRA_MAX_LEVERAGE": ("MAX_LEVERAGE", 5.0),
+    "ASTRA_RISK_PER_TRADE_RATIO": ("RISK_PER_TRADE_EQUITY_RATIO", 0.02),
+    "ASTRA_MAX_MARGIN_EQUITY_RATIO": ("MAX_MARGIN_EQUITY_RATIO", 0.2),
+    "ASTRA_SINGLE_ASSET_EQUITY_RATIO": ("SINGLE_ASSET_EQUITY_RATIO", 0.3),
+    "ASTRA_MAX_SINGLE_ASSET_MARGIN_USDT": ("MAX_SINGLE_ASSET_MARGIN", 600.0),
+    "ASTRA_DAILY_LOSS_EQUITY_RATIO": ("DAILY_LOSS_EQUITY_RATIO", 0.05),
+    "ASTRA_MAX_DAILY_LOSS_USDT": ("MAX_DAILY_LOSS_USDT", 150.0),
+}
+SAVED_POOL = ["BTC", "ETH", "SOL", "XRP", "DOGE", "ARB", "SUI", "LINK", "ADA", "UNI"]
+
+
+def verify_saved_strategy(source: Path, data: Path) -> None:
+    environment = {**os.environ, **{key: str(value) for key, (_, value) in SAVED_RISK.items()}}
+    subprocess.run([sys.executable, "-c", """
+import json, sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+from scripts import risk_constants as risk, instrument_pool as pool
+expected = json.loads(sys.argv[3])
+for key, (attribute, value) in expected.items():
+    assert getattr(risk, attribute) == value, (key, getattr(risk, attribute), value)
+pool.POOL_FILE = Path(sys.argv[2]) / 'instrument_pool.json'
+before = pool.POOL_FILE.read_bytes()
+loaded = pool.load_instruments()
+assert [item['name'] for item in loaded] == json.loads(sys.argv[4])
+assert pool.pool_is_trustworthy()
+assert pool.POOL_FILE.read_bytes() == before
+""", str(source), str(data), json.dumps(SAVED_RISK), json.dumps(SAVED_POOL)],
+        env=environment, check=True, capture_output=True, text=True, timeout=30)
 
 
 def digests(root: Path) -> dict[str, str]:
@@ -102,7 +142,11 @@ def main(source: Path, previous: Path) -> None:
         old = root / "old"
         data = old / "data"
         data.mkdir(parents=True)
-        (old / ".env").write_bytes(b"ASTRA_OKX_ENV=demo\nOKX_IS_SIMULATED=1\nLLM_MODEL=synthetic-model\n")
+        (old / ".env").write_bytes(("ASTRA_OKX_ENV=demo\nOKX_IS_SIMULATED=1\nLLM_MODEL=synthetic-model\n" +
+            "".join(f"{key}={value}\n" for key, (_, value) in SAVED_RISK.items())).encode())
+        (data / "instrument_pool.json").write_text(json.dumps({"instruments": [
+            {"instId": name + "-USDT-SWAP", "name": name, "ctVal": 1.0}
+            for name in SAVED_POOL]}), encoding="utf-8")
         old_auth = seed_previous_admin(previous, data, "SyntheticAdmin12345")
         # Initialize actual prior schemas, rather than proving preservation only
         # for arbitrary tables that no runtime component ever opens.
@@ -172,6 +216,17 @@ with db_manager.get_db() as db:
             if filename != "data/prompt_library.json":
                 assert hashlib.sha256((candidate / filename).read_bytes()).hexdigest() == digest
         restored_data = candidate / "data"
+        verify_saved_strategy(source, restored_data)
+        # The actual production storage mode has a pristine official baseline
+        # and no overlay. Exercise its selected profile and code-owned schema.
+        official_data = root / "official-candidate" / "data"
+        official_data.mkdir(parents=True)
+        shutil.copy(source / "data/prompt_library.json", official_data / "prompt_library.json")
+        official = json.loads((official_data / "prompt_library.json").read_text(encoding="utf-8"))
+        verify_prompt_rendering(pl, official_data, official["active_profile_id"],
+            {pipeline: next(m["content"].strip() for m in official["profiles"][official["active_profile_id"]]["pipelines"][pipeline]
+                           if m["title"] != SCHEMA_TITLE and m.get("enabled", True) and m.get("content"))
+             for pipeline in pl.TEMPLATE_KEYS})
         assert json.loads(Fernet((restored_data / ".astra_secret_key").read_bytes()).decrypt(
             (restored_data / "astra_secrets.enc").read_bytes())) == credentials
         with patch.object(secret_store, "KEY_FILE", restored_data / ".astra_secret_key"), \
@@ -240,7 +295,7 @@ with db_manager.get_db() as db:
                         (1, "order", "synthetic-order"), (2, "ledger", "retained-中文")]
         verify_prompt_rendering(pl, restored_data, "custom-upgrade", markers)
 
-        # Production-shaped case: customized v8.4 baseline, no local overlay.
+        # Additional supported case: customized prior baseline, no local overlay.
         # Only public old source and invented markers enter this fixture.
         legacy = root / "custom-legacy" / "data"
         legacy.mkdir(parents=True)
@@ -262,7 +317,7 @@ with db_manager.get_db() as db:
         verify_prompt_rendering(pl, carried, legacy_library["active_profile_id"], legacy_markers)
         assert (carried / "prompt_library.json").read_bytes() == legacy_bytes
         assert not (carried / "prompt_library.local.json").exists()
-    print("PASS: v8.4 state bytes, runtime credentials/config, prior admin/session, real database upgrade/rollback and both custom prompt storage modes")
+    print("PASS: v8.5.1 state, exact saved risk/ten-asset pool, official baseline/schema refresh, credentials/admin, database backward writer and custom prompt modes")
 
 
 if __name__ == "__main__":

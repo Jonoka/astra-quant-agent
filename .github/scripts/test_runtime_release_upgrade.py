@@ -2,6 +2,7 @@
 import copy
 import importlib.util
 import os
+import sqlite3
 from pathlib import Path
 import tempfile
 import unittest
@@ -59,6 +60,54 @@ class RuntimeUpgradeTests(unittest.TestCase):
             with self.subTest(value=value), self.assertRaises(upgrade.GateError):
                 upgrade.relative_path(value)
 
+    def test_source_checkout_crlf_proof_is_exact_and_never_normalizes_inputs(self):
+        raw = '策略\nsecond\n'.encode()
+        crlf = raw.replace(b'\n', b'\r\n')
+        self.assertEqual(upgrade.source_representation(raw, raw), 'raw')
+        self.assertEqual(upgrade.source_representation(crlf, raw), 'proven_utf8_crlf')
+        for changed, reference in ((crlf + b'edit', raw), (raw.replace(b'\n', b'\r\n', 1), raw),
+                                   (b'a\x00\r\n', b'a\x00\n'), (b'\xff\r\n', b'\xff\n'),
+                                   (b'a\r\r\n', b'a\r\n')):
+            with self.subTest(changed=changed), self.assertRaises(upgrade.GateError):
+                upgrade.source_representation(changed, reference)
+        self.assertEqual(crlf, raw.replace(b'\n', b'\r\n'))
+
+    def test_equal_schema_rejects_new_gateway_telemetry_and_cache_tables(self):
+        before = {'data/astra_gateway.db': {'tables': {'model_calls': {
+            'columns': [['id', 'INTEGER', 0, None, 1]], 'rows': 1}}, 'indexes': []}}
+        after = copy.deepcopy(before)
+        after['data/astra_gateway.db']['tables']['model_calls']['columns'].append(
+            ['cached_tokens', 'INTEGER', 0, None, 0])
+        with self.assertRaisesRegex(upgrade.GateError, 'unknown_database_migration'):
+            upgrade.compatible_databases(before, after)
+        after = copy.deepcopy(before)
+        after['data/astra_gateway.db']['tables']['llm_query_cache'] = {'columns': [], 'rows': 0}
+        with self.assertRaisesRegex(upgrade.GateError, 'unknown_database_table'):
+            upgrade.compatible_databases(before, after)
+
+    def test_compose_requires_four_unchanged_mounts_and_only_image_change(self):
+        obj = self.operator()
+        obj.image = 'ghcr.io/jonoka/astra-quant-agent@sha256:' + 'a' * 64
+        old = {'services': {s: {'image': upgrade.OLD_IMAGE, 'volumes': [
+            {'target': '/app/' + n, 'source': str(upgrade.ROOT / n), 'type': 'bind'}
+            for n in ('.env', 'data', 'logs', 'backups')]} for s in upgrade.SERVICES}}
+        new = copy.deepcopy(old)
+        for service in upgrade.SERVICES:
+            new['services'][service]['image'] = obj.image
+        def invoke(candidate):
+            with patch.object(obj, 'compose', side_effect=[b'', b'',
+                    upgrade.json.dumps(old).encode(), upgrade.json.dumps(candidate).encode()]):
+                obj.validate_compose(obj.op / 'candidate')
+        invoke(new)
+        broken = copy.deepcopy(new)
+        broken['services']['backend']['volumes'].pop()
+        with self.assertRaisesRegex(upgrade.GateError, 'compose_unexpected_change'):
+            invoke(broken)
+        old['services']['backend']['volumes'].append(
+            {'target': '/app/plugins', 'source': str(upgrade.ROOT / 'plugins'), 'type': 'bind'})
+        with self.assertRaisesRegex(upgrade.GateError, 'compose_mount_set'):
+            invoke(new)
+
     def test_override_patch_preserves_all_non_image_bytes(self):
         path = self.root / "override.yml"
         before = ("# retained\r\nservices:\r\n  backend:\r\n    image: '" + upgrade.OLD_IMAGE +
@@ -113,6 +162,32 @@ class RuntimeUpgradeTests(unittest.TestCase):
         self.assertEqual((obj.op / "recovery-seed-data/orders.json").read_bytes(), b"stale-order")
         self.assertEqual((obj.op / "recovery-seed-.env").read_bytes(), b"old-secret")
 
+    def test_recovery_retains_candidate_sqlite_writes_config_and_overlay_metadata(self):
+        obj = self.operator()
+        latest, recovery = obj.op / 'latest', obj.op / 'recovery'
+        for root in (latest, recovery):
+            (root / 'data').mkdir(parents=True)
+            with sqlite3.connect(root / 'data/orders.db') as db:
+                db.execute('CREATE TABLE orders(id INTEGER PRIMARY KEY, status TEXT)')
+                db.execute("INSERT INTO orders VALUES(1,'prior')")
+        with sqlite3.connect(latest / 'data/orders.db') as db:
+            db.execute("INSERT INTO orders VALUES(2,'candidate')")
+        (latest / '.env').write_bytes(b'latest-config\r\n')
+        (latest / '.env').chmod(0o600)
+        overlay = latest / 'data/prompt_library.local.json'
+        overlay.write_bytes(b'latest-custom-overlay')
+        overlay.chmod(0o640)
+        expected = upgrade.tree_manifest(latest / 'data')
+        obj.carry(latest, recovery, 'recovery-seed')
+        obj.state['prompt_refreshed'] = True
+        obj.restore_prompt(recovery)  # No baseline exists; preserve custom overlay.
+        self.assertEqual(upgrade.tree_manifest(recovery / 'data'), expected)
+        self.assertEqual((recovery / '.env').read_bytes(), b'latest-config\r\n')
+        self.assertEqual((recovery / '.env').stat().st_mode & 0o777, 0o600)
+        with sqlite3.connect(recovery / 'data/orders.db') as db:
+            self.assertEqual(db.execute('SELECT status FROM orders ORDER BY id').fetchall(),
+                             [('prior',), ('candidate',)])
+
     def test_database_rejects_lost_trading_rows_and_unknown_columns(self):
         before = {"data/astra_quant.db": {"tables": {"orders": {"columns": [["id", "INTEGER", 0, None, 1]], "rows": 2}}, "indexes": []}}
         after = copy.deepcopy(before)
@@ -163,9 +238,9 @@ class RuntimeUpgradeTests(unittest.TestCase):
         def response(base, path, token=None, expected=200):
             calls.append((base, path, token, expected))
             if path.endswith("/health"):
-                return {"version": "8.5.1", "status": "ok", "credentials": {"okx_configured": True}}
+                return {"version": "8.6.0", "status": "ok", "credentials": {"okx_configured": True}}
             if path.endswith("/status") and "/admin/" not in path:
-                return {"version": "8.5.1"}
+                return {"version": "8.6.0"}
             if path.endswith("/auth/status"):
                 return {"initialized": True}
             self.assertEqual(expected, 401)
@@ -186,10 +261,10 @@ class RuntimeUpgradeTests(unittest.TestCase):
                 self.assertEqual(token, obj.session)
                 return {"user": {"id": 1, "username": "operator", "role": "superadmin", "enabled": True}}
             if path.endswith("/health"):
-                return {"version": "8.5.1", "status": "ok", "credentials": {}}
+                return {"version": "8.6.0", "status": "ok", "credentials": {}}
             if path.endswith("/auth/status"):
                 return {"initialized": True}
-            return {"version": "8.5.1"}
+            return {"version": "8.6.0"}
         with patch.object(upgrade, "request", side_effect=response):
             result = obj.endpoints(False)
         self.assertEqual(result["authenticated_session_probe"], "passed")

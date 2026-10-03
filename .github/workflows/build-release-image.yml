@@ -10,9 +10,9 @@ permissions:
 env:
   IMAGE_NAME: ghcr.io/jonoka/astra-quant-agent
   SOURCE_REPOSITORY: 0xethanq/astra-quant-agent
-  SOURCE_SHA: a913957689a920c6e0eba835d1570d7d83e7f4a9
-  SOURCE_VERSION: v8.5.1
-  PREVIOUS_SHA: 6617cabc2ab1d5fb21d556697c46d1220f4e4f77
+  SOURCE_SHA: 1b332aa58dfc58bfde8bbdaff0faeeb86631313f
+  SOURCE_VERSION: v8.6.0
+  PREVIOUS_SHA: a913957689a920c6e0eba835d1570d7d83e7f4a9
 
 concurrency:
   group: astra-release-image
@@ -76,7 +76,7 @@ jobs:
         working-directory: source
         shell: bash
         run: |
-          for target in tests/ops/test_migrate_r20_to_astra.py tests/core/test_admin_auth.py tests/llm/test_prompt_library_two_files.py tests/llm/test_prompt_source_of_truth.py; do
+          for target in tests/ops/test_migrate_r20_to_astra.py tests/core/test_admin_auth.py tests/llm/test_prompt_library_two_files.py tests/llm/test_prompt_source_of_truth.py tests/trading/test_signal_decision_doctrine.py tests/trading/test_signal_subfactors.py tests/trading/test_position_exit_failure_branches.py tests/llm/test_prompt_cache_prefix_contract.py tests/llm/test_llm_caching_enhancements.py tests/core/test_risk_config.py tests/trading/test_risk_reward_structure.py tests/ops/test_instrument_pool.py tests/venues/test_instrument_pool_universe.py; do
             python - "$target" <<'PY'
           from pathlib import Path
           import sys
@@ -171,3 +171,29 @@ jobs:
           docker buildx imagetools inspect "$IMAGE_NAME@$IMAGE_DIGEST"
           printf '### Verified release image\n\n- Source: `%s@%s`\n- Version: `%s`\n- Image: `%s@%s`\n- Platform: `linux/amd64`\n- Positive test discovery, official migration, encrypted state, prior admin/session, custom baseline/overlay rendering and both Compose healthchecks passed.\n- Published image ID equals the smoke-tested candidate.\n' \
             "$SOURCE_REPOSITORY" "$SOURCE_SHA" "$SOURCE_VERSION" "$IMAGE_NAME" "$IMAGE_DIGEST" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Package raw pinned source and reviewed deployment provenance
+        env:
+          IMAGE_DIGEST: ${{ steps.publish.outputs.digest }}
+        shell: bash
+        run: |
+          mkdir release-artifacts
+          git -C source archive --format=tar "$SOURCE_SHA" > release-artifacts/source-release.tar
+          git -C previous archive --format=tar "$PREVIOUS_SHA" > release-artifacts/source-previous.tar
+          cp ci/.github/scripts/runtime_release_upgrade.py release-artifacts/
+          python - <<'PY'
+          import hashlib, json, os
+          from pathlib import Path
+          root = Path('release-artifacts')
+          evidence = {key: os.environ[key] for key in ('SOURCE_SHA', 'PREVIOUS_SHA', 'SOURCE_VERSION', 'IMAGE_NAME', 'IMAGE_DIGEST', 'GITHUB_SHA', 'GITHUB_RUN_ID', 'GITHUB_RUN_ATTEMPT')}
+          evidence['platform'] = 'linux/amd64'
+          evidence['sha256'] = {p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted(root.iterdir())}
+          (root / 'provenance.json').write_text(json.dumps(evidence, indent=2) + '\n')
+          PY
+
+      - name: Upload verified raw deployment bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: astraquant-v8.6.0-deployment
+          path: release-artifacts/
+          if-no-files-found: error

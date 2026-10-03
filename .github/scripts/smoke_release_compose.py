@@ -36,8 +36,15 @@ def http(path: str, *, payload=None, token=None, expected=200):
         return json.loads(body) if "application/json" in response.headers.get("Content-Type", "") else body
 
 
-def main(source: Path, image: str) -> None:
+def main(source: Path, image: str, previous: Path) -> None:
+    assert "/app/plugins" not in (source / "docker-compose.yml").read_text(encoding="utf-8"), \
+        "v8.5 Compose must not restore the removed plugin bind"
+    assert "/app/plugins" in (previous / "docker-compose.yml").read_text(encoding="utf-8"), \
+        "Prior-release fixture does not establish the plugin-mount transition"
     metadata = json.loads(command(["docker", "image", "inspect", image]))[0]
+    expected_image_id = os.environ.get("EXPECTED_IMAGE_ID")
+    if expected_image_id:
+        assert metadata["Id"] == expected_image_id, "Published image differs from the smoke-tested candidate"
     assert (metadata["Os"], metadata["Architecture"]) == ("linux", "amd64")
     labels = metadata["Config"]["Labels"]
     assert labels["org.opencontainers.image.revision"] == os.environ["SOURCE_SHA"]
@@ -47,7 +54,6 @@ def main(source: Path, image: str) -> None:
         root = Path(tmp)
         for directory in ("data", "logs", "backups"):
             (root / directory).mkdir()
-        shutil.copytree(source / "plugins", root / "plugins")
         shutil.copy(source / "data/prompt_library.json", root / "data/prompt_library.json")
         shutil.copy(source / "docker-compose.yml", root / "docker-compose.yml")
         password = "A1" + secrets.token_hex(24)
@@ -81,6 +87,10 @@ def main(source: Path, image: str) -> None:
                 assert state["State"].get("Health", {}).get("Status") == "healthy"
                 assert state["RestartCount"] == 0, f"{service} restarted"
                 assert state["Config"]["Healthcheck"]["Test"][0] == "CMD-SHELL"
+                mounts = {mount["Destination"] for mount in state["Mounts"]}
+                assert mounts == {"/app/.env", "/app/data", "/app/logs", "/app/backups"}, \
+                    f"Unexpected writable mount set for {service}: {sorted(mounts)}"
+                assert "/app/plugins" not in mounts, "Removed plugin bind was restored"
                 processes = command(["docker", "top", state["Id"], "-eo", "pid,args"])
                 workers = [line for line in processes.splitlines() if "-m astra_gateway.worker" in line]
                 assert len(workers) == (1 if service == "gateway" else 0), f"Wrong worker ownership in {service}"
@@ -102,6 +112,7 @@ def main(source: Path, image: str) -> None:
             assert http("/admin/login")
             assert http("/api/v1/admin/auth/status")["initialized"] is True
             http("/api/v1/admin/auth/me", expected=401)
+            http("/api/v1/admin/auth/init", payload={"username": "secondadmin", "password": password}, expected=403)
             login = http("/api/v1/admin/auth/login", payload={"username": "admin", "password": password})
             token = login["session_token"]
             print("::add-mask::" + token)
@@ -118,7 +129,7 @@ def main(source: Path, image: str) -> None:
             logs = "\n".join(p.read_text(errors="replace") for p in (root / "logs").rglob("*.log"))
             assert "Traceback (most recent call last):" not in logs, "Runtime traceback observed"
             assert "gateway worker already running" not in logs, "Duplicate gateway worker observed"
-            print("PASS: immutable image, official backend/gateway Compose healthchecks, auth, single worker, restart0 and 90s stability")
+            print("PASS: immutable image, official backend/gateway Compose healthchecks, auth protection, expected mounts, single worker, restart0 and 90s stability")
         finally:
             # Only synthetic CI data is inspected here; never render dotenv or config.
             if sys.exc_info()[0] is not None:
@@ -130,4 +141,4 @@ def main(source: Path, image: str) -> None:
 
 
 if __name__ == "__main__":
-    main(Path(sys.argv[1]).resolve(), sys.argv[2])
+    main(Path(sys.argv[1]).resolve(), sys.argv[2], Path(sys.argv[3]).resolve())

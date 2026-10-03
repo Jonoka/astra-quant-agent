@@ -10,8 +10,9 @@ permissions:
 env:
   IMAGE_NAME: ghcr.io/jonoka/astra-quant-agent
   SOURCE_REPOSITORY: 0xethanq/astra-quant-agent
-  SOURCE_SHA: 6617cabc2ab1d5fb21d556697c46d1220f4e4f77
-  SOURCE_VERSION: v8.4.0
+  SOURCE_SHA: a913957689a920c6e0eba835d1570d7d83e7f4a9
+  SOURCE_VERSION: v8.5.1
+  PREVIOUS_SHA: 6617cabc2ab1d5fb21d556697c46d1220f4e4f77
 
 concurrency:
   group: astra-release-image
@@ -35,10 +36,30 @@ jobs:
           fetch-depth: 1
           path: source
 
-      - name: Verify source pin
+      - name: Verify stable official release and source pin
         shell: bash
         working-directory: source
-        run: test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          test "$GITHUB_REF" = refs/heads/codex/deploy
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          git fetch --depth=1 origin "refs/tags/$SOURCE_VERSION:refs/tags/$SOURCE_VERSION"
+          test "$(git rev-parse "$SOURCE_VERSION^{commit}")" = "$SOURCE_SHA"
+          gh api "repos/$SOURCE_REPOSITORY/releases/tags/$SOURCE_VERSION" | python -c '
+          import json, os, sys
+          release = json.load(sys.stdin)
+          assert release["tag_name"] == os.environ["SOURCE_VERSION"]
+          assert not release["draft"] and not release["prerelease"]
+          '
+
+      - name: Checkout prior release for synthetic upgrade fixtures
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.SOURCE_REPOSITORY }}
+          ref: ${{ env.PREVIOUS_SHA }}
+          fetch-depth: 1
+          path: previous
 
       - name: Set up hosted migration test runtime
         uses: actions/setup-python@v5
@@ -46,16 +67,53 @@ jobs:
           python-version: '3.11'
 
       - name: Install hosted test dependencies
-        run: python -m pip install -r source/requirements.txt
+        run: python -m pip install -r source/requirements.txt PyYAML==6.0.2
+
+      - name: Verify prior source pin
+        run: test "$(git -C previous rev-parse HEAD)" = "$PREVIOUS_SHA"
 
       - name: Run official migration and administrator tests
         working-directory: source
+        shell: bash
         run: |
-          python -m unittest discover -s tests/ops -p test_migrate_r20_to_astra.py -v
-          python -m unittest discover -s tests/core -p test_admin_auth.py -v
+          for target in tests/ops/test_migrate_r20_to_astra.py tests/core/test_admin_auth.py tests/llm/test_prompt_library_two_files.py tests/llm/test_prompt_source_of_truth.py; do
+            python - "$target" <<'PY'
+          from pathlib import Path
+          import sys
+          import unittest
+          target = Path(sys.argv[1])
+          assert target.is_file(), f"Required suite missing: {target}"
+          suite = unittest.defaultTestLoader.discover(str(target.parent), pattern=target.name)
+          assert suite.countTestCases() > 0, f"No tests discovered: {target}"
+          result = unittest.TextTestRunner(verbosity=2).run(suite)
+          assert result.wasSuccessful() and result.testsRun > len(result.skipped), f"Suite failed or only skipped: {target}"
+          PY
+          done
 
       - name: Rehearse encrypted legacy state and environment migration
         run: python ci/.github/scripts/rehearse_release_migration.py source
+
+      - name: Rehearse prior release state and custom prompt preservation
+        run: python ci/.github/scripts/rehearse_release_upgrade.py source previous
+
+      - name: Verify runtime upgrade helper
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import unittest
+          target = Path("ci/.github/scripts/test_runtime_release_upgrade.py")
+          assert target.is_file(), f"Required suite missing: {target}"
+          suite = unittest.defaultTestLoader.discover(str(target.parent), pattern=target.name)
+          assert suite.countTestCases() > 0, f"No tests discovered: {target}"
+          result = unittest.TextTestRunner(verbosity=2).run(suite)
+          assert result.wasSuccessful() and result.testsRun > len(result.skipped), "Helper suite failed or only skipped"
+          PY
+
+      - name: Require unchanged official application before building
+        shell: bash
+        run: |
+          git -C source diff --exit-code HEAD
+          test -z "$(git -C source status --porcelain)"
 
       - name: Set up Buildx
         uses: docker/setup-buildx-action@v3
@@ -79,7 +137,10 @@ jobs:
           cache-to: type=gha,scope=astra-release,mode=max
 
       - name: Smoke test official Compose services and auth
-        run: python ci/.github/scripts/smoke_release_compose.py source astraquant:ci
+        id: candidate
+        run: |
+          python ci/.github/scripts/smoke_release_compose.py source astraquant:ci previous
+          printf 'image_id=%s\n' "$(docker image inspect --format '{{.Id}}' astraquant:ci)" >> "$GITHUB_OUTPUT"
 
       - name: Log in to GHCR
         uses: docker/login-action@v3
@@ -88,31 +149,25 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and push linux/amd64 image
+      - name: Publish the smoke-tested linux/amd64 image
         id: publish
-        uses: docker/build-push-action@v6
-        with:
-          context: ./source
-          file: ./source/Dockerfile
-          platforms: linux/amd64
-          push: true
-          tags: |
-            ${{ env.IMAGE_NAME }}:${{ env.SOURCE_VERSION }}
-            ${{ env.IMAGE_NAME }}:${{ env.SOURCE_SHA }}
-          labels: |
-            org.opencontainers.image.source=https://github.com/${{ env.SOURCE_REPOSITORY }}
-            org.opencontainers.image.revision=${{ env.SOURCE_SHA }}
-            org.opencontainers.image.version=${{ env.SOURCE_VERSION }}
-          provenance: mode=max
-          sbom: true
-          cache-from: type=gha,scope=astra-release
+        shell: bash
+        run: |
+          docker tag astraquant:ci "$IMAGE_NAME:$SOURCE_VERSION"
+          docker tag astraquant:ci "$IMAGE_NAME:$SOURCE_SHA"
+          docker push "$IMAGE_NAME:$SOURCE_VERSION"
+          docker push "$IMAGE_NAME:$SOURCE_SHA"
+          digest="sha256:$(docker buildx imagetools inspect "$IMAGE_NAME:$SOURCE_SHA" --raw | sha256sum | cut -d' ' -f1)"
+          printf 'digest=%s\n' "$digest" >> "$GITHUB_OUTPUT"
 
       - name: Verify published immutable image
         env:
           IMAGE_DIGEST: ${{ steps.publish.outputs.digest }}
+          EXPECTED_IMAGE_ID: ${{ steps.candidate.outputs.image_id }}
         run: |
+          [[ "$IMAGE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
           docker pull "$IMAGE_NAME@$IMAGE_DIGEST"
-          python ci/.github/scripts/smoke_release_compose.py source "$IMAGE_NAME@$IMAGE_DIGEST"
+          python ci/.github/scripts/smoke_release_compose.py source "$IMAGE_NAME@$IMAGE_DIGEST" previous
           docker buildx imagetools inspect "$IMAGE_NAME@$IMAGE_DIGEST"
-          printf '### Verified release image\n\n- Source: `%s@%s`\n- Version: `%s`\n- Image: `%s@%s`\n- Platform: `linux/amd64`\n- Official migration, encrypted state, auth and both Compose healthchecks passed.\n' \
+          printf '### Verified release image\n\n- Source: `%s@%s`\n- Version: `%s`\n- Image: `%s@%s`\n- Platform: `linux/amd64`\n- Positive test discovery, official migration, encrypted state, prior admin/session, custom baseline/overlay rendering and both Compose healthchecks passed.\n- Published image ID equals the smoke-tested candidate.\n' \
             "$SOURCE_REPOSITORY" "$SOURCE_SHA" "$SOURCE_VERSION" "$IMAGE_NAME" "$IMAGE_DIGEST" >> "$GITHUB_STEP_SUMMARY"

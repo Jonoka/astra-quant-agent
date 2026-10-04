@@ -76,8 +76,15 @@ jobs:
       - name: Verify prior source pin
         run: test "$(git -C previous rev-parse HEAD)" = "$PREVIOUS_SHA"
 
+      - name: Isolate writable test fixtures from the build source
+        shell: bash
+        run: |
+          git -C source worktree add --detach "$GITHUB_WORKSPACE/validation" "$SOURCE_SHA"
+          test "$(git -C validation rev-parse HEAD)" = "$SOURCE_SHA"
+          python ci/.github/scripts/verify_deployment_source.py validation "$UPSTREAM_SHA" "$SOURCE_SHA"
+
       - name: Run official migration and administrator tests
-        working-directory: source
+        working-directory: validation
         shell: bash
         run: |
           for target in tests/ops/test_brain_dispatch.py tests/extraction/test_brain_dispatch_extraction.py tests/trading/test_cycle_brain_stage.py tests/core/test_council_manager.py tests/core/test_debate_council_verdict.py tests/core/test_account_baseline.py tests/core/test_router_risk.py tests/ops/test_gateway_cache_stats.py tests/trading/test_entry_diagnostics_formatting.py tests/ops/test_migrate_r20_to_astra.py tests/core/test_admin_auth.py tests/llm/test_prompt_library_two_files.py tests/llm/test_prompt_source_of_truth.py tests/trading/test_signal_decision_doctrine.py tests/trading/test_signal_subfactors.py tests/trading/test_position_exit_failure_branches.py tests/llm/test_prompt_cache_prefix_contract.py tests/llm/test_llm_caching_enhancements.py tests/core/test_risk_config.py tests/trading/test_risk_reward_structure.py tests/ops/test_instrument_pool.py tests/venues/test_instrument_pool_universe.py; do
@@ -95,10 +102,10 @@ jobs:
           done
 
       - name: Rehearse encrypted legacy state and environment migration
-        run: python ci/.github/scripts/rehearse_release_migration.py source
+        run: python ci/.github/scripts/rehearse_release_migration.py validation
 
       - name: Rehearse prior release state and custom prompt preservation
-        run: python ci/.github/scripts/rehearse_release_upgrade.py source previous
+        run: python ci/.github/scripts/rehearse_release_upgrade.py validation previous
 
       - name: Verify runtime upgrade helper
         run: |
@@ -116,7 +123,10 @@ jobs:
       - name: Require clean corrected fork application before building
         shell: bash
         run: |
+          git -C validation diff --exit-code HEAD
+          git -C validation status --porcelain
           git -C source diff --exit-code HEAD
+          git -C source status --porcelain
           test -z "$(git -C source status --porcelain)"
           python ci/.github/scripts/verify_deployment_source.py source "$UPSTREAM_SHA" "$SOURCE_SHA"
 

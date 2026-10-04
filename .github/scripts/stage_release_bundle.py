@@ -1,0 +1,130 @@
+"""Stage raw hosted archives after independently verified six-check evidence."""
+from __future__ import annotations
+import argparse
+import json
+import os
+from pathlib import Path, PurePosixPath
+import re
+import stat
+import tarfile
+
+from runtime_release_upgrade import (PREVIOUS, UPSTREAM, CHECKS, PATCH_ID, IMAGE_RE,
+                                    digest, plain_path as plain, operation_path, require)
+
+LINK = 'frontend/public/images'
+
+
+def save(path, value):
+    with path.open('x', encoding='utf-8', newline='\n') as stream:
+        os.fchmod(stream.fileno(), 0o600)
+        json.dump(value, stream, sort_keys=True, indent=2)
+        stream.write('\n')
+
+
+def extract(archive, destination, pin):
+    plain(destination)
+    require(not destination.exists(), 'destination_exists')
+    staging = plain(destination.with_name(destination.name + '.extracting'))
+    require(not staging.exists(), 'staging_exists')
+    with tarfile.open(archive, 'r:') as bundle:
+        require(bundle.pax_headers.get('comment') == pin, 'git_archive_source_pin')
+        members = bundle.getmembers()
+        seen = set()
+        for member in members:
+            name = PurePosixPath(member.name)
+            require(member.name and not name.is_absolute() and '..' not in name.parts and
+                    '\\' not in member.name and name.as_posix() == member.name.rstrip('/'), 'archive_path')
+            canonical = name.as_posix()
+            require(canonical not in seen, 'archive_duplicate')
+            seen.add(canonical)
+            require(member.isfile() or member.isdir() or member.issym(), 'archive_member_type')
+            require(member.mode & 0o7000 == 0, 'archive_special_permissions')
+            require(not canonical.startswith(LINK + '/'), 'archive_symlink_child')
+            if member.issym():
+                require(canonical == LINK and member.linkname == '../../docs/images', 'archive_symlink')
+            else:
+                require(canonical != LINK, 'archive_link_missing')
+        require(LINK in seen, 'archive_link_missing')
+        staging.mkdir(mode=0o700)
+        for member in members:
+            target = staging / member.name
+            if member.isdir():
+                target.mkdir(parents=True, exist_ok=True)
+            elif member.isfile():
+                target.parent.mkdir(parents=True, exist_ok=True)
+                with bundle.extractfile(member) as source, target.open('xb') as output:
+                    while chunk := source.read(1024 * 1024):
+                        output.write(chunk)
+            else:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.symlink_to(member.linkname)
+            if not member.issym():
+                target.chmod(member.mode)
+        require((staging / LINK).resolve() == staging / 'docs/images', 'extracted_link_escape')
+    staging.rename(destination)
+    return {p.relative_to(destination).as_posix(): digest(p)
+            for p in sorted(destination.rglob('*')) if p.is_file() and not p.is_symlink()}
+
+
+def source_identity(evidence):
+    release = evidence['SOURCE_SHA']
+    require(re.fullmatch(r'[0-9a-f]{40}', release) and release not in (PREVIOUS, UPSTREAM) and
+            evidence['PREVIOUS_SHA'] == PREVIOUS and evidence['UPSTREAM_SHA'] == UPSTREAM and
+            evidence['SOURCE_REPOSITORY'] == 'Jonoka/astra-quant-agent' and
+            evidence['UPSTREAM_REPOSITORY'] == '0xethanq/astra-quant-agent' and
+            evidence['SOURCE_VERSION'] == 'v8.6.1' and evidence['platform'] == 'linux/amd64',
+            'source_identity')
+    return release
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('operation', type=Path)
+    parser.add_argument('provenance', type=Path)
+    parser.add_argument('--provenance-sha256', required=True)
+    parser.add_argument('--run-url', required=True)
+    parser.add_argument('--checks-json', type=Path, required=True)
+    args = parser.parse_args()
+    os.umask(0o077)
+    require(os.geteuid() == 0, 'root_required')
+    op = operation_path(args.operation)
+    provenance = plain(args.provenance)
+    require(provenance.parent == op and digest(provenance) == args.provenance_sha256, 'provenance_hash')
+    evidence = json.loads(provenance.read_bytes())
+    release = source_identity(evidence)
+    image = evidence['IMAGE_NAME'] + '@' + evidence['IMAGE_DIGEST']
+    require(re.fullmatch(IMAGE_RE, image), 'image_identity')
+    require(args.run_url == 'https://github.com/Jonoka/astra-quant-agent/actions/runs/' +
+            str(evidence['GITHUB_RUN_ID']), 'hosted_run_identity')
+    checks = json.loads(plain(args.checks_json).read_bytes())
+    require(set(checks) == set(CHECKS) and all(checks[k] == 'passed' for k in CHECKS), 'checks_unverified')
+    required = {'source-previous.tar', 'source-release.tar', 'runtime_release_upgrade.py',
+                'stage_release_bundle.py', 'Dockerfile.release'}
+    require(required <= set(evidence['sha256']), 'artifact_manifest_incomplete')
+    for name, expected in evidence['sha256'].items():
+        require(Path(name).name == name and re.fullmatch(r'[0-9a-f]{64}', expected), 'artifact_name_hash')
+        path = plain(op / name)
+        require(path.is_file() and digest(path) == expected, 'artifact_hash')
+        require(path.stat().st_uid == 0 and not path.stat().st_mode & 0o077, 'artifact_permissions')
+    sources = {label: extract(op / ('source-' + label + '.tar'), op / ('source-' + label), pin)
+               for label, pin in (('previous', PREVIOUS), ('release', release))}
+    for helper in ('runtime_release_upgrade.py', 'stage_release_bundle.py'):
+        require(digest(op / helper) == digest(op / 'source-release/.github/scripts' / helper),
+                'helper_source_drift')
+    official = (op / 'source-release/Dockerfile').read_bytes()
+    anchor = b'RUN rm -rf public/images && mkdir -p public/images\n'
+    require(official.count(anchor) == 1, 'recipe_anchor_drift')
+    recipe = official.replace(anchor, anchor + b'COPY docs/images/dashboard_preview.png ./public/images/dashboard_preview.png\n', 1)
+    require((op / 'Dockerfile.release').read_bytes() == recipe and
+            digest(op / 'Dockerfile.release') == evidence['BUILD_RECIPE_SHA256'], 'reviewed_recipe_drift')
+    compatibility = {'previous_source': PREVIOUS, 'release_source': release, 'upstream_source': UPSTREAM,
+                     'image': image, 'hosted_run': args.run_url, 'rollback_preserves_new_records': True,
+                     'checks': checks, 'reviewed_formats': ['sqlite', 'encrypted_credentials', 'settings',
+                                                          'prompts', 'trading_records']}
+    save(op / 'manifest.json', {'schema': 1, 'previous_source': PREVIOUS, 'release_source': release,
+         'upstream_source': UPSTREAM, 'image': image, 'source_files': sources, 'compatibility': compatibility})
+    print('PASS: source bundle and independently attested hosted checks staged')
+
+
+if __name__ == '__main__':
+    main()

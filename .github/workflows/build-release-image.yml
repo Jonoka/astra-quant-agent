@@ -9,10 +9,12 @@ permissions:
 
 env:
   IMAGE_NAME: ghcr.io/jonoka/astra-quant-agent
-  SOURCE_REPOSITORY: 0xethanq/astra-quant-agent
-  SOURCE_SHA: 1b332aa58dfc58bfde8bbdaff0faeeb86631313f
-  SOURCE_VERSION: v8.6.0
-  PREVIOUS_SHA: a913957689a920c6e0eba835d1570d7d83e7f4a9
+  SOURCE_REPOSITORY: Jonoka/astra-quant-agent
+  SOURCE_SHA: ${{ github.sha }}
+  SOURCE_VERSION: v8.6.1
+  UPSTREAM_REPOSITORY: 0xethanq/astra-quant-agent
+  UPSTREAM_SHA: e0b29fef1818e0ff9c6b210eb73234620e276a02
+  PREVIOUS_SHA: 1b332aa58dfc58bfde8bbdaff0faeeb86631313f
 
 concurrency:
   group: astra-release-image
@@ -28,35 +30,37 @@ jobs:
         with:
           path: ci
 
-      - name: Checkout pinned release source
+      - name: Checkout corrected fork source at exact workflow commit
         uses: actions/checkout@v4
         with:
           repository: ${{ env.SOURCE_REPOSITORY }}
           ref: ${{ env.SOURCE_SHA }}
-          fetch-depth: 1
+          fetch-depth: 0
           path: source
 
-      - name: Verify stable official release and source pin
+      - name: Verify official release ancestry and retained application repair
         shell: bash
         working-directory: source
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          test "$GITHUB_REF" = refs/heads/codex/deploy
+          case "$GITHUB_REF" in refs/heads/codex/deploy|refs/heads/codex/council-completion-fix) ;; *) exit 1 ;; esac
           test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
-          git fetch --depth=1 origin "refs/tags/$SOURCE_VERSION:refs/tags/$SOURCE_VERSION"
-          test "$(git rev-parse "$SOURCE_VERSION^{commit}")" = "$SOURCE_SHA"
-          gh api "repos/$SOURCE_REPOSITORY/releases/tags/$SOURCE_VERSION" | python -c '
+          git fetch "https://github.com/$UPSTREAM_REPOSITORY.git" "refs/tags/$SOURCE_VERSION:refs/tags/$SOURCE_VERSION"
+          git merge-base --is-ancestor "$SOURCE_VERSION^{commit}" "$UPSTREAM_SHA"
+          git merge-base --is-ancestor "$UPSTREAM_SHA" HEAD
+          gh api "repos/$UPSTREAM_REPOSITORY/releases/tags/$SOURCE_VERSION" | python -c '
           import json, os, sys
           release = json.load(sys.stdin)
           assert release["tag_name"] == os.environ["SOURCE_VERSION"]
           assert not release["draft"] and not release["prerelease"]
           '
+          python ../ci/.github/scripts/verify_deployment_source.py . "$UPSTREAM_SHA" "$SOURCE_SHA"
 
       - name: Checkout prior release for synthetic upgrade fixtures
         uses: actions/checkout@v4
         with:
-          repository: ${{ env.SOURCE_REPOSITORY }}
+          repository: ${{ env.UPSTREAM_REPOSITORY }}
           ref: ${{ env.PREVIOUS_SHA }}
           fetch-depth: 1
           path: previous
@@ -76,7 +80,7 @@ jobs:
         working-directory: source
         shell: bash
         run: |
-          for target in tests/ops/test_migrate_r20_to_astra.py tests/core/test_admin_auth.py tests/llm/test_prompt_library_two_files.py tests/llm/test_prompt_source_of_truth.py tests/trading/test_signal_decision_doctrine.py tests/trading/test_signal_subfactors.py tests/trading/test_position_exit_failure_branches.py tests/llm/test_prompt_cache_prefix_contract.py tests/llm/test_llm_caching_enhancements.py tests/core/test_risk_config.py tests/trading/test_risk_reward_structure.py tests/ops/test_instrument_pool.py tests/venues/test_instrument_pool_universe.py; do
+          for target in tests/ops/test_brain_dispatch.py tests/extraction/test_brain_dispatch_extraction.py tests/trading/test_cycle_brain_stage.py tests/core/test_council_manager.py tests/core/test_debate_council_verdict.py tests/core/test_account_baseline.py tests/core/test_router_risk.py tests/ops/test_gateway_cache_stats.py tests/trading/test_entry_diagnostics_formatting.py tests/ops/test_migrate_r20_to_astra.py tests/core/test_admin_auth.py tests/llm/test_prompt_library_two_files.py tests/llm/test_prompt_source_of_truth.py tests/trading/test_signal_decision_doctrine.py tests/trading/test_signal_subfactors.py tests/trading/test_position_exit_failure_branches.py tests/llm/test_prompt_cache_prefix_contract.py tests/llm/test_llm_caching_enhancements.py tests/core/test_risk_config.py tests/trading/test_risk_reward_structure.py tests/ops/test_instrument_pool.py tests/venues/test_instrument_pool_universe.py; do
             python - "$target" <<'PY'
           from pathlib import Path
           import sys
@@ -109,11 +113,12 @@ jobs:
           assert result.wasSuccessful() and result.testsRun > len(result.skipped), "Helper suite failed or only skipped"
           PY
 
-      - name: Require unchanged official application before building
+      - name: Require clean corrected fork application before building
         shell: bash
         run: |
           git -C source diff --exit-code HEAD
           test -z "$(git -C source status --porcelain)"
+          python ci/.github/scripts/verify_deployment_source.py source "$UPSTREAM_SHA" "$SOURCE_SHA"
 
       - name: Set up Buildx
         uses: docker/setup-buildx-action@v3
@@ -122,7 +127,7 @@ jobs:
         id: recipe
         run: python ci/.github/scripts/prepare_release_dockerfile.py source ci/Dockerfile.release >> "$GITHUB_OUTPUT"
 
-      - name: Build candidate from official source and reviewed release recipe
+      - name: Build candidate from corrected fork and reviewed release recipe
         uses: docker/build-push-action@v6
         with:
           context: ./source
@@ -135,6 +140,8 @@ jobs:
             org.opencontainers.image.source=https://github.com/${{ env.SOURCE_REPOSITORY }}
             org.opencontainers.image.revision=${{ env.SOURCE_SHA }}
             org.opencontainers.image.version=${{ env.SOURCE_VERSION }}
+            io.jonoka.astra.upstream-revision=${{ env.UPSTREAM_SHA }}
+            io.jonoka.astra.council-completion-patch=council-completion-v1
             io.jonoka.astra.build-recipe-sha256=${{ steps.recipe.outputs.sha256 }}
           provenance: false
           sbom: false
@@ -160,9 +167,10 @@ jobs:
         id: publish
         shell: bash
         run: |
-          docker tag astraquant:ci "$IMAGE_NAME:$SOURCE_VERSION"
+          patched_tag="$SOURCE_VERSION-council-fix-${SOURCE_SHA:0:12}"
+          docker tag astraquant:ci "$IMAGE_NAME:$patched_tag"
           docker tag astraquant:ci "$IMAGE_NAME:$SOURCE_SHA"
-          docker push "$IMAGE_NAME:$SOURCE_VERSION"
+          docker push "$IMAGE_NAME:$patched_tag"
           docker push "$IMAGE_NAME:$SOURCE_SHA"
           digest="sha256:$(docker buildx imagetools inspect "$IMAGE_NAME:$SOURCE_SHA" --raw | sha256sum | cut -d' ' -f1)"
           printf 'digest=%s\n' "$digest" >> "$GITHUB_OUTPUT"
@@ -177,7 +185,7 @@ jobs:
           docker pull "$IMAGE_NAME@$IMAGE_DIGEST"
           python ci/.github/scripts/smoke_release_compose.py source "$IMAGE_NAME@$IMAGE_DIGEST" previous
           docker buildx imagetools inspect "$IMAGE_NAME@$IMAGE_DIGEST"
-          printf '### Verified release image\n\n- Source: `%s@%s`\n- Version: `%s`\n- Image: `%s@%s`\n- Platform: `linux/amd64`\n- Positive test discovery, official migration, encrypted state, prior admin/session, custom baseline/overlay rendering and both Compose healthchecks passed.\n- Published image ID equals the smoke-tested candidate.\n' \
+          printf '### Verified corrected release image\n\n- Source: `%s@%s`\n- Version: `%s`\n- Image: `%s@%s`\n- Platform: `linux/amd64`\n- Required council completion regression, patch retention, positive test discovery, official migration, encrypted state, prior admin/session, custom baseline/overlay rendering and both Compose healthchecks passed.\n- Published image ID equals the smoke-tested candidate.\n' \
             "$SOURCE_REPOSITORY" "$SOURCE_SHA" "$SOURCE_VERSION" "$IMAGE_NAME" "$IMAGE_DIGEST" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Package raw pinned source and reviewed deployment provenance
@@ -190,12 +198,13 @@ jobs:
           git -C source archive --format=tar "$SOURCE_SHA" > release-artifacts/source-release.tar
           git -C previous archive --format=tar "$PREVIOUS_SHA" > release-artifacts/source-previous.tar
           cp ci/.github/scripts/runtime_release_upgrade.py release-artifacts/
+          cp ci/.github/scripts/stage_release_bundle.py release-artifacts/
           cp ci/Dockerfile.release release-artifacts/
           python - <<'PY'
           import hashlib, json, os
           from pathlib import Path
           root = Path('release-artifacts')
-          evidence = {key: os.environ[key] for key in ('SOURCE_SHA', 'PREVIOUS_SHA', 'SOURCE_VERSION', 'IMAGE_NAME', 'IMAGE_DIGEST', 'GITHUB_SHA', 'GITHUB_RUN_ID', 'GITHUB_RUN_ATTEMPT', 'BUILD_RECIPE_SHA256')}
+          evidence = {key: os.environ[key] for key in ('SOURCE_REPOSITORY', 'SOURCE_SHA', 'UPSTREAM_REPOSITORY', 'UPSTREAM_SHA', 'PREVIOUS_SHA', 'SOURCE_VERSION', 'IMAGE_NAME', 'IMAGE_DIGEST', 'GITHUB_SHA', 'GITHUB_RUN_ID', 'GITHUB_RUN_ATTEMPT', 'BUILD_RECIPE_SHA256')}
           evidence['platform'] = 'linux/amd64'
           evidence['sha256'] = {p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted(root.iterdir())}
           (root / 'provenance.json').write_text(json.dumps(evidence, indent=2) + '\n')
@@ -204,6 +213,6 @@ jobs:
       - name: Upload verified raw deployment bundle
         uses: actions/upload-artifact@v4
         with:
-          name: astraquant-v8.6.0-deployment
+          name: astraquant-v8.6.1-council-deployment
           path: release-artifacts/
           if-no-files-found: error

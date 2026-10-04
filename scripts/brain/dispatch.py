@@ -6,7 +6,9 @@
 
 ## 安全属性（与 trader 域同一套纪律）
 
-- 段体 **AST 逐字**（对拍门 `tests/extraction/test_brain_dispatch_extraction.py`）；
+- 抽取后的接口/自由名由 `tests/extraction/test_brain_dispatch_extraction.py` 校验；
+  2026-10-04 修复委员会成功路径的输出长度统计，行为回归见
+  `tests/ops/test_brain_dispatch.py::CouncilCompletionTests`；
 - 全部自由名（`38` 个：2026-09-30 增 `repair_json_object` 做容错 JSON 解析，
   修不动仍抛原始错误 ⇒ 行为 fail-closed 不变）**同名 kw-only 入参** ⇒ 门面调用期解析，
   `patch.object(ai_brain_trader, "assemble_decision_cache", ...)` 这类测试缝照常生效；
@@ -58,7 +60,7 @@ def dispatch_llm_and_persist_decisions(*,
     """主脑批次：LLM 请求派发 → 决策解析归一 → 缓存/历史/持仓指令落盘 → 健康记录。
 
     原为 `ai_brain_trader.execute_batch_ai_brain_cycle` 末尾的 173 行 `try` 块
-    （**纯搬家**，段体 AST 逐字）。
+    （最初纯搬家；随后修复委员会成功路径的输出长度统计）。
 
     ## 为什么调用点是 `return helper(...)`
 
@@ -171,6 +173,12 @@ def dispatch_llm_and_persist_decisions(*,
                     raise parse_error
             if not isinstance(brain_output, dict):
                 raise ValueError("LLM response root must be an object")
+            output_chars = len(content)
+        else:
+            # Council returns a parsed decision object, not the single-model
+            # content string. Count its actual serialized output; token usage
+            # remains unknown here because this path receives no usage payload.
+            output_chars = len(json.dumps(brain_output, ensure_ascii=False))
         decisions_dict = brain_output.get("decisions", {})
         pos_mgmt_list = brain_output.get("position_management", [])
         macro_summary = str(brain_output.get("macro_assessment", "宏观中性震荡"))[:120]
@@ -247,7 +255,7 @@ def dispatch_llm_and_persist_decisions(*,
         atomic_write_json(AI_DECISION_HISTORY_FILE, history_list)
 
         latency = round(time.time() - t0, 2)
-        telemetry.finish("success", raw_res, output_chars=len(content))
+        telemetry.finish("success", raw_res, output_chars=output_chars)
         print(f"[AI Brain Batch] ✅ 全标的池({len(packages)} 币种)全景决策完成 (耗时 {latency}s, 宏观基调: {macro_summary})")
         _record_cycle_health("ok")
         return standard_cache

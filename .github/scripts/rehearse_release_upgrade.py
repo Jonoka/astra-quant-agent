@@ -1,4 +1,4 @@
-"""Hosted synthetic v8.5.1-to-v8.6.0 preservation and renderer rehearsal.
+"""Hosted synthetic v8.6.0-to-corrected-v8.6.1 preservation and renderer rehearsal.
 
 No production fixtures, network/model calls, or trading jobs are used.
 """
@@ -250,7 +250,8 @@ with db_manager.get_db() as db:
         assert gateway.model_stats()["total_calls"] == 1
         with gateway.connect() as db:
             columns = {row["name"] for row in db.execute("PRAGMA table_info(model_calls)")}
-            assert {"cached_tokens", "cache_status", "usage_keys"} <= columns
+            assert {"cached_tokens", "cache_status", "usage_keys", "reasoning_tokens"} <= columns
+            assert gateway.model_calls()[0]["reasoning_tokens"] == 0
             db.execute("INSERT INTO model_calls(caller,model,reasoning_effort,status,started_at,duration_ms,input_chars,output_chars,prompt_fingerprint,cached_tokens,cache_status,usage_keys) VALUES ('candidate','synthetic','high','success','2026-10-03',1,2,3,'fake',2,'hit','cached_tokens')")
         with patch.object(db_manager, "DATA_DIR", str(restored_data)), \
              patch.object(db_manager, "DB_PATH", str(restored_data / "astra_quant.db")):

@@ -5,15 +5,9 @@ LLM 请求 → 决策归一 → 缓存/历史/持仓指令三份落盘 → 周�
 它的全部 37 个自由名都是 kw-only 入参（门面调用期解析），所以本刀全部走注入，
 不碰任何真实网络或磁盘。
 
-## 本刀最重要的产出：一个**真实生产缺陷**
-
-详见 `CouncilSuccessPathBugTests` —— 投委会**开启且辩论成功**时，`content` 变量从未被赋值，
-而第 230 行要用 `len(content)`，于是 `UnboundLocalError` 被外层 `except` 吞掉：
-
-  ⇒ 决策**确实写盘了**，但函数**返回 `None`**、周期健康被记成 **`failed`**、成功日志不打印。
-
-按本战役纪律：**只记录、不擅自修**（改它会改实盘行为）。已用 `assertRaises` 的反面钉法
-把现状锁住，避免后人以为这条路径"是好的"。
+`CouncilCompletionTests` guards the repaired production defect: successful
+council decisions must return the persisted fresh cache, mark health ok and
+reach downstream AI position management without synthetic exchange orders.
 """
 from __future__ import annotations
 
@@ -545,44 +539,40 @@ class HealthAndReturnTests(_Harness, unittest.TestCase):
         self.assertEqual(self.health[0][0], "failed")
 
 
-class CouncilSuccessPathBugTests(_Harness, unittest.TestCase):
-    """★★ 本刀实测到的**真实生产缺陷**（只记录，未改）。
-
-    投委会**开启且辩论成功**时，`brain_output` 由委员会给出，
-    于是 `if brain_output is None:` 那段（**唯一**给 `content` 赋值的地方）被跳过；
-    而第 230 行要 `output_chars=len(content)` ⇒ `UnboundLocalError`。
-
-    后果链条（三条都已实测）：
-
-    1. 决策缓存 / 持仓指令 / 历史 **确实写盘了**（它们在第 230 行之前完成）；
-    2. 但函数 **`return None`** —— 调用方拿到的是失败信号；
-    3. `_record_cycle_health("failed", ...)` ⇒ **成功的周期被记成失败**。
-
-    即：**开启投委会会让每一轮都被记成 failed**（而投委会本身是可用功能）。
-    修它属于改实盘行为，按本战役纪律只钉现状、留给单独决策。
-    """
+class CouncilCompletionTests(_Harness, unittest.TestCase):
+    """Successful council output must survive telemetry and reach the trader."""
 
     def _enable_council(self):
         self.council_cfg = {"enabled": True, "timeout_seconds": 60}
         self.council_result = ({"decisions": {"BTC-USDT-SWAP": {"action": "WAIT"}},
                                 "macro_assessment": "由委员会给出"},
                                {"total_duration_ms": 42, "consensus_mode": "unanimous",
-                                "advisors": {"a": {"status": "ok"}}})
+                                "advisors": {
+                                    name: {"status": "ok", "proposal": {
+                                        "decisions": {"BTC-USDT-SWAP": {"action": "WAIT"}}}}
+                                    for name in ("a", "b", "c")}})
 
-    def test_council_success_returns_none_instead_of_the_cache(self):
+    def test_council_success_returns_the_exact_persisted_fresh_cache(self):
         self._enable_council()
-        self.assertIsNone(self._run())
+        cache = {"BTC-USDT-SWAP": {"action": "WAIT", "timestamp": int(time.time())}}
+        out = self._run(assemble_decision_cache=lambda **kw: cache)
+        self.assertIs(out, cache)
+        self.assertIs(out, self.written[self.paths["cache"]])
+        self.assertIs(self.written[self.paths["history"]][0]["kw"]["standard_cache"], cache)
+        self.assertFalse(hasattr(self, "llm_kwargs"), "successful council must not call fallback")
 
-    def test_council_success_is_recorded_as_a_failed_cycle(self):
+    def test_council_success_records_ok_health_and_truthful_output_without_fake_usage(self):
         self._enable_council()
         self._run()
-        self.assertEqual(self.health[0][0], "failed")
-        self.assertIn("content", self.health[0][1])
-        self.assertEqual(self.telemetry.calls[0][0], ("failed",))
-        self.assertIsInstance(self.telemetry.calls[0][1]["error"], UnboundLocalError)
+        self.assertEqual(self.health, [("ok",)])
+        self.assertEqual(self.telemetry.calls, [
+            (("success", None), {"output_chars": len(json.dumps(
+                self.council_result[0], ensure_ascii=False))})])
+        status = self.written[self.paths["history"]][0]["kw"]["council_status"]
+        self.assertTrue(status["ran"])
+        self.assertEqual((status["advisors_ok"], status["advisors_total"]), (3, 3))
 
-    def test_the_cache_and_history_still_land_despite_the_crash(self):
-        # 三份落盘都发生在第 230 行之前 ⇒ 副作用已产生，只有**返回值与健康记录**是错的
+    def test_council_success_persists_all_three_outputs(self):
         self._enable_council()
         self._run()
         self.assertIn(self.paths["cache"], self.written)
@@ -596,21 +586,65 @@ class CouncilSuccessPathBugTests(_Harness, unittest.TestCase):
         self.assertIn("assembled", out)
         self.assertEqual(self.health, [("ok",)])
 
-    def test_the_crash_is_purely_the_missing_content_binding(self):
-        # 反证：源码里 `content` 的**每一处赋值都只在单模型分支之内**，
-        # 而使用点在外层 —— 这就是根因（不是委员会结果本身有什么问题）
-        src = Path(dispatch.__file__).read_text(encoding="utf-8")
-        self.assertIn("output_chars=len(content)", src)
-        assign_lines = [i + 1 for i, line in enumerate(src.splitlines())
-                        if line.strip().startswith(("content =", "content,", "content.startswith"))]
-        self.assertTrue(assign_lines, "应能找到 content 的绑定点")
-        guard = next(i + 1 for i, line in enumerate(src.splitlines())
-                     if "if brain_output is None:" in line)
-        use = next(i + 1 for i, line in enumerate(src.splitlines())
-                   if "output_chars=len(content)" in line)
-        self.assertTrue(all(guard < ln < use for ln in assign_lines),
-                        f"content 的绑定点 {assign_lines} 应全部落在守卫 {guard} 与使用点 {use} 之间")
-        self.assertLess(guard, use)
+    def test_council_error_falls_back_and_preserves_single_model_usage(self):
+        self._enable_council()
+        out = self._run(council_error=TimeoutError("council timed out"))
+        self.assertIs(out, self.written[self.paths["cache"]])
+        self.assertEqual(self.health, [("ok",)])
+        self.assertEqual(self.telemetry.calls[0], (
+            ("success", {"usage": {"total_tokens": 7}}),
+            {"output_chars": len(self.llm_result[0])}))
+        self.assertFalse(out["kw"]["council_status"]["ran"])
+
+    def test_council_and_fallback_inference_failure_remain_fail_closed(self):
+        self._enable_council()
+        def fail(**kw):
+            raise RuntimeError("fallback inference failed")
+        self.assertIsNone(self._run(council_error=TimeoutError("timeout"),
+                                    execute_llm_request=fail))
+        self.assertEqual(self.written, {})
+        self.assertEqual(self.health, [("failed", "fallback inference failed")])
+
+    def test_invalid_council_output_remains_fail_closed(self):
+        self._enable_council()
+        self.council_result = (["invalid root"], self.council_result[1])
+        self.assertIsNone(self._run())
+        self.assertEqual(self.written, {})
+        self.assertEqual(self.health[0][0], "failed")
+
+    def test_council_persistence_failure_never_returns_cache_or_marks_success(self):
+        self._enable_council()
+        def fail(path, payload):
+            raise OSError("disk full")
+        self.assertIsNone(self._run(atomic_write_json=fail))
+        self.assertEqual(self.health, [("failed", "disk full")])
+        self.assertEqual(self.telemetry.calls[0][0], ("failed",))
+
+    def test_successful_council_cache_reaches_real_downstream_management_gate(self):
+        from scripts.trader.cycle_stages import scan_risk_gates_and_ai_brain
+        self._enable_council()
+        cache = {"BTC-USDT-SWAP": {"action": "WAIT", "timestamp": int(time.time())}}
+        managed, saved, actions = [], [], []
+        result = scan_risk_gates_and_ai_brain(
+            venue_position_span=lambda **kw: "0", active_pos_count=0,
+            all_factors={}, executed_actions=actions, long_count=0, short_count=0,
+            timestamp_full="T", trackers={}, usdt_available=1000,
+            MAX_CONCURRENT_POSITIONS=5,
+            _collect_okx_position_payloads=lambda *a: [],
+            effective_single_asset_margin=lambda balance: 100,
+            execute_ai_position_management=lambda *a: managed.append(a),
+            execute_batch_ai_brain_cycle=lambda *a, **kw: self._run(
+                assemble_decision_cache=lambda **kw: cache),
+            is_circuit_breaker_active=lambda balance: (False, ""),
+            pool_is_trustworthy=lambda: True, pool_state=lambda: {},
+            query_positions=lambda: (True, [], ""),
+            read_cycle_health=lambda: {"last_status": self.health[-1][0]},
+            real_pos_dict={}, save_trackers=lambda trackers: saved.append(trackers))
+        self.assertIs(result[1], cache)
+        self.assertEqual(len(managed), 1)
+        self.assertEqual(len(saved), 1)
+        self.assertEqual(actions, [])
+        self.assertEqual(self.health, [("ok",)])
 
 
 if __name__ == "__main__":

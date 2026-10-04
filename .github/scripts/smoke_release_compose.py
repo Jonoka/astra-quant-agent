@@ -40,7 +40,7 @@ def main(source: Path, image: str, previous: Path) -> None:
     assert "/app/plugins" not in (source / "docker-compose.yml").read_text(encoding="utf-8"), \
         "Release Compose must not restore the removed plugin bind"
     assert (source / "docker-compose.yml").read_bytes() == (previous / "docker-compose.yml").read_bytes(), \
-        "v8.5.1-to-v8.6.0 Compose contract unexpectedly changed"
+        "v8.6.0-to-corrected-v8.6.1 Compose contract unexpectedly changed"
     metadata = json.loads(command(["docker", "image", "inspect", image]))[0]
     expected_image_id = os.environ.get("EXPECTED_IMAGE_ID")
     if expected_image_id:
@@ -50,6 +50,8 @@ def main(source: Path, image: str, previous: Path) -> None:
     assert labels["org.opencontainers.image.revision"] == os.environ["SOURCE_SHA"]
     assert labels["org.opencontainers.image.version"] == os.environ["SOURCE_VERSION"]
     assert labels["org.opencontainers.image.source"] == "https://github.com/" + os.environ["SOURCE_REPOSITORY"]
+    assert labels["io.jonoka.astra.upstream-revision"] == os.environ["UPSTREAM_SHA"]
+    assert labels["io.jonoka.astra.council-completion-patch"] == "council-completion-v1"
     assert labels["io.jonoka.astra.build-recipe-sha256"] == os.environ["BUILD_RECIPE_SHA256"], \
         "Image build recipe differs from the reviewed derived recipe"
     with tempfile.TemporaryDirectory(prefix="astra-compose-smoke-") as tmp:

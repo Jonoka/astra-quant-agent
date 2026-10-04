@@ -3,6 +3,9 @@ import copy
 import importlib.util
 import os
 import sqlite3
+import sys
+import io
+import tarfile
 from pathlib import Path
 import tempfile
 import unittest
@@ -11,6 +14,8 @@ from unittest.mock import Mock, patch
 SPEC = importlib.util.spec_from_file_location("runtime_upgrade", Path(__file__).with_name("runtime_release_upgrade.py"))
 upgrade = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(upgrade)
+sys.path.insert(0, str(Path(__file__).parent))
+import stage_release_bundle as staging
 
 
 class RuntimeUpgradeTests(unittest.TestCase):
@@ -25,6 +30,94 @@ class RuntimeUpgradeTests(unittest.TestCase):
         obj.op.mkdir()
         obj.state = {"extras": []}
         return obj
+
+    def test_only_reviewed_gateway_reasoning_column_allowed(self):
+        before = {'data/astra_gateway.db': {'tables': {'model_calls': {
+            'columns': [['id', 'INTEGER', 0, None, 1]], 'rows': 1}}, 'indexes': []}}
+        after = copy.deepcopy(before)
+        columns = after['data/astra_gateway.db']['tables']['model_calls']['columns']
+        columns.append(['reasoning_tokens', 'INTEGER', 0, '0', 0])
+        upgrade.compatible_databases(before, after)
+        upgrade.compatible_databases(after, after)  # Previous-version recovery keeps new column.
+        for bad in (['reasoning_tokens', 'INTEGER', 1, '0', 0],
+                    ['reasoning_tokens', 'TEXT', 0, '0', 0],
+                    ['reasoning_tokens', 'INTEGER', 0, None, 0]):
+            columns[-1] = bad
+            with self.assertRaisesRegex(upgrade.GateError, 'unknown_database_migration'):
+                upgrade.compatible_databases(before, after)
+
+    def test_gateway_source_contract_rejects_other_sql_or_migrations(self):
+        old, new = self.root / 'old.py', self.root / 'new.py'
+        schema = 'CREATE TABLE model_calls (\n  output_tokens INTEGER,\n  total_tokens INTEGER\n);'
+        migrations = (('cached_tokens', 'INTEGER'),)
+        old.write_text('SCHEMA = ' + repr(schema) + '\nMIGRATION_COLUMNS = ' + repr(migrations))
+        reviewed = schema.replace('  output_tokens INTEGER,\n',
+                                  '  output_tokens INTEGER,\n  reasoning_tokens INTEGER DEFAULT 0,\n')
+        new.write_text('SCHEMA = ' + repr(reviewed) + '\nMIGRATION_COLUMNS = ' +
+                       repr((('reasoning_tokens', 'INTEGER DEFAULT 0'), *migrations)))
+        upgrade.gateway_source_compatibility(old, new)
+        new.write_text(new.read_text().replace('DEFAULT 0', 'DEFAULT 1'))
+        with self.assertRaisesRegex(upgrade.GateError, 'gateway_schema_changed'):
+            upgrade.gateway_source_compatibility(old, new)
+
+    def test_stage_identity_uses_corrected_fork_sha_and_pinned_ancestor(self):
+        evidence = {'SOURCE_SHA': 'a' * 40, 'PREVIOUS_SHA': upgrade.PREVIOUS,
+                    'UPSTREAM_SHA': upgrade.UPSTREAM, 'SOURCE_REPOSITORY': 'Jonoka/astra-quant-agent',
+                    'UPSTREAM_REPOSITORY': '0xethanq/astra-quant-agent', 'SOURCE_VERSION': 'v8.6.1',
+                    'platform': 'linux/amd64'}
+        self.assertEqual(staging.source_identity(evidence), 'a' * 40)
+        for key, bad in (('SOURCE_SHA', upgrade.UPSTREAM), ('UPSTREAM_SHA', 'b' * 40),
+                         ('SOURCE_REPOSITORY', '0xethanq/astra-quant-agent')):
+            changed = {**evidence, key: bad}
+            with self.assertRaisesRegex(Exception, 'source_identity'):
+                staging.source_identity(changed)
+
+    def test_candidate_image_requires_corrected_fork_upstream_patch_and_recipe(self):
+        obj = self.operator()
+        obj.image = 'ghcr.io/jonoka/astra-quant-agent@sha256:' + 'a' * 64
+        obj.release = 'b' * 40
+        (obj.op / 'Dockerfile.release').write_bytes(b'reviewed-recipe')
+        labels = {'org.opencontainers.image.revision': obj.release,
+                  'org.opencontainers.image.version': 'v8.6.1',
+                  'org.opencontainers.image.source': 'https://github.com/Jonoka/astra-quant-agent',
+                  'io.jonoka.astra.upstream-revision': upgrade.UPSTREAM,
+                  'io.jonoka.astra.council-completion-patch': upgrade.PATCH_ID,
+                  'io.jonoka.astra.build-recipe-sha256': upgrade.sha(b'reviewed-recipe')}
+        metadata = {'Config': {'Labels': labels}, 'RepoDigests': [obj.image],
+                    'Os': 'linux', 'Architecture': 'amd64', 'Id': 'image-id'}
+        with patch.object(upgrade, 'run', return_value=upgrade.json.dumps([metadata]).encode()):
+            self.assertEqual(obj.image_metadata(), 'image-id')
+        for key in ('io.jonoka.astra.upstream-revision', 'io.jonoka.astra.council-completion-patch',
+                    'io.jonoka.astra.build-recipe-sha256'):
+            changed = copy.deepcopy(metadata)
+            changed['Config']['Labels'][key] = 'incorrect'
+            with patch.object(upgrade, 'run', return_value=upgrade.json.dumps([changed]).encode()), \
+                    self.assertRaisesRegex(upgrade.GateError, 'image_patch_provenance'):
+                obj.image_metadata()
+
+    def test_stage_validates_archive_pin_and_traversal_before_writing(self):
+        archive = self.root / 'source.tar'
+        def bundle(name, pin):
+            with tarfile.open(archive, 'w', format=tarfile.PAX_FORMAT,
+                              pax_headers={'comment': pin}) as tar:
+                item = tarfile.TarInfo(name)
+                item.size = 4
+                tar.addfile(item, io.BytesIO(b'data'))
+                link = tarfile.TarInfo(staging.LINK)
+                link.type = tarfile.SYMTYPE
+                link.linkname = '../../docs/images'
+                tar.addfile(link)
+        bundle('../escape', 'a' * 40)
+        destination = self.root / 'extracted'
+        with self.assertRaisesRegex(Exception, 'archive_path'):
+            staging.extract(archive, destination, 'a' * 40)
+        self.assertFalse(destination.exists())
+        bundle('docs/images/fixture', 'b' * 40)
+        with self.assertRaisesRegex(Exception, 'git_archive_source_pin'):
+            staging.extract(archive, destination, 'a' * 40)
+        bundle('docs/images/fixture', 'a' * 40)
+        manifest = staging.extract(archive, destination, 'a' * 40)
+        self.assertEqual(manifest['docs/images/fixture'], upgrade.sha(b'data'))
 
     def test_official_symlink_preserved_without_traversal(self):
         (self.root / "frontend/public").mkdir(parents=True)
@@ -238,9 +331,9 @@ class RuntimeUpgradeTests(unittest.TestCase):
         def response(base, path, token=None, expected=200):
             calls.append((base, path, token, expected))
             if path.endswith("/health"):
-                return {"version": "8.6.0", "status": "ok", "credentials": {"okx_configured": True}}
+                return {"version": "8.6.1", "status": "ok", "credentials": {"okx_configured": True}}
             if path.endswith("/status") and "/admin/" not in path:
-                return {"version": "8.6.0"}
+                return {"version": "8.6.1"}
             if path.endswith("/auth/status"):
                 return {"initialized": True}
             self.assertEqual(expected, 401)
@@ -261,10 +354,10 @@ class RuntimeUpgradeTests(unittest.TestCase):
                 self.assertEqual(token, obj.session)
                 return {"user": {"id": 1, "username": "operator", "role": "superadmin", "enabled": True}}
             if path.endswith("/health"):
-                return {"version": "8.6.0", "status": "ok", "credentials": {}}
+                return {"version": "8.6.1", "status": "ok", "credentials": {}}
             if path.endswith("/auth/status"):
                 return {"initialized": True}
-            return {"version": "8.6.0"}
+            return {"version": "8.6.1"}
         with patch.object(upgrade, "request", side_effect=response):
             result = obj.endpoints(False)
         self.assertEqual(result["authenticated_session_probe"], "passed")

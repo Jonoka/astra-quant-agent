@@ -60,6 +60,10 @@ import hashlib
 import html
 import re
 import urllib.request
+try:
+    from scripts.okx_public import public_json_get
+except ImportError:                                    # pragma: no cover - script import
+    from okx_public import public_json_get
 import xml.etree.ElementTree as ET
 from email.utils import parsedate_to_datetime
 
@@ -399,12 +403,11 @@ def fetch_okx_rubik_sentiment(ccy: str) -> dict:
     `fetch_and_analyze_news_sentiment()` 从本轮实际入流的快讯逐条统计后写入。
     """
     c = ccy.upper()
-    url = f"https://www.okx.com/api/v5/rubik/stat/contracts/long-short-account-ratio?ccy={c}"
     for attempt in range(2):
         try:
-            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-            with urllib.request.urlopen(req, timeout=4) as resp:
-                data = json.loads(resp.read().decode("utf-8"))
+            data = public_json_get(
+                f"/api/v5/rubik/stat/contracts/long-short-account-ratio?ccy={c}",
+                opener=urllib.request.urlopen, timeout=4, user_agent="Mozilla/5.0")
             rows = data.get("data") or []
             if rows and len(rows[0]) >= 2:
                 ratio = float(rows[0][1] or 1.0)

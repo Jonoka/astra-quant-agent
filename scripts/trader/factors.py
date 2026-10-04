@@ -28,6 +28,11 @@
 import json
 import os
 import urllib
+
+try:
+    from scripts.okx_public import public_json_get
+except ImportError:                                    # pragma: no cover - script import
+    from okx_public import public_json_get
 import warnings
 
 from astra_backend.execution import (
@@ -207,13 +212,12 @@ def fetch_single_instrument_data(item, all_positions, usdt_available, *,
         f["askPx"] = f["price"]
         # Fetch Real-time Orderbook Ticker BBO (Best Bid & Ask) for Precision Limit Placement
         try:
-            req_t = urllib.request.Request(f"https://www.okx.com/api/v5/market/ticker?instId={inst_id}", headers={"User-Agent": "Mozilla/5.0"})
-            with urllib.request.urlopen(req_t, timeout=3) as response_t:
-                d_t = json.loads(response_t.read().decode("utf-8"))
-                if d_t.get("code") == "0" and "data" in d_t and len(d_t["data"]) > 0:
-                    t_item = d_t["data"][0]
-                    f["bidPx"] = float(t_item.get("bidPx", f["price"]) or f["price"])
-                    f["askPx"] = float(t_item.get("askPx", f["price"]) or f["price"])
+            d_t = public_json_get(f"/api/v5/market/ticker?instId={inst_id}", opener=urllib.request.urlopen,
+                                timeout=3, user_agent="Mozilla/5.0")
+            if d_t.get("code") == "0" and "data" in d_t and len(d_t["data"]) > 0:
+                t_item = d_t["data"][0]
+                f["bidPx"] = float(t_item.get("bidPx", f["price"]) or f["price"])
+                f["askPx"] = float(t_item.get("askPx", f["price"]) or f["price"])
         except Exception as _bbo_err:
             # 2026-09-16：原先静默 pass —— BBO 取不到时 bid/ask 会悄悄退回最新价，
             # 限价精度随之降级而无人知道。保留降级（不阻断取数），但必须留痕。

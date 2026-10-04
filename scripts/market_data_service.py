@@ -2,7 +2,7 @@
 
 Public market data harvesting (tickers, orderbooks, indicators, candles) runs on
 persistent connection-pooled HTTP Keep-Alive sessions with pure-Python fallbacks.
-Failover chain: www.okx.com -> aws.okx.com -> local math.
+Failover chain: openapi.okx.com -> www.okx.com -> local math.
 Zero process-spawning layers; public endpoints need no credentials.
 """
 from __future__ import annotations
@@ -19,10 +19,10 @@ from urllib3.util.retry import Retry
 
 logger = logging.getLogger("market_data_service")
 
-OKX_PUBLIC_HOSTS = [
-    "https://www.okx.com",
-    "https://aws.okx.com",
-]
+try:
+    from scripts.okx_public import OKX_PUBLIC_HOSTS, validate_public_path
+except ImportError:                                    # pragma: no cover - script import
+    from okx_public import OKX_PUBLIC_HOSTS, validate_public_path
 
 # 行情取数可观测性（第 137 刀）：失败计数 + 耗时/成功率。
 # ⚠️ 双拼写铁律：本模块既以顶层名 `market_data_service`（SCRIPTS_DIR 在 sys.path 上，
@@ -127,6 +127,7 @@ def get_market_session() -> requests.Session:
 
 def _public_get(path: str, params: Optional[Dict[str, Any]] = None, timeout: float = 3.5) -> Optional[Dict[str, Any]]:
     """Try primary then fallback OKX public endpoints."""
+    validate_public_path(path)
     session = get_market_session()
     kind = _call_kind("get", path)
     for base in OKX_PUBLIC_HOSTS:
@@ -155,6 +156,7 @@ def _public_get(path: str, params: Optional[Dict[str, Any]] = None, timeout: flo
 
 def _public_post(path: str, payload: Dict[str, Any], timeout: float = 4.0) -> Optional[Dict[str, Any]]:
     """Try primary then fallback OKX public POST endpoints."""
+    validate_public_path(path)
     session = get_market_session()
     headers = {"Content-Type": "application/json"}
     kind = _call_kind("post", path)
@@ -185,7 +187,7 @@ def _public_post(path: str, payload: Dict[str, Any], timeout: float = 4.0) -> Op
 # ---------------------------------------------------------------------------
 
 def fetch_ticker(inst_id: str, timeout: float = 3.5) -> Optional[Dict[str, Any]]:
-    """Fetch one instrument ticker: www→aws 双域 REST 直连，失败返回 None。"""
+    """Fetch one instrument ticker: openapi→www 双域 REST 直连，失败返回 None。"""
     data = _public_get("/api/v5/market/ticker", params={"instId": inst_id}, timeout=timeout)
     if data and data.get("data"):
         return data["data"][0]
@@ -239,7 +241,7 @@ def _local_math_indicators(
     bar: str = "1H",
 ) -> Dict[str, Dict[str, str]]:
     """末级兜底：当 OKX MCP 指标接口与 REST 均不可用时（部署环境常见），
-    用本地蜡烛（自带 www→aws 双域容灾）纯 Python 计算 ADX/KDJ/BBWIDTH/CMF。
+    用本地蜡烛（自带 openapi→www 双域容灾）纯 Python 计算 ADX/KDJ/BBWIDTH/CMF。
     输出与 OKX 官方口径对齐的字符串数值；样本不足时返回空 dict 让上层维持缺省。"""
     rows = fetch_candles(inst_id, bar=bar, limit=120)
     if not rows:

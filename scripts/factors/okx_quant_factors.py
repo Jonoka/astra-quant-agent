@@ -131,7 +131,10 @@ OBI_STRONG_ASK_PCT = -20.0
 #: CVD 背离观察窗口（1H 根数）
 CVD_DIVERGENCE_LOOKBACK = 6
 
-_OKX_HOSTS = ("https://www.okx.com", "https://aws.okx.com")
+try:
+    from scripts.okx_public import OKX_PUBLIC_HOSTS as _OKX_HOSTS, validate_public_path
+except ImportError:                                    # pragma: no cover - script import
+    from okx_public import OKX_PUBLIC_HOSTS as _OKX_HOSTS, validate_public_path
 _HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
 
 #: 中性缺失占位（与 defaults.py 的 `--` 语义一致：缺失就该大声缺）
@@ -227,12 +230,13 @@ def _mark_rubik_called(path: str) -> None:
 def _public_get(path: str, params: Optional[Dict[str, Any]] = None,
                 timeout: float = 4.0, *, cache_key: Optional[str] = None,
                 ttl: float = 0.0) -> Optional[List[Any]]:
-    """www → aws 双域直连取 OKX 公开数据；全失败返回 `None`（调用方显式降级）。
+    """openapi → www 双域直连取 OKX 公开数据；全失败返回 `None`（调用方显式降级）。
 
     `cache_key` + `ttl`（可选）给**慢变量**用：带 TTL 的接口在一轮里不会重复外呼，
     直接减少 Rubik 限频压力（见 `_RUBIK_MIN_INTERVAL` 的注释）。
     只缓存**成功**结果 —— 失败不缓存，下一轮会重试（不许把一次抖动固化 5 分钟）。
     """
+    validate_public_path(path)
     if cache_key:
         hit = _cache_get(cache_key, ttl)
         if hit is not None:

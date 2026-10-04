@@ -1,4 +1,4 @@
-"""Restricted v8.6.0 -> patched v8.6.1 cutover; never builds or migrates data.
+"""Restricted same-v8.6.1 fork refresh; never builds or migrates data.
 
 Run as root on the approved host, after hosted checks and image pull. The JSON
 manifest is an operator attestation, not a substitute for successful hosted CI.
@@ -31,12 +31,12 @@ BACKUPS = Path("/opt/r20-quantum-trader-backups")
 PROJECT = "r20-quantum-trader"
 SERVICES = ("backend", "gateway")
 NAMES = tuple("astraquant-" + service for service in SERVICES)
-PREVIOUS = "1b332aa58dfc58bfde8bbdaff0faeeb86631313f"
+PREVIOUS = "e4fe084fb67ef4060cf3478744ed2ed79308b893"
 UPSTREAM = "e0b29fef1818e0ff9c6b210eb73234620e276a02"
 PATCH_ID = "council-completion-v1"
 CHECKS = ("state_preservation", "backward_read_write", "helper_tests", "published_compose_smoke",
           "council_regression", "patch_retention")
-OLD_IMAGE = "ghcr.io/jonoka/astra-quant-agent@sha256:3ad4f8e2990fcccd241d8fec133e68962ae78dd6890e8c0cd20a09d6a9f5f226"
+OLD_IMAGE = "ghcr.io/jonoka/astra-quant-agent@sha256:476179f0070987b06d48d6eefa76017ccfc90031de3eb754d60348e3efc3417d"
 IMAGE_RE = r"ghcr\.io/jonoka/astra-quant-agent@sha256:[0-9a-f]{64}"
 WRITABLE = (".env", "data", "logs", "backups", ".archive", "plugins")
 OVERRIDE = "docker-compose.override.yml"
@@ -319,7 +319,7 @@ def db_state(root):
 
 
 def compatible_databases(before, after):
-    """Permit only the reviewed nullable gateway reasoning-token addition."""
+    """Require an exact same-release schema while retaining writable rows."""
     require(set(before) == set(after), "database_set_changed")
     for name, old in before.items():
         require(name in after, "database_removed")
@@ -330,9 +330,7 @@ def compatible_databases(before, after):
             prior = {c[0]: c for c in values["columns"]}
             require(all(columns.get(k) == c for k, c in prior.items()), "database_column_changed")
             extra = {k: c for k, c in columns.items() if k not in prior}
-            require(not extra or (name == "data/astra_gateway.db" and table == "model_calls" and
-                    extra == {"reasoning_tokens": ["reasoning_tokens", "INTEGER", 0, "0", 0]}),
-                    "unknown_database_migration")
+            require(not extra, "unknown_database_migration")
             if name == "data/astra_quant.db" and table != "sqlite_sequence":
                 require(new["tables"][table]["rows"] >= values["rows"], "trading_rows_lost")
         require(new["indexes"] == old["indexes"], "database_index_changed")
@@ -357,16 +355,12 @@ def source_literal(path, name):
 
 
 def gateway_source_compatibility(old, new):
-    """Exact source SQL delta, not a generic additive migration allowance."""
+    """Require byte-equivalent gateway schema and migration declarations."""
     old_schema = source_literal(old, "SCHEMA")
     new_schema = source_literal(new, "SCHEMA")
-    anchor = "  output_tokens INTEGER,\n"
-    require(old_schema.count(anchor) == 1 and
-            new_schema == old_schema.replace(anchor, anchor + "  reasoning_tokens INTEGER DEFAULT 0,\n", 1),
-            "gateway_schema_changed")
+    require(new_schema == old_schema, "gateway_schema_changed")
     prior = source_literal(old, "MIGRATION_COLUMNS")
-    require(source_literal(new, "MIGRATION_COLUMNS") ==
-            (("reasoning_tokens", "INTEGER DEFAULT 0"), *prior), "gateway_migration_changed")
+    require(source_literal(new, "MIGRATION_COLUMNS") == prior, "gateway_migration_changed")
 
 
 def read_session(fd):
@@ -449,9 +443,9 @@ class Upgrade:
         require(image in metadata["RepoDigests"] and metadata["Os"] == "linux" and
                 metadata["Architecture"] == "amd64", "image_digest_platform")
         require(labels["org.opencontainers.image.revision"] == (PREVIOUS if previous else self.release) and
-                labels["org.opencontainers.image.version"] == ("v8.6.0" if previous else "v8.6.1") and
+                labels["org.opencontainers.image.version"] == "v8.6.1" and
                 labels["org.opencontainers.image.source"] == "https://github.com/" +
-                ("0xethanq" if previous else "Jonoka") + "/astra-quant-agent",
+                "Jonoka/astra-quant-agent",
                 "image_source_version")
         if not previous:
             require(labels.get("io.jonoka.astra.upstream-revision") == UPSTREAM and
@@ -900,7 +894,7 @@ def main():
     parser.add_argument("operation", type=Path)
     parser.add_argument("--session-fd", type=int, default=None,
                         help="Inherited descriptor containing an existing session token; never a token argument")
-    parser.add_argument("--previous", action="store_true", help="Verify recovered v8.6.0")
+    parser.add_argument("--previous", action="store_true", help="Verify recovered prior v8.6.1 fork")
     args = parser.parse_args()
     os.umask(0o077)
     try:

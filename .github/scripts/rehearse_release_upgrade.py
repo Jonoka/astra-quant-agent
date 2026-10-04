@@ -1,4 +1,4 @@
-"""Hosted synthetic v8.6.0-to-corrected-v8.6.1 preservation and renderer rehearsal.
+"""Hosted synthetic same-v8.6.1 fork refresh preservation and renderer rehearsal.
 
 No production fixtures, network/model calls, or trading jobs are used.
 """
@@ -318,7 +318,7 @@ with db_manager.get_db() as db:
         verify_prompt_rendering(pl, carried, legacy_library["active_profile_id"], legacy_markers)
         assert (carried / "prompt_library.json").read_bytes() == legacy_bytes
         assert not (carried / "prompt_library.local.json").exists()
-    print("PASS: v8.6.0 -> corrected v8.6.1 state, exact saved risk/ten-asset pool, official baseline/schema refresh, credentials/admin, database backward writer and custom prompt modes")
+    print("PASS: same-v8.6.1 fork refresh, exact saved risk/ten-asset pool, official baseline/schema preservation, credentials/admin, database backward writer and custom prompt modes")
 
 
 if __name__ == "__main__":

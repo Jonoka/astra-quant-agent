@@ -43,6 +43,11 @@ import json
 import os
 import time
 import urllib.request
+
+try:
+    from scripts.okx_public import public_json_get
+except ImportError:                                    # pragma: no cover - script import
+    from okx_public import public_json_get
 from pathlib import Path
 
 from typing import Any, Dict
@@ -147,18 +152,17 @@ def fetch_single_instrument_package(item: Dict[str, Any], *,
     # 1. Ticker
     t_okx0 = time.time()
     try:
-        req = urllib.request.Request(f"https://www.okx.com/api/v5/market/ticker?instId={inst_id}", headers=headers)
-        with urllib.request.urlopen(req, timeout=3) as resp:
-            d = json.loads(resp.read().decode("utf-8"))
-            if d.get("code") == "0" and d.get("data"):
-                t = d["data"][0]
-                pkg["price"] = float(t.get("last", 0))
-                pkg["bidPx"] = float(t.get("bidPx", pkg["price"]) or pkg["price"])
-                pkg["askPx"] = float(t.get("askPx", pkg["price"]) or pkg["price"])
-                op = float(t.get("open24h", 0) or 0)
-                pkg["chg24h"] = round(((pkg["price"] - op) / op * 100) if op > 0 else 0, 2)
-                pkg["vol24h"] = round(float(t.get("vol24h", 0) or 0), 2)
-                pkg["okx_latency_ms"] = max(1, int(round((time.time() - t_okx0) * 1000)))
+        d = public_json_get(f"/api/v5/market/ticker?instId={inst_id}", opener=urllib.request.urlopen,
+                            timeout=3, user_agent=headers["User-Agent"])
+        if d.get("code") == "0" and d.get("data"):
+            t = d["data"][0]
+            pkg["price"] = float(t.get("last", 0))
+            pkg["bidPx"] = float(t.get("bidPx", pkg["price"]) or pkg["price"])
+            pkg["askPx"] = float(t.get("askPx", pkg["price"]) or pkg["price"])
+            op = float(t.get("open24h", 0) or 0)
+            pkg["chg24h"] = round(((pkg["price"] - op) / op * 100) if op > 0 else 0, 2)
+            pkg["vol24h"] = round(float(t.get("vol24h", 0) or 0), 2)
+            pkg["okx_latency_ms"] = max(1, int(round((time.time() - t_okx0) * 1000)))
     except Exception as exc:
         note_failure("okx_ticker", exc)
 
@@ -224,7 +228,7 @@ def fetch_single_instrument_package(item: Dict[str, Any], *,
                         obv -= vols[i]
                 pkg["obv_flow"] = "BULL_FLOW" if obv > 0 else ("BEAR_FLOW" if obv < 0 else "NEUTRAL")
         else:
-            print(f"[AI Brain] ⚠️ {inst_id} 15m K线获取失败（www/aws/CLI 三级容灾均未取回），本包 15M 微观指标降级缺省")
+            print(f"[AI Brain] ⚠️ {inst_id} 15m K线获取失败（openapi/www 双域容灾均未取回），本包 15M 微观指标降级缺省")
     except Exception as exc:
         print(f"[AI Brain] ⚠️ {inst_id} 15m K线处理异常: {exc}")
 
@@ -267,7 +271,7 @@ def fetch_single_instrument_package(item: Dict[str, Any], *,
                     else:
                         pkg["structure_1h"] = "1H_SWING_CHOP"
         else:
-            print(f"[AI Brain] ⚠️ {inst_id} 1H K线获取失败（www/aws/CLI 三级容灾均未取回），1H ATR/RSI/结构字段降级缺省")
+            print(f"[AI Brain] ⚠️ {inst_id} 1H K线获取失败（openapi/www 双域容灾均未取回），1H ATR/RSI/结构字段降级缺省")
     except Exception as exc:
         print(f"[AI Brain] ⚠️ {inst_id} 1H K线处理异常: {exc}")
 
@@ -288,50 +292,46 @@ def fetch_single_instrument_package(item: Dict[str, Any], *,
                 else:
                     pkg["macro_4h"] = "4H_MACRO_RANGE (大级别区间震荡)"
         else:
-            print(f"[AI Brain] ⚠️ {inst_id} 4H K线获取失败（www/aws/CLI 三级容灾均未取回），4H 宏观结构字段降级缺省")
+            print(f"[AI Brain] ⚠️ {inst_id} 4H K线获取失败（openapi/www 双域容灾均未取回），4H 宏观结构字段降级缺省")
     except Exception as exc:
         print(f"[AI Brain] ⚠️ {inst_id} 4H K线处理异常: {exc}")
 
     # 5. Funding Rate & OI
     if item["type"] == "crypto":
         try:
-            req = urllib.request.Request(f"https://www.okx.com/api/v5/public/funding-rate?instId={inst_id}", headers=headers)
-            with urllib.request.urlopen(req, timeout=3) as resp:
-                d = json.loads(resp.read().decode("utf-8"))
-                if d.get("code") == "0" and d.get("data"):
-                    pkg["fundingRate"] = round(float(d["data"][0].get("fundingRate", 0)) * 100, 4)
+            d = public_json_get(f"/api/v5/public/funding-rate?instId={inst_id}", opener=urllib.request.urlopen,
+                                timeout=3, user_agent=headers["User-Agent"])
+            if d.get("code") == "0" and d.get("data"):
+                pkg["fundingRate"] = round(float(d["data"][0].get("fundingRate", 0)) * 100, 4)
         except Exception as exc:
             note_failure("okx_funding_rate", exc)
 
         try:
-            req = urllib.request.Request(f"https://www.okx.com/api/v5/public/open-interest?instType=SWAP&instId={inst_id}", headers=headers)
-            with urllib.request.urlopen(req, timeout=3) as resp:
-                d = json.loads(resp.read().decode("utf-8"))
-                if d.get("code") == "0" and d.get("data"):
-                    usd = float(d["data"][0].get("oiUsd", 0) or 0)
-                    pkg["oiUsd"] = f"{round(usd / 1e8, 2)}亿 U" if usd > 1e8 else f"{round(usd / 1e4, 1)}万 U"
+            d = public_json_get(f"/api/v5/public/open-interest?instType=SWAP&instId={inst_id}", opener=urllib.request.urlopen,
+                                timeout=3, user_agent=headers["User-Agent"])
+            if d.get("code") == "0" and d.get("data"):
+                usd = float(d["data"][0].get("oiUsd", 0) or 0)
+                pkg["oiUsd"] = f"{round(usd / 1e8, 2)}亿 U" if usd > 1e8 else f"{round(usd / 1e4, 1)}万 U"
         except Exception as exc:
             note_failure("okx_open_interest", exc)
 
         if ccy:
             try:
-                req = urllib.request.Request(f"https://www.okx.com/api/v5/rubik/stat/contracts/long-short-account-ratio?ccy={ccy}&period=5m", headers=headers)
-                with urllib.request.urlopen(req, timeout=3) as resp:
-                    d = json.loads(resp.read().decode("utf-8"))
-                    if d.get("code") == "0" and d.get("data") and len(d["data"]) > 0:
-                        pkg["lsRatio"] = float(d["data"][0][1])
+                d = public_json_get(f"/api/v5/rubik/stat/contracts/long-short-account-ratio?ccy={ccy}&period=5m", opener=urllib.request.urlopen,
+                                    timeout=3, user_agent=headers["User-Agent"])
+                if d.get("code") == "0" and d.get("data") and len(d["data"]) > 0:
+                    pkg["lsRatio"] = float(d["data"][0][1])
             except Exception as exc:
                 note_failure("okx_ls_ratio", exc)
 
             try:
-                req = urllib.request.Request(f"https://www.okx.com/api/v5/rubik/stat/taker-volume?ccy={ccy}&instType=CONTRACTS&period=5m", headers=headers)
-                with urllib.request.urlopen(req, timeout=3) as resp:
-                    d = json.loads(resp.read().decode("utf-8"))
-                    if d.get("code") == "0" and d.get("data") and len(d["data"]) > 0:
-                        b_vol = float(d["data"][0][1])
-                        s_vol = float(d["data"][0][2])
-                        net_diff = b_vol - s_vol
-                        pkg["takerNetUsd"] = f"{round(net_diff / 1e4, 1)}万 U"
+                d = public_json_get(f"/api/v5/rubik/stat/taker-volume?ccy={ccy}&instType=CONTRACTS&period=5m", opener=urllib.request.urlopen,
+                                    timeout=3, user_agent=headers["User-Agent"])
+                if d.get("code") == "0" and d.get("data") and len(d["data"]) > 0:
+                    b_vol = float(d["data"][0][1])
+                    s_vol = float(d["data"][0][2])
+                    net_diff = b_vol - s_vol
+                    pkg["takerNetUsd"] = f"{round(net_diff / 1e4, 1)}万 U"
             except Exception as exc:
                 note_failure("okx_taker_volume", exc)
 

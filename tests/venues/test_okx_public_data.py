@@ -64,18 +64,18 @@ class GetFailoverTest(_Base):
             return {"code": "0", "data": ["ok"]} if url.startswith(host_list[-1]) \
                 else {"code": "51001", "msg": "bad"}
         self._open(_behavior)
-        self.assertEqual(self.ad._get("/api/v5/x"), ["ok"])
+        self.assertEqual(self.ad._get("/api/v5/market/ticker"), ["ok"])
         self.assertEqual(len(self.urls), len(host_list), "逐个试到最后一个")
 
     def test_all_hosts_failing_returns_none(self):
         """全部主机失败 ⇒ `None`（**不抛异常、不伪装数据**）。"""
         self._open(RuntimeError("connection refused"))
-        self.assertIsNone(self.ad._get("/api/v5/x", {"q": "1"}))
+        self.assertIsNone(self.ad._get("/api/v5/market/ticker", {"q": "1"}))
         self.assertEqual(len(self.urls), len(list(OKX_HOSTS)), "每个主机都试过")
 
     def test_missing_code_field_is_treated_as_success(self):
         self._open({"data": ["no-code"]})
-        self.assertEqual(self.ad._get("/api/v5/x"), ["no-code"],
+        self.assertEqual(self.ad._get("/api/v5/market/ticker"), ["no-code"],
                          "回包无 code 字段 ⇒ 按成功处理（默认 0）")
 
 

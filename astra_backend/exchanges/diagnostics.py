@@ -27,6 +27,7 @@ from .identity import is_sandbox_environment
 from .registry import venue_credentials, venue_passphrase
 
 OKX_BASE_URL = "https://www.okx.com"
+OKX_PUBLIC_BASE_URLS = ("https://openapi.okx.com", "https://www.okx.com")
 
 
 def _default_http_call(url: str, method: str = "GET", headers: Optional[Dict[str, str]] = None,
@@ -129,12 +130,23 @@ def diagnose_venue_connection(
 def _diagnose_public_ping(venue: str, env: str, caller: Callable, timeout: float) -> Dict[str, Any]:
     t0 = time.monotonic()
     try:
-        base_url = OKX_BASE_URL
         path = "/api/v5/public/time"
-
-        status, data, _ = caller(f"{base_url}{path}", method="GET", timeout=timeout)
+        status, data = 0, {}
+        base_url = OKX_PUBLIC_BASE_URLS[-1]
+        last_error = None
+        for candidate in OKX_PUBLIC_BASE_URLS:
+            base_url = candidate
+            try:
+                status, data, _ = caller(f"{candidate}{path}", method="GET", timeout=timeout)
+            except Exception as exc:
+                last_error = exc
+                continue
+            if status == 200 and str(data.get("code", "0")) == "0":
+                break
+        if last_error is not None and status == 0:
+            raise last_error
         latency = max(1, round((time.monotonic() - t0) * 1000))
-        ok = (status == 200)
+        ok = status == 200 and str(data.get("code", "0")) == "0"
         return {
             "ok": ok,
             "venue": venue,

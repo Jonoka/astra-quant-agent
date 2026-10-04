@@ -93,7 +93,7 @@ class BacktestSummary:
 
 def fetch_okx_candles(inst_id: str, bar: str = "1H", limit: int = 100) -> List[Dict[str, Any]]:
     """Fetch live historical K-line candles via the zero-process 3-level
-    failover service (www.okx.com → aws.okx.com → okx CLI) instead of a
+    failover service (openapi.okx.com → www.okx.com → local math) instead of a
     single hardcoded host."""
     try:
         from market_data_service import fetch_candles

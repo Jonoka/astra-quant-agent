@@ -168,7 +168,7 @@ class PublicRequestTests(unittest.TestCase):
             self.client.ticker("BTC-USDT-SWAP")
         request = urlopen.call_args[0][0]
         self.assertEqual(request.full_url,
-                         "https://www.okx.com/api/v5/market/ticker?instId=BTC-USDT-SWAP")
+                         "https://openapi.okx.com/api/v5/market/ticker?instId=BTC-USDT-SWAP")
         self.assertEqual(request.get_method(), "GET")
         self.assertIsNone(request.data)
 
@@ -187,7 +187,7 @@ class PublicRequestTests(unittest.TestCase):
         with self._urlopen({"data": []}) as urlopen:
             self.client._request("GET", "/api/v5/market/ticker")
         self.assertEqual(urlopen.call_args[0][0].full_url,
-                         "https://www.okx.com/api/v5/market/ticker")
+                         "https://openapi.okx.com/api/v5/market/ticker")
 
 
 class InstrumentsTests(unittest.TestCase):

@@ -62,7 +62,7 @@ OKX 下单**不走**「适配器执行开关」那一族环境旗标：
   `simulated_trading` 位）。因此**不要**用「换域名」的思路理解 OKX 沙盒。
 - **demo 与 live 必须各自创建 API Key**（两个独立三元组），不能共用一个 Key 切档位。
 - 初始验证固定用 `ASTRA_OKX_ENV=demo`，确认只读快照与小额链路正常后再切 `live`。
-- 公共行情的主备域名在适配器内部（`www.okx.com` → `aws.okx.com`），属只读面。
+- 公共行情的主备域名在适配器内部（`openapi.okx.com` → `www.okx.com`），属只读面。
 
 ## 5. 最小下单单位与取整方向
 

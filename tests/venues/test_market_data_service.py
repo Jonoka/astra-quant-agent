@@ -58,7 +58,7 @@ class TestBarNormalization(unittest.TestCase):
         self.assertEqual(seen["limit"], 300)
 
 
-class TestAwsHostFailover(unittest.TestCase):
+class TestOpenApiHostFailover(unittest.TestCase):
     def test_primary_host_down_secondary_serves(self):
         import scripts.market_data_service as mds
 
@@ -76,7 +76,7 @@ class TestAwsHostFailover(unittest.TestCase):
 
             def get(self, url, params=None, timeout=None):
                 self.urls.append(url)
-                if "www.okx.com" in url:
+                if "openapi.okx.com" in url:
                     raise ConnectionError("blocked in region")
                 return FakeResp(url)
 
@@ -84,7 +84,7 @@ class TestAwsHostFailover(unittest.TestCase):
         with patch.object(mds, "get_market_session", return_value=sess):
             data = mds._public_get("/api/v5/market/candles", params={"instId": "X", "bar": "1H", "limit": 3})
         self.assertIsNotNone(data)
-        self.assertTrue(any("aws.okx.com" in u for u in sess.urls))
+        self.assertTrue(any("www.okx.com" in u for u in sess.urls))
 
 
 class TestLocalMathIndicatorFallback(unittest.TestCase):
@@ -116,7 +116,7 @@ class TestLocalMathIndicatorFallback(unittest.TestCase):
 
 
 class TestZeroProcessGuarantee(unittest.TestCase):
-    """US-004 契约：行情容灾链 www→aws→异所→纯 Python，进程派生层已物理删除。
+    """US-004 契约：行情容灾链 openapi→www→异所→纯 Python，进程派生层已物理删除。
 
     律③反钉：这里钉的是「不存在进程层」的架构不变式，不是历史 CLI 行为。
     """

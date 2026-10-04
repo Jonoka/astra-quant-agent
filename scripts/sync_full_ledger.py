@@ -18,6 +18,7 @@ if _REPO_ROOT not in sys.path:
 
 import scripts.okx_rest as okx_rest
 import scripts.okx_runtime as okx_runtime
+from scripts.okx_public import public_json_get
 
 WORKSPACE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 #: ⚠️ `ASTRA_DATA_DIR` 是**测试沙箱专用环境变量**（由 tests/config_sandbox.isolate_config
@@ -213,11 +214,9 @@ def get_ct_val(inst_name):
         return _CTVAL_CACHE[inst_id]
     try:
         import urllib.request
-        req = urllib.request.Request(
-            f"https://www.okx.com/api/v5/public/instruments?instType=SWAP&instId={inst_id}",
-            headers={"User-Agent": "Mozilla/5.0"})
-        with urllib.request.urlopen(req, timeout=4) as resp:
-            payload = json.loads(resp.read().decode("utf-8"))
+        payload = public_json_get(
+            f"/api/v5/public/instruments?instType=SWAP&instId={inst_id}",
+            opener=urllib.request.urlopen, timeout=4, user_agent="Mozilla/5.0")
         rows = payload.get("data") or []
         ct = float(rows[0].get("ctVal", 1.0) or 1.0) if rows else 1.0
     except Exception:

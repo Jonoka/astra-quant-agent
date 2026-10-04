@@ -27,6 +27,11 @@ import time
 from datetime import datetime, timedelta, timezone
 import subprocess
 import urllib.request
+
+try:
+    from scripts.okx_public import public_json_get
+except ImportError:                                    # pragma: no cover - script import
+    from okx_public import public_json_get
 from typing import Dict, Any, List, Optional
 
 from scripts.factors.defaults import build_default_factors
@@ -70,21 +75,20 @@ def compute_instrument_factors(item: Dict[str, Any], smart_money_pool: Dict[str,
 
     # 1. Ticker & Depth (Orderbook)
     try:
-        req = urllib.request.Request(f"https://www.okx.com/api/v5/market/ticker?instId={inst_id}", headers=headers)
-        with urllib.request.urlopen(req, timeout=3) as resp:
-            d = json.loads(resp.read().decode("utf-8"))
-            if d.get("code") == "0" and d.get("data"):
-                t = d["data"][0]
-                factors["price"] = safe_float(t.get("last"))
-                factors["microstructure"]["bid_px"] = safe_float(t.get("bidPx", factors["price"]))
-                factors["microstructure"]["ask_px"] = safe_float(t.get("askPx", factors["price"]))
-                op = safe_float(t.get("open24h", 0))
-                factors["chg24h"] = round(((factors["price"] - op) / op * 100) if op > 0 else 0.0, 2)
-                
-                # Spread
-                if factors["microstructure"]["ask_px"] > 0 and factors["price"] > 0:
-                    spread = factors["microstructure"]["ask_px"] - factors["microstructure"]["bid_px"]
-                    factors["microstructure"]["spread_pct"] = round(spread / factors["price"] * 100, 4)
+        d = public_json_get(f"/api/v5/market/ticker?instId={inst_id}", opener=urllib.request.urlopen,
+                            timeout=3, user_agent=headers["User-Agent"])
+        if d.get("code") == "0" and d.get("data"):
+            t = d["data"][0]
+            factors["price"] = safe_float(t.get("last"))
+            factors["microstructure"]["bid_px"] = safe_float(t.get("bidPx", factors["price"]))
+            factors["microstructure"]["ask_px"] = safe_float(t.get("askPx", factors["price"]))
+            op = safe_float(t.get("open24h", 0))
+            factors["chg24h"] = round(((factors["price"] - op) / op * 100) if op > 0 else 0.0, 2)
+
+            # Spread
+            if factors["microstructure"]["ask_px"] > 0 and factors["price"] > 0:
+                spread = factors["microstructure"]["ask_px"] - factors["microstructure"]["bid_px"]
+                factors["microstructure"]["spread_pct"] = round(spread / factors["price"] * 100, 4)
     except Exception:
         pass
 
@@ -107,7 +111,7 @@ def compute_instrument_factors(item: Dict[str, Any], smart_money_pool: Dict[str,
             closes_15m, _h15, _l15, _v15 = compute_15m_indicators(
                 raw_candles, factors, safe_float=safe_float)
         else:
-            print(f"[Factor] ⚠️ {inst_id} 15m K线获取不足15根（www/aws/CLI 三级容灾均未取回），15M 因子降级缺省")
+            print(f"[Factor] ⚠️ {inst_id} 15m K线获取不足15根（openapi/www 双域容灾均未取回），15M 因子降级缺省")
             # ★「不许假数据」：降级缺省 ≠ 留着默认值（rsi_14=50.0 会被打分读成中性偏多加 15 分）
             mark_15m_missing(factors)
     except Exception as exc:
@@ -136,7 +140,7 @@ def compute_instrument_factors(item: Dict[str, Any], smart_money_pool: Dict[str,
                 if factors["price"] > 0:
                     factors["volatility_channel"]["atr_1h_pct"] = round(atr_1h / factors["price"] * 100, 2)
         else:
-            print(f"[Factor] ⚠️ {inst_id} 1H K线获取不足15根（www/aws/CLI 三级容灾均未取回），1H ATR 字段降级缺省")
+            print(f"[Factor] ⚠️ {inst_id} 1H K线获取不足15根（openapi/www 双域容灾均未取回），1H ATR 字段降级缺省")
     except Exception as exc:
         print(f"[Factor] ⚠️ {inst_id} 1H K线处理异常: {exc}")
 

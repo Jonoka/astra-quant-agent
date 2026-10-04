@@ -45,7 +45,7 @@ class PublicGetTests(unittest.TestCase):
         sess = MagicMock()
         sess.get.return_value = _http(payload={"code": "0", "data": [1]})
         with patch.object(mds, "get_market_session", return_value=sess):
-            out = mds._public_get("/api/v5/x")
+            out = mds._public_get("/api/v5/market/ticker")
         self.assertEqual(out["data"], [1])
         self.assertTrue(sess.get.call_args.args[0].startswith(mds.OKX_PUBLIC_HOSTS[0]))
 
@@ -56,7 +56,7 @@ class PublicGetTests(unittest.TestCase):
             _http(status=200, payload={"code": "0", "data": ["sec"]}),
         ]
         with patch.object(mds, "get_market_session", return_value=sess):
-            out = mds._public_get("/api/v5/x")
+            out = mds._public_get("/api/v5/market/ticker")
         self.assertEqual(out["data"], ["sec"])
         self.assertTrue(sess.get.call_args_list[1].args[0].startswith(mds.OKX_PUBLIC_HOSTS[1]))
 
@@ -67,7 +67,7 @@ class PublicGetTests(unittest.TestCase):
             _http(status=200, payload={"code": "0", "data": ["sec"]}),
         ]
         with patch.object(mds, "get_market_session", return_value=sess):
-            out = mds._public_get("/api/v5/x")
+            out = mds._public_get("/api/v5/market/ticker")
         self.assertEqual(out["data"], ["sec"])
 
     def test_secondary_host_tried_when_primary_has_bad_json(self):
@@ -77,26 +77,26 @@ class PublicGetTests(unittest.TestCase):
             _http(status=200, payload={"code": "0", "data": ["sec"]}),
         ]
         with patch.object(mds, "get_market_session", return_value=sess):
-            out = mds._public_get("/api/v5/x")
+            out = mds._public_get("/api/v5/market/ticker")
         self.assertEqual(out["data"], ["sec"])
 
     def test_all_hosts_failing_yields_none(self):
         sess = MagicMock()
         sess.get.side_effect = [RuntimeError("p-drop"), RuntimeError("s-drop")]
         with patch.object(mds, "get_market_session", return_value=sess):
-            self.assertIsNone(mds._public_get("/api/v5/x"))
+            self.assertIsNone(mds._public_get("/api/v5/market/ticker"))
 
     def test_non_zero_code_yields_none(self):
         sess = MagicMock()
         sess.get.return_value = _http(payload={"code": "50001", "msg": "err"})
         with patch.object(mds, "get_market_session", return_value=sess):
-            self.assertIsNone(mds._public_get("/api/v5/x"))
+            self.assertIsNone(mds._public_get("/api/v5/market/ticker"))
 
     def test_non_dict_json_payload_yields_none(self):
         sess = MagicMock()
         sess.get.return_value = _http(payload=["not", "a", "dict"])
         with patch.object(mds, "get_market_session", return_value=sess):
-            self.assertIsNone(mds._public_get("/api/v5/x"))
+            self.assertIsNone(mds._public_get("/api/v5/market/ticker"))
 
 
 class PublicPostTests(unittest.TestCase):
@@ -104,14 +104,14 @@ class PublicPostTests(unittest.TestCase):
         sess = MagicMock()
         sess.post.return_value = _http(payload={"code": "0", "data": ["ok"]})
         with patch.object(mds, "get_market_session", return_value=sess):
-            out = mds._public_post("/api/v5/x", {"a": 1})
+            out = mds._public_post("/api/v5/aigc/mcp/indicators", {"a": 1})
         self.assertEqual(out["data"], ["ok"])
 
     def test_a_json_content_type_header_is_sent(self):
         sess = MagicMock()
         sess.post.return_value = _http(payload={"code": "0", "data": []})
         with patch.object(mds, "get_market_session", return_value=sess):
-            mds._public_post("/api/v5/x", {"a": 1})
+            mds._public_post("/api/v5/aigc/mcp/indicators", {"a": 1})
         self.assertEqual(sess.post.call_args.kwargs["headers"]["Content-Type"],
                          "application/json")
 

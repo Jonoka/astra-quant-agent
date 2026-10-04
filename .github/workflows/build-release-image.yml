@@ -14,7 +14,7 @@ env:
   SOURCE_VERSION: v8.6.1
   UPSTREAM_REPOSITORY: 0xethanq/astra-quant-agent
   UPSTREAM_SHA: e0b29fef1818e0ff9c6b210eb73234620e276a02
-  PREVIOUS_SHA: 1b332aa58dfc58bfde8bbdaff0faeeb86631313f
+  PREVIOUS_SHA: e4fe084fb67ef4060cf3478744ed2ed79308b893
 
 concurrency:
   group: astra-release-image
@@ -44,7 +44,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          case "$GITHUB_REF" in refs/heads/codex/deploy|refs/heads/codex/council-completion-fix) ;; *) exit 1 ;; esac
+          case "$GITHUB_REF" in refs/heads/codex/deploy|refs/heads/codex/okx-public-domains) ;; *) exit 1 ;; esac
           test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
           git fetch "https://github.com/$UPSTREAM_REPOSITORY.git" "refs/tags/$SOURCE_VERSION:refs/tags/$SOURCE_VERSION"
           git merge-base --is-ancestor "$SOURCE_VERSION^{commit}" "$UPSTREAM_SHA"
@@ -57,10 +57,10 @@ jobs:
           '
           python ../ci/.github/scripts/verify_deployment_source.py . "$UPSTREAM_SHA" "$SOURCE_SHA"
 
-      - name: Checkout prior release for synthetic upgrade fixtures
+      - name: Checkout deployed fork for same-release compatibility fixtures
         uses: actions/checkout@v4
         with:
-          repository: ${{ env.UPSTREAM_REPOSITORY }}
+          repository: ${{ env.SOURCE_REPOSITORY }}
           ref: ${{ env.PREVIOUS_SHA }}
           fetch-depth: 1
           path: previous
@@ -87,7 +87,7 @@ jobs:
         working-directory: validation
         shell: bash
         run: |
-          for target in tests/ops/test_brain_dispatch.py tests/extraction/test_brain_dispatch_extraction.py tests/trading/test_cycle_brain_stage.py tests/core/test_council_manager.py tests/core/test_debate_council_verdict.py tests/core/test_account_baseline.py tests/core/test_router_risk.py tests/ops/test_gateway_cache_stats.py tests/trading/test_entry_diagnostics_formatting.py tests/ops/test_migrate_r20_to_astra.py tests/core/test_admin_auth.py tests/llm/test_prompt_library_two_files.py tests/llm/test_prompt_source_of_truth.py tests/trading/test_signal_decision_doctrine.py tests/trading/test_signal_subfactors.py tests/trading/test_position_exit_failure_branches.py tests/llm/test_prompt_cache_prefix_contract.py tests/llm/test_llm_caching_enhancements.py tests/core/test_risk_config.py tests/trading/test_risk_reward_structure.py tests/ops/test_instrument_pool.py tests/venues/test_instrument_pool_universe.py; do
+          for target in .github/scripts/test_verify_deployment_source.py tests/ops/test_brain_dispatch.py tests/extraction/test_brain_dispatch_extraction.py tests/trading/test_cycle_brain_stage.py tests/core/test_council_manager.py tests/core/test_debate_council_verdict.py tests/core/test_account_baseline.py tests/core/test_router_risk.py tests/ops/test_gateway_cache_stats.py tests/trading/test_entry_diagnostics_formatting.py tests/ops/test_migrate_r20_to_astra.py tests/core/test_admin_auth.py tests/llm/test_prompt_library_two_files.py tests/llm/test_prompt_source_of_truth.py tests/trading/test_signal_decision_doctrine.py tests/trading/test_signal_subfactors.py tests/trading/test_position_exit_failure_branches.py tests/llm/test_prompt_cache_prefix_contract.py tests/llm/test_llm_caching_enhancements.py tests/core/test_risk_config.py tests/trading/test_risk_reward_structure.py tests/ops/test_instrument_pool.py tests/venues/test_instrument_pool_universe.py tests/venues/test_okx_public_data.py tests/venues/test_okx_rest.py tests/venues/test_market_data_service.py tests/venues/test_okx_public_domains.py tests/core/test_okx_client.py tests/core/test_news_sentiment_harvester.py tests/ops/test_factor_library.py tests/ops/test_factors_smart_money.py tests/trading/test_okx_quant_factors.py tests/trading/test_factor_assembly_paths.py; do
             python - "$target" <<'PY'
           from pathlib import Path
           import sys
@@ -104,7 +104,7 @@ jobs:
       - name: Rehearse encrypted legacy state and environment migration
         run: python ci/.github/scripts/rehearse_release_migration.py validation
 
-      - name: Rehearse prior release state and custom prompt preservation
+      - name: Rehearse deployed fork state and custom prompt preservation
         run: python ci/.github/scripts/rehearse_release_upgrade.py validation previous
 
       - name: Verify runtime upgrade helper

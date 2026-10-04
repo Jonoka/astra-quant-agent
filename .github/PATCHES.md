@@ -4,6 +4,37 @@ The deployment branch is `codex/deploy`; `main` follows upstream without local
 application fixes. Development changes use separate `codex/*` branches before
 integration into the deployment line.
 
+## okx-public-domains-v1
+
+The retained v8.6.1 deployment fork uses `https://openapi.okx.com` as the
+ordered public market host and `https://www.okx.com` as its fallback. The
+retired AWS host is absent from active unsigned market paths. This same-release
+patch preserves private/authenticated endpoints, credentials, demo/live mode,
+timeouts, parsers, caches, rate limits and missing-data/error propagation.
+
+Owned application files are the OKX client/exchange/diagnostic adapters,
+`scripts/okx_public.py`, market, factor, trader, ledger, news and backtest
+consumers, their README comment, and the focused public-domain and market
+fallback regressions. The hosted source guard enumerates this exact reviewed
+delta together with `council-completion-v1`; it rejects any other application
+file relative to upstream `e0b29fef1818e0ff9c6b210eb73234620e276a02`.
+
+The release workflow builds the actual fork commit from `GITHUB_SHA`, and its
+previous compatibility fixture is the deployed fork commit
+`e4fe084fb67ef4060cf3478744ed2ed79308b893` with image
+`ghcr.io/jonoka/astra-quant-agent@sha256:476179f0070987b06d48d6eefa76017ccfc90031de3eb754d60348e3efc3417d`.
+Both sides remain v8.6.1 and gateway/database schemas and migrations must be
+byte-equivalent; only writable records may advance during recovery.
+
+Required hosted application suites include
+`tests/venues/test_okx_public_domains.py`,
+`tests/venues/test_market_data_service.py`,
+`tests/venues/test_okx_public_data.py`, `tests/core/test_okx_client.py`,
+`tests/core/test_news_sentiment_harvester.py`,
+`tests/ops/test_factors_smart_money.py`, and the retained council and private
+authentication/state suites. Public tests must exercise actual primary and
+fallback requests and downstream returned data rather than constants.
+
 ## council-completion-v1
 
 Upstream through main `e0b29fef1818e0ff9c6b210eb73234620e276a02` (v8.6.1)

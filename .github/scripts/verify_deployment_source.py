@@ -7,7 +7,37 @@ import re
 import subprocess
 import sys
 
-APPLICATION_PATCH = {"scripts/brain/dispatch.py", "tests/ops/test_brain_dispatch.py"}
+# Reviewed application delta for the same-v8.6.1 public OKX host patch.  The
+# source guard is deliberately exact so an unrelated application edit cannot
+# enter a release image through a workflow-only review.
+APPLICATION_PATCH = {
+    "astra_backend/exchanges/okx.py",
+    "astra_backend/exchanges/diagnostics.py",
+    "astra_backend/okx_client.py",
+    "deploy/install.sh",
+    "docs/exchange_support_matrix.md",
+    "env.example",
+    "scripts/README.md",
+    "scripts/backtest_engine.py",
+    "scripts/brain/dispatch.py",
+    "scripts/brain/packages.py",
+    "scripts/factor_library.py",
+    "scripts/factors/okx_quant_factors.py",
+    "scripts/factors/smart_money.py",
+    "scripts/market_data_service.py",
+    "scripts/news_sentiment_harvester.py",
+    "scripts/okx_public.py",
+    "scripts/sync_full_ledger.py",
+    "scripts/trader/factors.py",
+    "scripts/trader/circuit_guard.py",
+    "tests/ops/test_brain_dispatch.py",
+    "tests/core/test_okx_client.py",
+    "tests/venues/test_market_data_service.py",
+    "tests/venues/test_market_data_service_tails.py",
+    "tests/venues/test_exchange_diagnostics_tails.py",
+    "tests/venues/test_okx_public_data.py",
+    "tests/venues/test_okx_public_domains.py",
+}
 
 
 def verify(source: Path, upstream: str, revision: str) -> None:

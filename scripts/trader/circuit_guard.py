@@ -44,7 +44,7 @@ from typing import Tuple
 
 def check_black_swan_sentinel(*, fetch_candles_direct, news_sentiment_file: str) -> Tuple[bool, str]:
     """Minute-level Black Swan Sentinel, driven by the unified V5 REST public
-    market feed (market_data_service www→aws dual-domain + alt-venue fallback, 零凭证可读).
+    market feed (market_data_service openapi→www dual-domain + alt-venue fallback, 零凭证可读).
 
     US-014 前置收尾（归因：3137c40/09fba6f 将 smartmoney/news CLI 信号面缺失化后，
     新闻模式熔断随之休眠）：黑天鹅熔断改由此公共行情路径**复活**，并按

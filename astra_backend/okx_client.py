@@ -1,11 +1,11 @@
 """Small native OKX REST client; public endpoints work without credentials."""
 from __future__ import annotations
-import json
 from typing import Any
 from urllib.parse import urlencode
-from urllib.request import Request, urlopen
+from urllib.request import urlopen
 from scripts import okx_rest
 from scripts.okx_runtime import OKXEnvironment, current_environment
+from scripts.okx_public import public_json_get
 
 
 class OKXClient:
@@ -23,14 +23,8 @@ class OKXClient:
         method = method.upper()
         query = urlencode(params) if method == "GET" else ""
         request_path = path + (f"?{query}" if query else "")
-        url = f"{self.base_url}{request_path}"
-        body = json.dumps(params, separators=(",", ":")).encode("utf-8") if method != "GET" else None
-        headers = {"User-Agent": "ASTRA-Standalone/6.6.2"}
-        if body:
-            headers["Content-Type"] = "application/json"
-        req = Request(url, data=body, headers=headers, method=method)
-        with urlopen(req, timeout=10) as response:
-            payload = json.loads(response.read().decode("utf-8"))
+        payload = public_json_get(request_path, opener=urlopen, timeout=10,
+                                  user_agent="ASTRA-Standalone/6.6.2")
         if payload.get("code") not in (None, "0", 0):
             raise RuntimeError(payload.get("msg", "OKX request failed"))
         return payload.get("data", payload)

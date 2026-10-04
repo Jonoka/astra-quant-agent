@@ -13,7 +13,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Require deployment branch
-        run: test "$GITHUB_REF" = refs/heads/codex/deploy
+        run: |
+          case "$GITHUB_REF" in refs/heads/codex/deploy|refs/heads/codex/okx-public-domains) ;; *) exit 1 ;; esac
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'

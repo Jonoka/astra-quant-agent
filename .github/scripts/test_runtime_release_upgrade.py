@@ -31,32 +31,24 @@ class RuntimeUpgradeTests(unittest.TestCase):
         obj.state = {"extras": []}
         return obj
 
-    def test_only_reviewed_gateway_reasoning_column_allowed(self):
+    def test_same_release_gateway_schema_must_remain_exact(self):
         before = {'data/astra_gateway.db': {'tables': {'model_calls': {
             'columns': [['id', 'INTEGER', 0, None, 1]], 'rows': 1}}, 'indexes': []}}
         after = copy.deepcopy(before)
+        upgrade.compatible_databases(before, after)
         columns = after['data/astra_gateway.db']['tables']['model_calls']['columns']
         columns.append(['reasoning_tokens', 'INTEGER', 0, '0', 0])
-        upgrade.compatible_databases(before, after)
-        upgrade.compatible_databases(after, after)  # Previous-version recovery keeps new column.
-        for bad in (['reasoning_tokens', 'INTEGER', 1, '0', 0],
-                    ['reasoning_tokens', 'TEXT', 0, '0', 0],
-                    ['reasoning_tokens', 'INTEGER', 0, None, 0]):
-            columns[-1] = bad
-            with self.assertRaisesRegex(upgrade.GateError, 'unknown_database_migration'):
-                upgrade.compatible_databases(before, after)
+        with self.assertRaisesRegex(upgrade.GateError, 'unknown_database_migration'):
+            upgrade.compatible_databases(before, after)
 
     def test_gateway_source_contract_rejects_other_sql_or_migrations(self):
         old, new = self.root / 'old.py', self.root / 'new.py'
         schema = 'CREATE TABLE model_calls (\n  output_tokens INTEGER,\n  total_tokens INTEGER\n);'
         migrations = (('cached_tokens', 'INTEGER'),)
         old.write_text('SCHEMA = ' + repr(schema) + '\nMIGRATION_COLUMNS = ' + repr(migrations))
-        reviewed = schema.replace('  output_tokens INTEGER,\n',
-                                  '  output_tokens INTEGER,\n  reasoning_tokens INTEGER DEFAULT 0,\n')
-        new.write_text('SCHEMA = ' + repr(reviewed) + '\nMIGRATION_COLUMNS = ' +
-                       repr((('reasoning_tokens', 'INTEGER DEFAULT 0'), *migrations)))
+        new.write_text('SCHEMA = ' + repr(schema) + '\nMIGRATION_COLUMNS = ' + repr(migrations))
         upgrade.gateway_source_compatibility(old, new)
-        new.write_text(new.read_text().replace('DEFAULT 0', 'DEFAULT 1'))
+        new.write_text('SCHEMA = ' + repr(schema + '\n-- changed') + '\nMIGRATION_COLUMNS = ' + repr(migrations))
         with self.assertRaisesRegex(upgrade.GateError, 'gateway_schema_changed'):
             upgrade.gateway_source_compatibility(old, new)
 
@@ -95,6 +87,20 @@ class RuntimeUpgradeTests(unittest.TestCase):
             with patch.object(upgrade, 'run', return_value=upgrade.json.dumps([changed]).encode()), \
                     self.assertRaisesRegex(upgrade.GateError, 'image_patch_provenance'):
                 obj.image_metadata()
+
+    def test_previous_image_metadata_is_deployed_fork_same_release(self):
+        obj = self.operator()
+        obj.image = 'ghcr.io/jonoka/astra-quant-agent@sha256:' + 'b' * 64
+        obj.release = 'c' * 40
+        labels = {
+            'org.opencontainers.image.revision': upgrade.PREVIOUS,
+            'org.opencontainers.image.version': 'v8.6.1',
+            'org.opencontainers.image.source': 'https://github.com/Jonoka/astra-quant-agent',
+        }
+        metadata = {'Config': {'Labels': labels}, 'RepoDigests': [upgrade.OLD_IMAGE],
+                    'Os': 'linux', 'Architecture': 'amd64', 'Id': 'old-image-id'}
+        with patch.object(upgrade, 'run', return_value=upgrade.json.dumps([metadata]).encode()):
+            self.assertEqual(obj.image_metadata(previous=True), 'old-image-id')
 
     def test_stage_validates_archive_pin_and_traversal_before_writing(self):
         archive = self.root / 'source.tar'

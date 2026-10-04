@@ -11,7 +11,7 @@ from urllib.request import Request, urlopen
 
 from .base import BaseExchangeAdapter, ExchangeCapabilities, InstrumentSpec, canonical_base
 
-OKX_HOSTS = ("https://www.okx.com", "https://aws.okx.com")
+from scripts.okx_public import OKX_PUBLIC_HOSTS as OKX_HOSTS, validate_public_path
 
 
 class OKXPublicAdapter(BaseExchangeAdapter):
@@ -53,6 +53,7 @@ class OKXPublicAdapter(BaseExchangeAdapter):
     def _get(self, path: str, params: Optional[Dict[str, Any]] = None,
              timeout: float = 4.0) -> Any:
         """返回 V5 data 数组；双域名逐一试。"""
+        validate_public_path(path)
         query = urlencode(params or {})
         url_path = path + (f"?{query}" if query else "")
         for host in OKX_HOSTS:

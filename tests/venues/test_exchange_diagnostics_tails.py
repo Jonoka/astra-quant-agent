@@ -144,6 +144,13 @@ class ExchangeDiagnosticsTailsTests(unittest.TestCase):
         self.assertEqual(res["mode"], "network_error")
         self.assertIn("TimeoutError", res["message"])
 
+    def test_diagnose_public_ping_falls_back_after_primary_exception(self):
+        caller = MagicMock(side_effect=[TimeoutError("primary"),
+                                        (200, {"code": "0", "data": [{"ts": "1"}]}, {})])
+        res = _diagnose_public_ping("okx", "live", caller, timeout=5.0)
+        self.assertTrue(res["ok"])
+        self.assertEqual(caller.call_count, 2)
+
     # -------------------------------------------------------------------------
     # 4. 私有鉴权分支报错解析 (_diagnose_okx)
     # -------------------------------------------------------------------------

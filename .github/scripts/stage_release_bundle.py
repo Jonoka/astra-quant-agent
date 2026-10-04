@@ -69,6 +69,7 @@ def extract(archive, destination, pin):
 def source_identity(evidence):
     release = evidence['SOURCE_SHA']
     require(re.fullmatch(r'[0-9a-f]{40}', release) and release not in (PREVIOUS, UPSTREAM) and
+            evidence.get('GITHUB_SHA') == release and
             evidence['PREVIOUS_SHA'] == PREVIOUS and evidence['UPSTREAM_SHA'] == UPSTREAM and
             evidence['SOURCE_REPOSITORY'] == 'Jonoka/astra-quant-agent' and
             evidence['UPSTREAM_REPOSITORY'] == '0xethanq/astra-quant-agent' and

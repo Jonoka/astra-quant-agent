@@ -61,12 +61,13 @@ class RuntimeUpgradeTests(unittest.TestCase):
             upgrade.gateway_source_compatibility(old, new)
 
     def test_stage_identity_uses_corrected_fork_sha_and_pinned_ancestor(self):
-        evidence = {'SOURCE_SHA': 'a' * 40, 'PREVIOUS_SHA': upgrade.PREVIOUS,
+        evidence = {'SOURCE_SHA': 'a' * 40, 'GITHUB_SHA': 'a' * 40, 'PREVIOUS_SHA': upgrade.PREVIOUS,
                     'UPSTREAM_SHA': upgrade.UPSTREAM, 'SOURCE_REPOSITORY': 'Jonoka/astra-quant-agent',
                     'UPSTREAM_REPOSITORY': '0xethanq/astra-quant-agent', 'SOURCE_VERSION': 'v8.6.1',
                     'platform': 'linux/amd64'}
         self.assertEqual(staging.source_identity(evidence), 'a' * 40)
-        for key, bad in (('SOURCE_SHA', upgrade.UPSTREAM), ('UPSTREAM_SHA', 'b' * 40),
+        for key, bad in (('SOURCE_SHA', upgrade.UPSTREAM), ('GITHUB_SHA', 'b' * 40),
+                         ('UPSTREAM_SHA', 'b' * 40),
                          ('SOURCE_REPOSITORY', '0xethanq/astra-quant-agent')):
             changed = {**evidence, key: bad}
             with self.assertRaisesRegex(Exception, 'source_identity'):

@@ -97,7 +97,7 @@ class ListingGateTest(unittest.TestCase):
         self.assertTrue(chk.ok)
         self.assertIsNone(chk.reason)
         self.assertEqual(chk.source, "fresh")
-        self.assertIn("www.okx.com", net.requests[0].full_url)
+        self.assertIn("openapi.okx.com", net.requests[0].full_url)
         self.assertNotIn("x-simulated-trading", net.requests[0].headers)
 
     def test_02_okx_delisted_reject(self):
@@ -115,7 +115,7 @@ class ListingGateTest(unittest.TestCase):
         self.assertIn("沙盒未上市", chk.reason)
         headers = {k.lower(): v for k, v in net.requests[0].headers.items()}
         self.assertEqual(headers.get("x-simulated-trading"), "1")
-        # demo 与 live 同域（env_profiles 契约）
+        # demo 目录保留 env_profiles 域名与模拟头
         self.assertIn("www.okx.com", net.requests[0].full_url)
 
     def test_08_ttl_cache_no_second_call(self):

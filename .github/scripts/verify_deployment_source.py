@@ -13,6 +13,7 @@ import sys
 APPLICATION_PATCH = {
     "astra_backend/exchanges/okx.py",
     "astra_backend/exchanges/diagnostics.py",
+    "astra_backend/exchanges/listing.py",
     "astra_backend/okx_client.py",
     "deploy/install.sh",
     "docs/exchange_support_matrix.md",
@@ -32,6 +33,8 @@ APPLICATION_PATCH = {
     "scripts/trader/circuit_guard.py",
     "tests/ops/test_brain_dispatch.py",
     "tests/core/test_okx_client.py",
+    "tests/core/test_exchange_listing_directory.py",
+    "tests/core/test_listing_gate.py",
     "tests/venues/test_market_data_service.py",
     "tests/venues/test_market_data_service_tails.py",
     "tests/venues/test_exchange_diagnostics_tails.py",

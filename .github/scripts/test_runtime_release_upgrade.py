@@ -331,7 +331,7 @@ class RuntimeUpgradeTests(unittest.TestCase):
             with self.assertRaisesRegex(upgrade.GateError, "session_descriptor"):
                 upgrade.read_session(fd)
 
-    def test_no_session_still_checks_local_and_public_auth_protection(self):
+    def test_both_same_release_modes_check_v861_and_native_auth_protection(self):
         obj = self.operator()
         obj.session = None
         calls = []
@@ -345,12 +345,14 @@ class RuntimeUpgradeTests(unittest.TestCase):
                 return {"initialized": True}
             self.assertEqual(expected, 401)
             return {}
-        with patch.object(upgrade, "request", side_effect=response):
-            result = obj.endpoints(False)
+        for previous in (False, True):
+            with self.subTest(previous=previous), \
+                    patch.object(upgrade, "request", side_effect=response):
+                result = obj.endpoints(previous)
         self.assertEqual(result["authenticated_session_probe"], "unexercised_no_supplied_session")
         self.assertIsNone(result["authenticated_identity"])
         protected = [c for c in calls if c[1].endswith("/auth/me")]
-        self.assertEqual(len(protected), 2)
+        self.assertEqual(len(protected), 4)
         self.assertTrue(all(c[2] is None and c[3] == 401 for c in protected))
 
     def test_supplied_session_is_checked_but_never_persisted(self):

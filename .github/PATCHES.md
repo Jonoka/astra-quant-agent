@@ -29,11 +29,20 @@ byte-equivalent; only writable records may advance during recovery.
 Required hosted application suites include
 `tests/venues/test_okx_public_domains.py`,
 `tests/venues/test_market_data_service.py`,
+`tests/venues/test_market_data_service_tails.py`,
+`tests/venues/test_exchange_diagnostics_tails.py`,
+`tests/core/test_exchange_listing_directory.py`, `tests/core/test_listing_gate.py`,
+`tests/ops/test_brain_packages.py`,
 `tests/venues/test_okx_public_data.py`, `tests/core/test_okx_client.py`,
 `tests/core/test_news_sentiment_harvester.py`,
 `tests/ops/test_factors_smart_money.py`, and the retained council and private
 authentication/state suites. Public tests must exercise actual primary and
 fallback requests and downstream returned data rather than constants.
+
+The live unsigned listing directory follows the shared hosts; the demo directory
+retains its original environment URL and simulation header. The runtime endpoint
+gate requires v8.6.1 for both the candidate and previous fork, with a regression
+covering preflight/recovery version and native authentication protection.
 
 ## council-completion-v1
 

@@ -151,6 +151,17 @@ class ExchangeDiagnosticsTailsTests(unittest.TestCase):
         self.assertTrue(res["ok"])
         self.assertEqual(caller.call_count, 2)
 
+    def test_final_network_failure_is_reported_for_the_fallback_host(self):
+        caller = MagicMock(side_effect=[(503, {}, {}), TimeoutError("fallback")])
+        res = _diagnose_public_ping("okx", "live", caller, timeout=5.0)
+        self.assertFalse(res["ok"])
+        self.assertEqual(res["mode"], "network_error")
+        self.assertEqual(res["details"]["error_type"], "TimeoutError")
+        self.assertEqual([call.args[0] for call in caller.call_args_list], [
+            "https://openapi.okx.com/api/v5/public/time",
+            "https://www.okx.com/api/v5/public/time",
+        ])
+
     # -------------------------------------------------------------------------
     # 4. 私有鉴权分支报错解析 (_diagnose_okx)
     # -------------------------------------------------------------------------

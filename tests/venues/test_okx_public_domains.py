@@ -60,12 +60,15 @@ class PublicDomainBehaviorTests(unittest.TestCase):
         self.assertEqual(payload, {"code": "0", "data": []})
 
     def test_private_and_absolute_paths_are_rejected_before_network(self):
-        with patch("scripts.okx_public.Request") as request:
-            with self.assertRaises(ValueError):
-                okx_public.public_json_get(
-                    "https://www.okx.com/api/v5/account/balance",
-                    opener=lambda *_a, **_k: None, timeout=1, user_agent="test")
-            request.assert_not_called()
+        for path in ("/api/v5/account/balance", "/api/v5/trade/order",
+                     "https://www.okx.com/api/v5/market/ticker",
+                     "//www.okx.com/api/v5/market/ticker",
+                     "/api/v5/market/../account/balance"):
+            with self.subTest(path=path), patch("urllib.request.urlopen") as opener:
+                with self.assertRaises(ValueError):
+                    okx_public.public_json_get(path, opener=opener,
+                                               timeout=1, user_agent="test")
+                opener.assert_not_called()
 
 
 class BackendPublicFailureTests(unittest.TestCase):

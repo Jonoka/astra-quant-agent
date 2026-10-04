@@ -56,6 +56,37 @@ class NormTest(unittest.TestCase):
 
 
 class FetchDirectoryTest(unittest.TestCase):
+    def test_live_primary_failure_uses_www_without_signed_or_demo_headers(self):
+        calls = []
+
+        def opener(req, timeout):
+            calls.append((req.full_url, dict(req.headers), timeout))
+            if len(calls) == 1:
+                raise TimeoutError("primary unavailable")
+            return _Resp({"data": [{"instId": "btc-usdt-swap", "state": "live"}]})
+
+        with patch.object(L, "urlopen", side_effect=opener):
+            out = L._fetch_directory("okx", "live")
+        self.assertEqual(out, {"BTC-USDT-SWAP": {"state": "live"}})
+        self.assertEqual([url for url, _headers, _timeout in calls], [
+            "https://openapi.okx.com/api/v5/public/instruments?instType=SWAP",
+            "https://www.okx.com/api/v5/public/instruments?instType=SWAP",
+        ])
+        for _url, headers, timeout in calls:
+            self.assertEqual(timeout, 8.0)
+            self.assertEqual({key.lower() for key in headers}, {"user-agent", "accept"})
+
+    def test_demo_keeps_original_host_header_and_single_attempt(self):
+        with patch.object(L, "urlopen", side_effect=TimeoutError("demo unavailable")) as opener:
+            with self.assertRaises(TimeoutError):
+                L._fetch_directory("okx", "demo")
+        opener.assert_called_once()
+        req = opener.call_args.args[0]
+        self.assertEqual(req.full_url,
+                         "https://www.okx.com/api/v5/public/instruments?instType=SWAP")
+        self.assertEqual({key.lower(): value for key, value in req.headers.items()}
+                         ["x-simulated-trading"], "1")
+
     def _run(self, venue, environment="demo", payload=None, simulated=False):
         prof = MagicMock()
         prof.simulated_trading = simulated

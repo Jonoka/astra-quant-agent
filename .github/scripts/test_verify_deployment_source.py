@@ -4,6 +4,8 @@ from __future__ import annotations
 import importlib.util
 from pathlib import Path
 import unittest
+from types import SimpleNamespace
+from unittest.mock import patch
 
 
 SPEC = importlib.util.spec_from_file_location(
@@ -13,35 +15,40 @@ SPEC.loader.exec_module(guard)
 
 
 class DeploymentSourceGuardTests(unittest.TestCase):
-    def test_public_domain_delta_is_exactly_reviewed(self):
-        self.assertEqual(guard.APPLICATION_PATCH, {
-            "astra_backend/exchanges/okx.py",
-            "astra_backend/exchanges/diagnostics.py",
-            "astra_backend/okx_client.py",
-            "deploy/install.sh",
-            "docs/exchange_support_matrix.md",
-            "env.example",
-            "scripts/README.md",
-            "scripts/backtest_engine.py",
-            "scripts/brain/dispatch.py",
-            "scripts/brain/packages.py",
-            "scripts/factor_library.py",
-            "scripts/factors/okx_quant_factors.py",
-            "scripts/factors/smart_money.py",
-            "scripts/market_data_service.py",
-            "scripts/news_sentiment_harvester.py",
-            "scripts/okx_public.py",
-            "scripts/sync_full_ledger.py",
-            "scripts/trader/factors.py",
-            "scripts/trader/circuit_guard.py",
-            "tests/ops/test_brain_dispatch.py",
-            "tests/core/test_okx_client.py",
-            "tests/venues/test_market_data_service.py",
-            "tests/venues/test_market_data_service_tails.py",
-            "tests/venues/test_exchange_diagnostics_tails.py",
-            "tests/venues/test_okx_public_data.py",
-            "tests/venues/test_okx_public_domains.py",
-        })
+    def _verify(self, changes=None, head=None, status=b""):
+        revision = "b" * 40
+        changes = guard.APPLICATION_PATCH if changes is None else changes
+
+        def git(command, **_kwargs):
+            verb = command[3]
+            values = {
+                "rev-parse": ((head or revision) + "\n").encode(),
+                "merge-base": b"",
+                "diff": b"\0".join(path.encode() for path in sorted(changes)),
+                "status": status,
+            }
+            return SimpleNamespace(stdout=values[verb])
+
+        with patch.object(guard.subprocess, "run", side_effect=git):
+            guard.verify(Path(__file__).resolve().parents[2], "a" * 40, revision)
+
+    def test_reviewed_patch_with_workflow_delta_passes(self):
+        self._verify(guard.APPLICATION_PATCH | {".github/workflows/build-release-image.yml"})
+
+    def test_missing_patch_and_unrelated_application_delta_are_rejected(self):
+        for changes in (guard.APPLICATION_PATCH - {"scripts/okx_public.py"},
+                        guard.APPLICATION_PATCH | {"scripts/okx_rest.py"}):
+            with self.subTest(changes=changes), self.assertRaisesRegex(
+                    AssertionError, "Missing retained patch or unreviewed application changes"):
+                self._verify(changes)
+
+    def test_wrong_commit_is_rejected(self):
+        with self.assertRaisesRegex(AssertionError, "Wrong fork source commit"):
+            self._verify(head="c" * 40)
+
+    def test_dirty_build_input_is_rejected(self):
+        with self.assertRaisesRegex(AssertionError, "Source changed after revision verification"):
+            self._verify(status=b" M scripts/okx_public.py\n")
 
 
 if __name__ == "__main__":

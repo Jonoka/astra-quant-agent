@@ -573,7 +573,7 @@ class Upgrade:
         return now
 
     def endpoints(self, previous):
-        version = "8.6.0" if previous else "8.6.1"
+        version = "8.6.1"
         local = "http://127.0.0.1:8080"
         h = request(local, "/api/v1/health")
         require(h["version"] == version and h["status"] == "ok", "local_health")

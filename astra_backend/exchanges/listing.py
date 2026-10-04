@@ -12,8 +12,8 @@
 - 判定：不存在 / OKX state!=live → ok=False + 中文 reason；
 - 拉取失败/超时 → **fail-open** + warn（reason='行情目录不可用，跳过对账'）
   ——对账是增强不是风控闸门，不阻塞交易；
-- 域名解析复用 env_profiles 单一入口（OKX demo 同域 +
-  ``x-simulated-trading:1`` 头）。
+- 实盘公共目录复用 openapi → www 域名顺序；OKX demo 保留
+  env_profiles 的域名与 ``x-simulated-trading:1`` 头。
 
 trader 侧接入（下单前调用 ``ensure_contract_listed``）由后续故事完成，
 本文件不触碰 scripts/。
@@ -26,6 +26,8 @@ import warnings
 from dataclasses import dataclass
 from typing import Dict, Optional, Tuple
 from urllib.request import Request, urlopen
+
+from scripts.okx_public import OKX_PUBLIC_HOSTS
 
 from . import env_profiles
 from .base import ExchangeCapabilityError
@@ -79,9 +81,16 @@ def _fetch_directory(venue: str, environment: str) -> Dict[str, Dict[str, str]]:
         # OKX demo = 同域 + 模拟盘头（env_profiles 结构位）
         headers["x-simulated-trading"] = "1"
 
-    req = Request(base_url + path, headers=headers, method="GET")
-    with urlopen(req, timeout=_TIMEOUT_SECONDS) as resp:
-        payload = json.loads(resp.read().decode("utf-8"))
+    hosts = (base_url,) if prof.simulated_trading else OKX_PUBLIC_HOSTS
+    for index, host in enumerate(hosts):
+        try:
+            req = Request(host + path, headers=headers, method="GET")
+            with urlopen(req, timeout=_TIMEOUT_SECONDS) as resp:
+                payload = json.loads(resp.read().decode("utf-8"))
+            break
+        except Exception:
+            if index == len(hosts) - 1:
+                raise
 
     directory: Dict[str, Dict[str, str]] = {}
     for inst in payload.get("data", []):

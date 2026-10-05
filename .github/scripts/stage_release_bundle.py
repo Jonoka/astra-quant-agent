@@ -1,4 +1,4 @@
-"""Stage raw hosted archives after independently verified six-check evidence."""
+"""Stage raw hosted archives only after every required hosted check passes."""
 from __future__ import annotations
 import argparse
 import json
@@ -12,6 +12,19 @@ from runtime_release_upgrade import (PREVIOUS, UPSTREAM, CHECKS, PATCH_ID, IMAGE
                                     digest, plain_path as plain, operation_path, require)
 
 LINK = 'frontend/public/images'
+REQUIRED_RELEASE_CHECKS = frozenset({
+    'state_preservation', 'backward_read_write', 'helper_tests',
+    'published_compose_smoke', 'council_regression', 'patch_retention',
+    'cycle_deadline_regression', 'linux_singleton_lock',
+    'cycle_deadline_state_rehearsal',
+})
+
+
+def require_checks(checks):
+    require(set(CHECKS) == REQUIRED_RELEASE_CHECKS and
+            set(checks) == REQUIRED_RELEASE_CHECKS and
+            all(checks[key] == 'passed' for key in REQUIRED_RELEASE_CHECKS),
+            'checks_unverified')
 
 
 def save(path, value):
@@ -98,7 +111,7 @@ def main():
     require(args.run_url == 'https://github.com/Jonoka/astra-quant-agent/actions/runs/' +
             str(evidence['GITHUB_RUN_ID']), 'hosted_run_identity')
     checks = json.loads(plain(args.checks_json).read_bytes())
-    require(set(checks) == set(CHECKS) and all(checks[k] == 'passed' for k in CHECKS), 'checks_unverified')
+    require_checks(checks)
     required = {'source-previous.tar', 'source-release.tar', 'runtime_release_upgrade.py',
                 'stage_release_bundle.py', 'Dockerfile.release'}
     require(required <= set(evidence['sha256']), 'artifact_manifest_incomplete')

@@ -31,6 +31,95 @@ class RuntimeUpgradeTests(unittest.TestCase):
         obj.state = {"extras": []}
         return obj
 
+    def schema_fixture(self, *, additive=False):
+        with sqlite3.connect(':memory:') as db:
+            db.executescript("CREATE TABLE job_runs(id INTEGER PRIMARY KEY AUTOINCREMENT, job_name TEXT NOT NULL);"
+                             "CREATE TABLE model_calls(id INTEGER PRIMARY KEY AUTOINCREMENT, model TEXT NOT NULL);")
+            if additive:
+                db.execute(upgrade.JOB_SCHEDULED_ALTER)
+                db.executescript(upgrade.DEADLINE_SCHEMA_ADDITION)
+            return self.schema_state(db)
+
+    @staticmethod
+    def schema_state(db):
+        tables = {}
+        for name, declaration in db.execute("SELECT name,sql FROM sqlite_master WHERE type='table'"):
+            tables[name] = {'columns': [list(row[1:]) for row in db.execute('PRAGMA table_info("' + name + '")')],
+                            'rows': db.execute('SELECT COUNT(*) FROM "' + name + '"').fetchone()[0], 'sql': declaration}
+        indexes = [list(row) for row in db.execute(
+            "SELECT type,name,tbl_name,sql FROM sqlite_master WHERE type IN ('index','trigger','view') ORDER BY type,name")]
+        return {upgrade.GATEWAY_DATABASE: {'tables': tables, 'indexes': indexes}}
+
+    def test_only_exact_additive_deadline_schema_is_accepted_and_idempotent(self):
+        before, after = self.schema_fixture(), self.schema_fixture(additive=True)
+        upgrade.compatible_databases(before, after)
+        upgrade.compatible_databases(after, copy.deepcopy(after))
+
+    def test_deadline_gate_rejects_modified_scheduled_column_or_old_table_sql(self):
+        before, after = self.schema_fixture(), self.schema_fixture(additive=True)
+        for mutation in ('default', 'old_sql', 'order'):
+            changed = copy.deepcopy(after)
+            table = changed[upgrade.GATEWAY_DATABASE]['tables']['job_runs']
+            if mutation == 'default':
+                table['columns'][-1][3] = "'unknown'"
+            elif mutation == 'old_sql':
+                table['sql'] = table['sql'].replace('job_name TEXT NOT NULL', 'job_name TEXT')
+            else:
+                table['columns'].reverse()
+            with self.subTest(mutation=mutation), self.assertRaises(upgrade.GateError):
+                upgrade.compatible_databases(before, changed)
+
+    def test_request_unique_constraint_indexes_and_unknown_objects_are_fail_closed(self):
+        before, after = self.schema_fixture(), self.schema_fixture(additive=True)
+        for mutation in ('unique', 'extra_index', 'missing_index', 'table_sql', 'extra_table'):
+            changed = copy.deepcopy(after)
+            gateway = changed[upgrade.GATEWAY_DATABASE]
+            if mutation == 'unique':
+                gateway['indexes'] = [row for row in gateway['indexes'] if not row[1].startswith('sqlite_autoindex_model_requests')]
+            elif mutation == 'extra_index':
+                gateway['indexes'].append(['index', 'unreviewed', 'model_requests', 'CREATE INDEX unreviewed ON model_requests(status)'])
+            elif mutation == 'missing_index':
+                gateway['indexes'] = [row for row in gateway['indexes'] if row[1] != 'idx_model_requests_job']
+            elif mutation == 'table_sql':
+                gateway['tables']['model_requests']['sql'] += ' /* unknown constraint */'
+            else:
+                gateway['tables']['unreviewed'] = {'columns': [], 'rows': 0}
+            with self.subTest(mutation=mutation), self.assertRaises(upgrade.GateError):
+                upgrade.compatible_databases(before, changed)
+
+    def test_model_request_rows_cannot_be_dropped_on_rollback(self):
+        before = self.schema_fixture(additive=True)
+        before[upgrade.GATEWAY_DATABASE]['tables']['model_requests']['rows'] = 2
+        after = copy.deepcopy(before)
+        after[upgrade.GATEWAY_DATABASE]['tables']['model_requests']['rows'] = 1
+        with self.assertRaisesRegex(upgrade.GateError, 'model_request_rows_lost'):
+            upgrade.compatible_databases(before, after)
+
+    def test_deadline_additions_cannot_be_added_to_other_database(self):
+        before, after = self.schema_fixture(), self.schema_fixture(additive=True)
+        before['data/astra_admin.db'] = before.pop(upgrade.GATEWAY_DATABASE)
+        after['data/astra_admin.db'] = after.pop(upgrade.GATEWAY_DATABASE)
+        with self.assertRaisesRegex(upgrade.GateError, 'unknown_database_migration'):
+            upgrade.compatible_databases(before, after)
+
+    def test_source_ast_rejects_extra_migration_query_or_rewritten_old_ensure(self):
+        old, new = self.root / 'before.py', self.root / 'after.py'
+        schema = 'CREATE TABLE model_calls(id INTEGER);\n'
+        prefix = 'SCHEMA = ' + repr(schema) + '\nMIGRATION_COLUMNS = ()\n'
+        body = 'class GatewayStore:\n    @staticmethod\n    def _ensure_columns(connection):\n        connection.execute("PRAGMA table_info(model_calls)")\n'
+        old.write_text(prefix + body, encoding='utf-8')
+        known = '\n'.join('        ' + line if line else '' for line in upgrade.APPROVED_ENSURE_ADDITION.splitlines()) + '\n'
+        candidate = 'SCHEMA = ' + repr(schema + upgrade.DEADLINE_SCHEMA_ADDITION) + '\nMIGRATION_COLUMNS = ()\n' + body + known
+        new.write_text(candidate, encoding='utf-8')
+        upgrade.gateway_source_compatibility(old, new)
+        for altered in (candidate + '\nconnection.execute("DROP TABLE model_calls")\n',
+                        candidate + '\nconnection.execute("SELECT * FROM unreviewed")\n',
+                        candidate.replace('TEXT NOT NULL DEFAULT \'\'\")', 'TEXT DEFAULT NULL\")'),
+                        candidate.replace('PRAGMA table_info(model_calls)', 'PRAGMA table_info(events)')):
+            new.write_text(altered, encoding='utf-8')
+            with self.assertRaises(upgrade.GateError):
+                upgrade.gateway_source_compatibility(old, new)
+
     def test_same_release_gateway_schema_must_remain_exact(self):
         before = {'data/astra_gateway.db': {'tables': {'model_calls': {
             'columns': [['id', 'INTEGER', 0, None, 1]], 'rows': 1}}, 'indexes': []}}
@@ -41,12 +130,64 @@ class RuntimeUpgradeTests(unittest.TestCase):
         with self.assertRaisesRegex(upgrade.GateError, 'unknown_database_migration'):
             upgrade.compatible_databases(before, after)
 
+    def test_source_contract_rejects_shadowed_literal_and_migration_method(self):
+        old, new = self.root / 'old.py', self.root / 'new.py'
+        prefix = 'SCHEMA = ""\nMIGRATION_COLUMNS: tuple = ()\n'
+        body = 'class GatewayStore:\n    def _ensure_columns(connection):\n        pass\n'
+        known = '\n'.join('        ' + line if line else '' for line in upgrade.APPROVED_ENSURE_ADDITION.splitlines()) + '\n'
+        old.write_text(prefix + body, encoding='utf-8')
+        candidate = 'SCHEMA = ' + repr(upgrade.DEADLINE_SCHEMA_ADDITION) + '\nMIGRATION_COLUMNS: tuple = ()\n' + body + known
+        new.write_text(candidate, encoding='utf-8')
+        upgrade.gateway_source_compatibility(old, new)
+        for addition in ('SCHEMA = ""', 'SCHEMA: str = ""', 'SCHEMA += ""', '(SCHEMA := "")',
+                         'def SCHEMA(): pass', 'async def SCHEMA(): pass', 'class SCHEMA: pass',
+                         'import replacement as SCHEMA', 'from replacement import SCHEMA',
+                         'from replacement import *', 'del SCHEMA',
+                         'try: pass\nexcept Exception as SCHEMA: pass',
+                         'match "synthetic":\n    case SCHEMA: pass',
+                         'def replacement(SCHEMA): pass',
+                         'MIGRATION_COLUMNS = ()', 'MIGRATION_COLUMNS: tuple = ()',
+                         'MIGRATION_COLUMNS += ()', '(MIGRATION_COLUMNS := ())',
+                         'class MIGRATION_COLUMNS: pass', 'import replacement as MIGRATION_COLUMNS',
+                         'class _ensure_columns: pass', 'import replacement as _ensure_columns',
+                         'del GatewayStore._ensure_columns',
+                         'def _ensure_columns(connection):\n    pass',
+                         'GatewayStore._ensure_columns = lambda connection: None'):
+            with self.subTest(addition=addition):
+                new.write_text(candidate + '\n' + addition + '\n', encoding='utf-8')
+                with self.assertRaises(upgrade.GateError):
+                    upgrade.gateway_source_compatibility(old, new)
+
+    def test_real_wal_database_probes_close_every_connection(self):
+        data = self.root / 'data'
+        data.mkdir()
+        db = sqlite3.connect(data / 'astra_admin.db')
+        try:
+            db.executescript("PRAGMA journal_mode=WAL; CREATE TABLE admin_users(id INTEGER,username TEXT,password_hash TEXT,"
+                             "salt TEXT,iterations INTEGER,role TEXT,enabled INTEGER,created_at TEXT);"
+                             "INSERT INTO admin_users VALUES(1,'synthetic','hash','salt',1,'superadmin',1,'synthetic');")
+        finally:
+            db.close()
+        connections = []
+        connect = sqlite3.connect
+        def track(*args, **kwargs):
+            connection = connect(*args, **kwargs)
+            connections.append(connection)
+            return connection
+        with patch.object(upgrade.sqlite3, 'connect', track):
+            upgrade.db_state(self.root)
+            upgrade.admin_identity(self.root)
+        self.assertEqual(len(connections), 2)
+        for connection in connections:
+            with self.assertRaises(sqlite3.ProgrammingError):
+                connection.execute('SELECT 1')
+
     def test_gateway_source_contract_rejects_other_sql_or_migrations(self):
         old, new = self.root / 'old.py', self.root / 'new.py'
         schema = 'CREATE TABLE model_calls (\n  output_tokens INTEGER,\n  total_tokens INTEGER\n);'
         migrations = (('cached_tokens', 'INTEGER'),)
         old.write_text('SCHEMA = ' + repr(schema) + '\nMIGRATION_COLUMNS = ' + repr(migrations))
-        new.write_text('SCHEMA = ' + repr(schema) + '\nMIGRATION_COLUMNS = ' + repr(migrations))
+        new.write_text('SCHEMA = ' + repr(schema + upgrade.DEADLINE_SCHEMA_ADDITION) + '\nMIGRATION_COLUMNS = ' + repr(migrations))
         upgrade.gateway_source_compatibility(old, new)
         new.write_text('SCHEMA = ' + repr(schema + '\n-- changed') + '\nMIGRATION_COLUMNS = ' + repr(migrations))
         with self.assertRaisesRegex(upgrade.GateError, 'gateway_schema_changed'):
@@ -75,12 +216,15 @@ class RuntimeUpgradeTests(unittest.TestCase):
                   'org.opencontainers.image.source': 'https://github.com/Jonoka/astra-quant-agent',
                   'io.jonoka.astra.upstream-revision': upgrade.UPSTREAM,
                   'io.jonoka.astra.council-completion-patch': upgrade.PATCH_ID,
+                  'io.jonoka.astra.okx-public-domains-patch': upgrade.OKX_PATCH_ID,
+                  'io.jonoka.astra.cycle-deadline-patch': upgrade.DEADLINE_PATCH_ID,
                   'io.jonoka.astra.build-recipe-sha256': upgrade.sha(b'reviewed-recipe')}
         metadata = {'Config': {'Labels': labels}, 'RepoDigests': [obj.image],
                     'Os': 'linux', 'Architecture': 'amd64', 'Id': 'image-id'}
         with patch.object(upgrade, 'run', return_value=upgrade.json.dumps([metadata]).encode()):
             self.assertEqual(obj.image_metadata(), 'image-id')
         for key in ('io.jonoka.astra.upstream-revision', 'io.jonoka.astra.council-completion-patch',
+                    'io.jonoka.astra.okx-public-domains-patch', 'io.jonoka.astra.cycle-deadline-patch',
                     'io.jonoka.astra.build-recipe-sha256'):
             changed = copy.deepcopy(metadata)
             changed['Config']['Labels'][key] = 'incorrect'

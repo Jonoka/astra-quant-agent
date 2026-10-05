@@ -14,7 +14,7 @@ env:
   SOURCE_VERSION: v8.6.1
   UPSTREAM_REPOSITORY: 0xethanq/astra-quant-agent
   UPSTREAM_SHA: e0b29fef1818e0ff9c6b210eb73234620e276a02
-  PREVIOUS_SHA: e4fe084fb67ef4060cf3478744ed2ed79308b893
+  PREVIOUS_SHA: 90f9f3a558bdbea0171b19a42c58e2fae7ed8e9d
 
 concurrency:
   group: astra-release-image
@@ -107,6 +107,68 @@ jobs:
       - name: Rehearse deployed fork state and custom prompt preservation
         run: python ci/.github/scripts/rehearse_release_upgrade.py validation previous
 
+      - name: Require all cycle deadline regressions
+        working-directory: validation
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import unittest
+          targets = (
+              ('tests/core/test_council_deadline.py', 6),
+              ('tests/llm/test_llm_deadline.py', 16),
+              ('tests/ops/test_brain_deadline.py', 17),
+              ('tests/ops/test_cycle_deadline.py', 23),
+              ('tests/core/test_council_debate_mode.py', 1),
+              ('tests/llm/test_council_manager.py', 1),
+              ('tests/llm/test_llm_call_tails.py', 1),
+              ('tests/llm/test_llm_transport_tails.py', 1),
+              ('tests/llm/test_llm_resilience.py', 1),
+          )
+          for name, minimum in targets:
+              target = Path(name)
+              assert target.is_file(), f'Required suite missing: {target}'
+              suite = unittest.defaultTestLoader.discover(str(target.parent), pattern=target.name)
+              assert suite.countTestCases() >= minimum, f'Incomplete discovery: {target}'
+              result = unittest.TextTestRunner(verbosity=2).run(suite)
+              assert result.wasSuccessful() and result.testsRun >= minimum and result.testsRun > len(result.skipped), f'Suite failed or incomplete: {target}'
+              if minimum > 1:
+                  assert not result.skipped, f'Required deadline regression skipped: {target}'
+          PY
+
+      - name: Verify Linux real singleton locks
+        working-directory: validation
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import sys
+          import unittest
+          assert sys.platform.startswith('linux'), 'Real Linux locks required'
+          target = Path('.github/scripts/test_linux_singleton_lock.py')
+          assert target.is_file(), 'Linux singleton suite missing'
+          suite = unittest.defaultTestLoader.discover(str(target.parent), pattern=target.name)
+          assert suite.countTestCases() >= 5, 'Incomplete Linux singleton discovery'
+          result = unittest.TextTestRunner(verbosity=2).run(suite)
+          assert result.wasSuccessful() and result.testsRun >= 5 and not result.skipped, 'Linux singleton suite failed, incomplete or skipped'
+          PY
+
+      - name: Rehearse cycle deadline upgrade and latest-state rollback
+        run: python ci/.github/scripts/rehearse_cycle_deadline_upgrade.py --source validation --previous previous
+
+      - name: Require real cycle deadline state rehearsal tests
+        env:
+          ASTRA_PREVIOUS_SOURCE: ${{ github.workspace }}/previous
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import unittest
+          target = Path('ci/.github/scripts/test_rehearse_cycle_deadline_upgrade.py')
+          assert target.is_file(), 'Cycle deadline state rehearsal suite missing'
+          suite = unittest.defaultTestLoader.discover(str(target.parent), pattern=target.name)
+          assert suite.countTestCases() >= 4, 'Incomplete cycle deadline state rehearsal discovery'
+          result = unittest.TextTestRunner(verbosity=2).run(suite)
+          assert result.wasSuccessful() and result.testsRun >= 4 and not result.skipped, 'Cycle deadline state rehearsal failed, incomplete or skipped'
+          PY
+
       - name: Verify runtime upgrade helper
         run: |
           python - <<'PY'
@@ -152,16 +214,29 @@ jobs:
             org.opencontainers.image.version=${{ env.SOURCE_VERSION }}
             io.jonoka.astra.upstream-revision=${{ env.UPSTREAM_SHA }}
             io.jonoka.astra.council-completion-patch=council-completion-v1
+            io.jonoka.astra.okx-public-domains-patch=okx-public-domains-v1
+            io.jonoka.astra.cycle-deadline-patch=cycle-deadline-v1
             io.jonoka.astra.build-recipe-sha256=${{ steps.recipe.outputs.sha256 }}
           provenance: false
           sbom: false
           cache-from: type=gha,scope=astra-release
           cache-to: type=gha,scope=astra-release,mode=max
 
+      - name: Verify candidate image real singleton locks
+        id: candidate_lock
+        shell: bash
+        run: |
+          candidate_id="$(docker image inspect --format '{{.Id}}' astraquant:ci)"
+          docker run --rm --network none --read-only --tmpfs /tmp:rw,nosuid,nodev,size=16m \
+            --mount "type=bind,source=$GITHUB_WORKSPACE/ci/.github/scripts/test_linux_singleton_lock.py,target=/acceptance/test_linux_singleton_lock.py,readonly" \
+            -e ASTRA_LOCK_TEST_SOURCE_ROOT=/app --entrypoint python "$candidate_id" /acceptance/test_linux_singleton_lock.py
+          printf 'image_id=%s\n' "$candidate_id" >> "$GITHUB_OUTPUT"
+
       - name: Smoke test official Compose services and auth
         id: candidate
         env:
           BUILD_RECIPE_SHA256: ${{ steps.recipe.outputs.sha256 }}
+          EXPECTED_IMAGE_ID: ${{ steps.candidate_lock.outputs.image_id }}
         run: |
           python ci/.github/scripts/smoke_release_compose.py source astraquant:ci previous
           printf 'image_id=%s\n' "$(docker image inspect --format '{{.Id}}' astraquant:ci)" >> "$GITHUB_OUTPUT"
@@ -177,7 +252,7 @@ jobs:
         id: publish
         shell: bash
         run: |
-          patched_tag="$SOURCE_VERSION-council-fix-${SOURCE_SHA:0:12}"
+          patched_tag="$SOURCE_VERSION-cycle-deadline-fix-${SOURCE_SHA:0:12}"
           docker tag astraquant:ci "$IMAGE_NAME:$patched_tag"
           docker tag astraquant:ci "$IMAGE_NAME:$SOURCE_SHA"
           docker push "$IMAGE_NAME:$patched_tag"
@@ -195,7 +270,7 @@ jobs:
           docker pull "$IMAGE_NAME@$IMAGE_DIGEST"
           python ci/.github/scripts/smoke_release_compose.py source "$IMAGE_NAME@$IMAGE_DIGEST" previous
           docker buildx imagetools inspect "$IMAGE_NAME@$IMAGE_DIGEST"
-          printf '### Verified corrected release image\n\n- Source: `%s@%s`\n- Version: `%s`\n- Image: `%s@%s`\n- Platform: `linux/amd64`\n- Required council completion regression, patch retention, positive test discovery, official migration, encrypted state, prior admin/session, custom baseline/overlay rendering and both Compose healthchecks passed.\n- Published image ID equals the smoke-tested candidate.\n' \
+          printf '### Verified corrected release image\n\n- Source: `%s@%s`\n- Version: `%s`\n- Image: `%s@%s`\n- Platform: `linux/amd64`\n- Required council completion and all 62 cycle deadline regressions, patch retention, Linux real singleton locks, positive test discovery, cycle schema/latest-state rollback rehearsal, official migration, encrypted state, prior admin/session, custom baseline/overlay rendering and both Compose healthchecks passed.\n- Published image ID equals the smoke-tested candidate.\n' \
             "$SOURCE_REPOSITORY" "$SOURCE_SHA" "$SOURCE_VERSION" "$IMAGE_NAME" "$IMAGE_DIGEST" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Package raw pinned source and reviewed deployment provenance
@@ -223,6 +298,6 @@ jobs:
       - name: Upload verified raw deployment bundle
         uses: actions/upload-artifact@v4
         with:
-          name: astraquant-v8.6.1-council-deployment
+          name: astraquant-v8.6.1-cycle-deadline-deployment
           path: release-artifacts/
           if-no-files-found: error

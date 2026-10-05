@@ -36,12 +36,8 @@ def http(path: str, *, payload=None, token=None, expected=200):
         return json.loads(body) if "application/json" in response.headers.get("Content-Type", "") else body
 
 
-def main(source: Path, image: str, previous: Path) -> None:
-    assert "/app/plugins" not in (source / "docker-compose.yml").read_text(encoding="utf-8"), \
-        "Release Compose must not restore the removed plugin bind"
-    assert (source / "docker-compose.yml").read_bytes() == (previous / "docker-compose.yml").read_bytes(), \
-        "same-v8.6.1 fork refresh Compose contract unexpectedly changed"
-    metadata = json.loads(command(["docker", "image", "inspect", image]))[0]
+def verify_image_metadata(metadata: dict) -> None:
+    """Fail before Compose startup unless all reviewed image identities match."""
     expected_image_id = os.environ.get("EXPECTED_IMAGE_ID")
     if expected_image_id:
         assert metadata["Id"] == expected_image_id, "Published image differs from the smoke-tested candidate"
@@ -52,8 +48,19 @@ def main(source: Path, image: str, previous: Path) -> None:
     assert labels["org.opencontainers.image.source"] == "https://github.com/" + os.environ["SOURCE_REPOSITORY"]
     assert labels["io.jonoka.astra.upstream-revision"] == os.environ["UPSTREAM_SHA"]
     assert labels["io.jonoka.astra.council-completion-patch"] == "council-completion-v1"
+    assert labels["io.jonoka.astra.okx-public-domains-patch"] == "okx-public-domains-v1"
+    assert labels["io.jonoka.astra.cycle-deadline-patch"] == "cycle-deadline-v1"
     assert labels["io.jonoka.astra.build-recipe-sha256"] == os.environ["BUILD_RECIPE_SHA256"], \
         "Image build recipe differs from the reviewed derived recipe"
+
+
+def main(source: Path, image: str, previous: Path) -> None:
+    assert "/app/plugins" not in (source / "docker-compose.yml").read_text(encoding="utf-8"), \
+        "Release Compose must not restore the removed plugin bind"
+    assert (source / "docker-compose.yml").read_bytes() == (previous / "docker-compose.yml").read_bytes(), \
+        "same-v8.6.1 fork refresh Compose contract unexpectedly changed"
+    metadata = json.loads(command(["docker", "image", "inspect", image]))[0]
+    verify_image_metadata(metadata)
     with tempfile.TemporaryDirectory(prefix="astra-compose-smoke-") as tmp:
         root = Path(tmp)
         for directory in ("data", "logs", "backups"):

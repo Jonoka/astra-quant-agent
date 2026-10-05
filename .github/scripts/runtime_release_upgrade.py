@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import argparse
 import ast
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 import copy
 import hashlib
 import json
@@ -31,12 +31,15 @@ BACKUPS = Path("/opt/r20-quantum-trader-backups")
 PROJECT = "r20-quantum-trader"
 SERVICES = ("backend", "gateway")
 NAMES = tuple("astraquant-" + service for service in SERVICES)
-PREVIOUS = "e4fe084fb67ef4060cf3478744ed2ed79308b893"
+PREVIOUS = "90f9f3a558bdbea0171b19a42c58e2fae7ed8e9d"
 UPSTREAM = "e0b29fef1818e0ff9c6b210eb73234620e276a02"
 PATCH_ID = "council-completion-v1"
+OKX_PATCH_ID = "okx-public-domains-v1"
+DEADLINE_PATCH_ID = "cycle-deadline-v1"
 CHECKS = ("state_preservation", "backward_read_write", "helper_tests", "published_compose_smoke",
-          "council_regression", "patch_retention")
-OLD_IMAGE = "ghcr.io/jonoka/astra-quant-agent@sha256:476179f0070987b06d48d6eefa76017ccfc90031de3eb754d60348e3efc3417d"
+          "council_regression", "patch_retention", "cycle_deadline_regression",
+          "linux_singleton_lock", "cycle_deadline_state_rehearsal")
+OLD_IMAGE = "ghcr.io/jonoka/astra-quant-agent@sha256:8b471e834dbfe633d720dc5d0ad0c4249e922dce91689719c46ca0fb6575b43b"
 IMAGE_RE = r"ghcr\.io/jonoka/astra-quant-agent@sha256:[0-9a-f]{64}"
 WRITABLE = (".env", "data", "logs", "backups", ".archive", "plugins")
 OVERRIDE = "docker-compose.override.yml"
@@ -60,6 +63,49 @@ LOG_PATTERNS = {
     "duplicate_worker": rb"gateway worker already running",
     "error": rb"\bERROR\b",
 }
+
+# Independently reviewed migration contract. Never populate it by introspecting
+# the candidate source or candidate database that is being accepted.
+GATEWAY_DATABASE = "data/astra_gateway.db"
+JOB_SCHEDULED_COLUMN = ["scheduled_at", "TEXT", 1, "''", 0]
+JOB_SCHEDULED_ALTER = "ALTER TABLE job_runs ADD COLUMN scheduled_at TEXT NOT NULL DEFAULT ''"
+DEADLINE_SCHEMA_ADDITION = """CREATE TABLE IF NOT EXISTS model_requests (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  job_run_id INTEGER,
+  scheduled_at TEXT NOT NULL DEFAULT '',
+  caller TEXT NOT NULL DEFAULT '',
+  client_request_id TEXT NOT NULL UNIQUE,
+  request_id TEXT NOT NULL DEFAULT '',
+  model TEXT NOT NULL,
+  status TEXT NOT NULL,
+  started_at TEXT NOT NULL,
+  completed_at TEXT NOT NULL,
+  duration_ms INTEGER NOT NULL,
+  http_status INTEGER,
+  error_type TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_model_requests_job ON model_requests(job_run_id, id);
+"""
+APPROVED_ENSURE_ADDITION = """
+job_columns = {row["name"] for row in connection.execute("PRAGMA table_info(job_runs)")}
+if "scheduled_at" not in job_columns:
+    connection.execute("ALTER TABLE job_runs ADD COLUMN scheduled_at TEXT NOT NULL DEFAULT ''")
+"""
+APPROVED_QUERY_ADDITIONS = (
+    "PRAGMA table_info(job_runs)", JOB_SCHEDULED_ALTER,
+    "INSERT INTO job_runs(job_name,status,started_at,scheduled_at) VALUES (?,'running',?,?)",
+    "SELECT 1 FROM job_runs WHERE job_name=? AND scheduled_at=? AND status='skipped' LIMIT 1",
+    "INSERT INTO job_runs(job_name,status,started_at,finished_at,detail,scheduled_at) VALUES (?,'skipped',?,?,?,?)",
+    "UPDATE job_runs SET status='skipped',finished_at=?,detail=? WHERE id=? AND status='running'",
+    "UPDATE model_requests SET status='cancelled', completed_at=?, error_type='WorkerInterrupted' "
+    "WHERE status='running' AND job_run_id IN (SELECT id FROM job_runs WHERE status='interrupted')",
+    "UPDATE model_requests SET status=?, completed_at=?, error_type=? WHERE job_run_id=? AND status='running'",
+    "SELECT * FROM model_requests WHERE job_run_id=? ORDER BY id LIMIT ?",
+    "SELECT * FROM model_requests ORDER BY id DESC LIMIT ?",
+)
+APPROVED_REQUEST_INSERT = '''f"INSERT INTO model_requests({','.join(columns)}) VALUES ({','.join('?' for _ in columns)}) "
+"ON CONFLICT(client_request_id) DO UPDATE SET "
++ ",".join(f"{column}=excluded.{column}" for column in columns if column != "client_request_id")'''
 
 
 class GateError(RuntimeError):
@@ -302,14 +348,15 @@ def db_state(root):
             sqlite = stream.read(16) == b"SQLite format 3\0"
         if not sqlite:
             continue
-        with sqlite3.connect(path.as_uri() + "?mode=ro", uri=True, timeout=15) as db:
+        with closing(sqlite3.connect(path.as_uri() + "?mode=ro", uri=True, timeout=15)) as db:
             require(db.execute("PRAGMA integrity_check").fetchall() == [("ok",)], "sqlite_integrity")
             tables = {}
-            for (name,) in db.execute("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"):
+            for name, declaration in db.execute("SELECT name,sql FROM sqlite_master WHERE type='table' ORDER BY name"):
                 quoted = '"' + name.replace('"', '""') + '"'
                 tables[name] = {
                     "columns": [list(row[1:]) for row in db.execute("PRAGMA table_info(" + quoted + ")")],
                     "rows": db.execute("SELECT COUNT(*) FROM " + quoted).fetchone()[0],
+                    "sql": declaration,
                 }
             indexes = [list(row) for row in db.execute(
                 "SELECT type,name,tbl_name,sql FROM sqlite_master WHERE type IN ('index','trigger','view') ORDER BY type,name")]
@@ -319,7 +366,7 @@ def db_state(root):
 
 
 def compatible_databases(before, after):
-    """Require an exact same-release schema while retaining writable rows."""
+    """Allow only the reviewed deadline additions; retain every old schema."""
     require(set(before) == set(after), "database_set_changed")
     for name, old in before.items():
         require(name in after, "database_removed")
@@ -330,37 +377,119 @@ def compatible_databases(before, after):
             prior = {c[0]: c for c in values["columns"]}
             require(all(columns.get(k) == c for k, c in prior.items()), "database_column_changed")
             extra = {k: c for k, c in columns.items() if k not in prior}
-            require(not extra, "unknown_database_migration")
+            permitted = (name == GATEWAY_DATABASE and table == "job_runs" and
+                         extra == {"scheduled_at": JOB_SCHEDULED_COLUMN})
+            require(not extra or permitted, "unknown_database_migration")
+            require(new["tables"][table]["columns"] == values["columns"] +
+                    ([JOB_SCHEDULED_COLUMN] if permitted else []), "database_column_changed")
+            if "sql" in values:
+                expected_sql = values["sql"]
+                if permitted:
+                    require(expected_sql.endswith(")"), "gateway_job_schema_changed")
+                    expected_sql = expected_sql[:-1] + ", scheduled_at TEXT NOT NULL DEFAULT '')"
+                require(new["tables"][table].get("sql") == expected_sql, "database_table_sql_changed")
             if name == "data/astra_quant.db" and table != "sqlite_sequence":
                 require(new["tables"][table]["rows"] >= values["rows"], "trading_rows_lost")
-        require(new["indexes"] == old["indexes"], "database_index_changed")
         extra_tables = set(new["tables"]) - set(old["tables"])
-        require(not extra_tables, "unknown_database_table")
+        require(not extra_tables or (name == GATEWAY_DATABASE and extra_tables == {"model_requests"}),
+                "unknown_database_table")
+        if name == GATEWAY_DATABASE and "model_requests" in new["tables"]:
+            expected_table, expected_indexes = approved_request_schema()
+            actual = new["tables"]["model_requests"]
+            require({k: actual.get(k) for k in expected_table} == expected_table, "gateway_request_schema_changed")
+            request_indexes = [row for row in new["indexes"] if row[2] == "model_requests"]
+            require(request_indexes == expected_indexes, "gateway_request_index_changed")
+            if "model_requests" in old["tables"]:
+                require(actual["rows"] >= old["tables"]["model_requests"]["rows"], "model_request_rows_lost")
+        expected_indexes = old["indexes"]
+        if name == GATEWAY_DATABASE and extra_tables == {"model_requests"}:
+            expected_indexes = sorted(expected_indexes + approved_request_schema()[1], key=lambda row: (row[0], row[1]))
+        require(new["indexes"] == expected_indexes, "database_index_changed")
+
+
+def approved_request_schema():
+    """SQLite canonical metadata from an independent fixed reviewed contract."""
+    with sqlite3.connect(":memory:") as db:
+        db.executescript(DEADLINE_SCHEMA_ADDITION)
+        table = {"columns": [list(row[1:]) for row in db.execute("PRAGMA table_info(model_requests)")],
+                 "sql": db.execute("SELECT sql FROM sqlite_master WHERE name='model_requests'").fetchone()[0]}
+        indexes = [list(row) for row in db.execute(
+            "SELECT type,name,tbl_name,sql FROM sqlite_master WHERE type='index' ORDER BY type,name")]
+    return table, indexes
 
 
 def admin_identity(root):
-    with sqlite3.connect((root / "data/astra_admin.db").as_uri() + "?mode=ro", uri=True) as db:
+    with closing(sqlite3.connect((root / "data/astra_admin.db").as_uri() + "?mode=ro", uri=True)) as db:
         rows = db.execute("SELECT id,username,password_hash,salt,iterations,role,enabled,created_at "
                           "FROM admin_users ORDER BY id").fetchall()
     require(rows and any(row[5] == "superadmin" and row[6] for row in rows), "initialized_administrator")
     return sha(repr(rows).encode())
 
 
+def source_bindings(tree, name):
+    def binds(node):
+        if isinstance(node, ast.Name):
+            return node.id == name and isinstance(node.ctx, (ast.Store, ast.Del))
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            return node.name == name
+        if isinstance(node, ast.alias):
+            return (node.asname or node.name.split('.')[0]) in (name, '*')
+        if isinstance(node, ast.arg):
+            return node.arg == name
+        if isinstance(node, (ast.ExceptHandler, ast.MatchAs, ast.MatchStar)):
+            return node.name == name
+        if isinstance(node, ast.MatchMapping):
+            return node.rest == name
+        return False
+    return [node for node in ast.walk(tree) if binds(node)]
+
+
 def source_literal(path, name):
-    for node in ast.parse(path.read_bytes()).body:
-        targets = node.targets if isinstance(node, ast.Assign) else [node.target] if isinstance(node, ast.AnnAssign) else []
-        if any(isinstance(t, ast.Name) and t.id == name for t in targets):
-            return ast.literal_eval(node.value)
-    raise GateError("source_compatibility_literal")
+    tree = ast.parse(path.read_bytes())
+    writes = source_bindings(tree, name)
+    declarations = [node for node in tree.body if
+                    (isinstance(node, ast.Assign) and len(node.targets) == 1
+                     and isinstance(node.targets[0], ast.Name) and node.targets[0].id == name)
+                    or (isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name)
+                        and node.target.id == name and node.value is not None)]
+    require(len(writes) == len(declarations) == 1, "source_compatibility_literal")
+    try:
+        return ast.literal_eval(declarations[0].value)
+    except (ValueError, TypeError):
+        raise GateError("source_compatibility_literal") from None
 
 
 def gateway_source_compatibility(old, new):
-    """Require byte-equivalent gateway schema and migration declarations."""
+    """Only the independent deadline DDL and migration/query AST may change."""
     old_schema = source_literal(old, "SCHEMA")
     new_schema = source_literal(new, "SCHEMA")
-    require(new_schema == old_schema, "gateway_schema_changed")
+    require(new_schema == old_schema + DEADLINE_SCHEMA_ADDITION, "gateway_schema_changed")
     prior = source_literal(old, "MIGRATION_COLUMNS")
     require(source_literal(new, "MIGRATION_COLUMNS") == prior, "gateway_migration_changed")
+    old_tree, new_tree = ast.parse(old.read_bytes()), ast.parse(new.read_bytes())
+    def ensure(tree):
+        definitions = [node for node in ast.walk(tree) if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                       and node.name == "_ensure_columns"]
+        aliases = [node for node in ast.walk(tree) if isinstance(node, ast.Attribute)
+                   and node.attr == "_ensure_columns" and isinstance(node.ctx, (ast.Store, ast.Del))]
+        require(len(definitions) <= 1 and source_bindings(tree, "_ensure_columns") == definitions
+                and not aliases, "gateway_ensure_columns_changed")
+        return definitions[0] if definitions else None
+    old_ensure, new_ensure = ensure(old_tree), ensure(new_tree)
+    require((old_ensure is None) == (new_ensure is None), "gateway_ensure_columns_changed")
+    if old_ensure is not None:
+        expected_ensure = copy.deepcopy(old_ensure)
+        expected_ensure.body += ast.parse(APPROVED_ENSURE_ADDITION).body
+        require(ast.dump(new_ensure) == ast.dump(expected_ensure), "gateway_ensure_columns_changed")
+    def queries(tree):
+        return {ast.dump(node.args[0]) for node in ast.walk(tree) if isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute) and node.func.attr in {"execute", "executescript"}
+                and node.args}
+    before, after = queries(old_tree), queries(new_tree)
+    approved = {ast.dump(ast.Constant(value=value)) for value in APPROVED_QUERY_ADDITIONS}
+    approved.add(ast.dump(ast.parse("(" + APPROVED_REQUEST_INSERT + ")", mode="eval").body))
+    removed = ast.dump(ast.Constant(value="INSERT INTO job_runs(job_name,status,started_at) VALUES (?,'running',?)"))
+    require(after - before <= approved and before - after <= {removed}, "gateway_query_changed")
 
 
 def read_session(fd):
@@ -450,6 +579,8 @@ class Upgrade:
         if not previous:
             require(labels.get("io.jonoka.astra.upstream-revision") == UPSTREAM and
                     labels.get("io.jonoka.astra.council-completion-patch") == PATCH_ID and
+                    labels.get("io.jonoka.astra.okx-public-domains-patch") == OKX_PATCH_ID and
+                    labels.get("io.jonoka.astra.cycle-deadline-patch") == DEADLINE_PATCH_ID and
                     labels.get("io.jonoka.astra.build-recipe-sha256") ==
                     digest(self.op / "Dockerfile.release"), "image_patch_provenance")
         return metadata["Id"]
@@ -673,6 +804,7 @@ print(json.dumps({'risk':expected,'pool':[i['name'] for i in items],
         self.strategy_reader(previous=True)
         self.image_metadata(False)  # Must already have been pulled by digest.
         databases = db_state(ROOT)
+        administrator = admin_identity(ROOT)
         guard = self.guard(ROOT)
         self.copy(self.op / "source-release", self.op / "candidate")
         self.copy(ROOT / OVERRIDE, self.op / "candidate" / OVERRIDE)
@@ -680,7 +812,7 @@ print(json.dumps({'risk':expected,'pool':[i['name'] for i in items],
         self.validate_compose(self.op / "candidate")
         self.state = {"manifest_sha": self.manifest_sha, "guard": guard,
                       "candidate": tree_manifest(self.op / "candidate"), "baseline": baseline,
-                      "endpoints": endpoints, "admin": admin_identity(ROOT), "databases": databases,
+                      "endpoints": endpoints, "admin": administrator, "databases": databases,
                       "extras": extras}
         self.check_drift()
         self.phase("prepared")
@@ -859,8 +991,11 @@ print(json.dumps({'risk':expected,'pool':[i['name'] for i in items],
             self.capacity()
             self.stop()
             self.phase("recovery-stopped")
-            latest = tree_manifest(ROOT)
             latest_db = db_state(ROOT)
+            latest_admin = admin_identity(ROOT)
+            # Read-only WAL inspection can materialize SQLite sidecars. Freeze
+            # the tree after inspection so byte guards cover the exact copied state.
+            latest = tree_manifest(ROOT)
             compatible_databases(self.state["databases"], latest_db)
             require(tree_manifest(original) == self.state["snapshot"], "original_source_drift")
             require(not recovery.exists(), "partial_recovery_requires_review")
@@ -869,7 +1004,7 @@ print(json.dumps({'risk':expected,'pool':[i['name'] for i in items],
             self.restore_prompt(recovery)
             require(tree_manifest(ROOT) == latest, "poststart_state_changed_during_recovery")
             self.state["databases"] = latest_db
-            self.state["admin"] = admin_identity(ROOT)
+            self.state["admin"] = latest_admin
             self.state["protected_config"] = {n: tree_manifest(recovery / n) if (recovery / n).exists() else None for n in CONFIG}
             self.state["recovery_manifest"] = tree_manifest(recovery)
             self.phase("recovery-ready")

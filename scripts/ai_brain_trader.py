@@ -51,8 +51,15 @@ import urllib.request
 import subprocess
 import tempfile
 import fcntl
+from contextvars import copy_context
+from functools import wraps
 from typing import Dict, Any, List, Optional, Tuple
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as FutureTimeout
+
+from astra_backend.deadline import (
+    BRAIN_PERSISTENCE_SECONDS, COLLECTION_MAX_SECONDS, MIN_MODEL_SECONDS,
+    DeadlineExceeded, check_deadline, deadline_scope, inference_scope,
+)
 
 try:
     from astra_backend.config import settings as standalone_settings
@@ -204,6 +211,7 @@ def atomic_write_json(path: str, payload: Any) -> None:
 
 def single_brain_cycle(func):
     """Prevent overlapping cron runs from overwriting the shared decision cache."""
+    @wraps(func)
     def wrapped(*args, **kwargs):
         os.makedirs(DATA_DIR, exist_ok=True)
         lock_handle = open(AI_BRAIN_LOCK_FILE, "a+", encoding="utf-8")
@@ -212,6 +220,7 @@ def single_brain_cycle(func):
         except BlockingIOError:
             lock_handle.close()
             print("[AI Brain Batch] Skip: another inference cycle is still running")
+            _record_cycle_health("skipped", "inference_lock_active")
             return None
         try:
             lock_handle.seek(0)
@@ -651,7 +660,6 @@ def assemble_decision_cache(
 
 
 
-@single_brain_cycle
 def _pending_order_margin_usdt(o: Dict[str, Any]) -> Optional[float]:
     """挂单的**保证金**（USDT）。
 
@@ -731,6 +739,69 @@ def execute_brain_pending_cancels(pending_mgmt_list: List[Any]) -> List[Dict[str
     return log
 
 
+def _inference_cycle(fn):
+    @wraps(fn)
+    def run(*args, **kwargs):
+        try:
+            with inference_scope():
+                return fn(*args, **kwargs)
+        except Exception as exc:
+            # Collection failures must be visible and cannot publish partial
+            # market data as a fresh inference result.
+            reason = "collection_deadline_exhausted" if isinstance(exc, DeadlineExceeded) else type(exc).__name__
+            print(f"[AI Brain Batch] Collection failed: {reason}")
+            _record_cycle_health("failed", reason)
+            return None
+    return run
+
+
+def _collection_worker(fn, *args, **kwargs):
+    # Queue time consumes the same stage budget; a queued dependency cannot
+    # begin a fresh operation after its submitting stage has expired.
+    check_deadline()
+    result = fn(*args, **kwargs)
+    check_deadline()
+    return result
+
+
+def _bounded_collection_call(fn, *args, **kwargs):
+    check_deadline()
+    pool = ThreadPoolExecutor(max_workers=1)
+    future = pool.submit(copy_context().run, _collection_worker, fn, *args, **kwargs)
+    try:
+        result = future.result(timeout=check_deadline())
+        check_deadline()
+        return result
+    except FutureTimeout:
+        raise DeadlineExceeded("collection deadline exhausted") from None
+    finally:
+        future.cancel()
+        pool.shutdown(wait=False, cancel_futures=True)
+
+
+def _collect_packages(instruments):
+    check_deadline()
+    pool = ThreadPoolExecutor(max_workers=8)
+    futures = []
+    try:
+        for instrument in instruments:
+            check_deadline()
+            futures.append(pool.submit(copy_context().run, _collection_worker, fetch_single_instrument_package, instrument))
+        # Retain instrument order and require every result. No partial snapshot
+        # is forwarded to inference when a dependency outlives this stage.
+        packages = [future.result(timeout=check_deadline()) for future in futures]
+        check_deadline()
+        return packages
+    except FutureTimeout:
+        raise DeadlineExceeded("market package collection deadline exhausted") from None
+    finally:
+        for future in futures:
+            future.cancel()
+        pool.shutdown(wait=False, cancel_futures=True)
+
+
+@single_brain_cycle
+@_inference_cycle
 def execute_batch_ai_brain_cycle(
     pos_summary: str = "[MISSING_CONTEXT:account_positions]",
     active_positions_detail: List[Dict[str, Any]] = None,
@@ -754,106 +825,113 @@ def execute_batch_ai_brain_cycle(
         policy_snapshot=policy_snapshot    )
     print(f"[AI Brain Batch] 📌 当前决策策略快照: {policy_version} ({policy_hash})")
 
-    print(f"[AI Brain Batch] 并行获取 {len(TARGET_INSTRUMENTS)} 币种原生行情、技术指标与顶级聪明钱数据...")
-    with ThreadPoolExecutor(max_workers=8) as executor:
-        packages = list(executor.map(fetch_single_instrument_package, TARGET_INSTRUMENTS))
+    # Leave useful model time plus the final minute for durable persistence.
+    # The scheduler separately reserves outer-cycle completion and slot guard.
+    with deadline_scope(timeout=min(COLLECTION_MAX_SECONDS,
+                                   check_deadline(reserve=MIN_MODEL_SECONDS + BRAIN_PERSISTENCE_SECONDS))):
+        print(f"[AI Brain Batch] 并行获取 {len(TARGET_INSTRUMENTS)} 币种原生行情、技术指标与顶级聪明钱数据...")
+        packages = _collect_packages(TARGET_INSTRUMENTS)
 
-    # 顶级聪明钱与大户持仓数据接入（OKX Rubik 公开统计，单一来源）
-    try:
+        # 顶级聪明钱与大户持仓数据接入（OKX Rubik 公开统计，单一来源）
         try:
-            from scripts.factors.smart_money import fetch_smart_money_for_symbol
-        except ImportError:
-            from factors.smart_money import fetch_smart_money_for_symbol
-        for pkg in packages:
-            ccy = pkg.get("ccy") or pkg.get("name") or ""
-            if not ccy and "-" in pkg.get("instId", ""):
-                ccy = pkg["instId"].split("-")[0]
-            sm_data = fetch_smart_money_for_symbol(ccy, price=float(pkg.get("price") or 0.0))
-            if sm_data:
-                if pkg.get("lsRatio") == "N/A" and sm_data.get("lsRatio"):
-                    pkg["lsRatio"] = sm_data["lsRatio"]
-                if pkg.get("takerNetUsd") == "N/A" and sm_data.get("takerNetUsd"):
-                    pkg["takerNetUsd"] = sm_data["takerNetUsd"]
-                pkg["smart_money"] = {
-                    "available": True,
-                    "weighted_long_pct": sm_data.get("weighted_long_pct", "--"),
-                    "net_flow_usdt": sm_data.get("takerNetUsd", "--"),
-                    "avg_long_entry": "--",
-                    "avg_short_entry": "--",
-                    "top_win_rate": "--",
-                }
-    except Exception as exc:
-        print(f"[AI Brain Batch] 聪明钱数据注入降级: {exc}")
-
-    positions_context = active_positions_detail
-    active_positions_detail = active_positions_detail or []
-
-    # 2026 前缀防抖归一化：将持仓浮盈 upl 等浮点数规范化为 2 位定点数，消除微末浮点抖动
-    for _p in active_positions_detail:
-        if isinstance(_p, dict) and "upl" in _p:
             try:
-                _p["upl"] = round(float(_p["upl"] or 0.0), 2)
-            except (TypeError, ValueError):
-                pass
+                from scripts.factors.smart_money import fetch_smart_money_for_symbol
+            except ImportError:
+                from factors.smart_money import fetch_smart_money_for_symbol
+            for pkg in packages:
+                ccy = pkg.get("ccy") or pkg.get("name") or ""
+                if not ccy and "-" in pkg.get("instId", ""):
+                    ccy = pkg["instId"].split("-")[0]
+                sm_data = _bounded_collection_call(fetch_smart_money_for_symbol, ccy, price=float(pkg.get("price") or 0.0))
+                if sm_data:
+                    if pkg.get("lsRatio") == "N/A" and sm_data.get("lsRatio"):
+                        pkg["lsRatio"] = sm_data["lsRatio"]
+                    if pkg.get("takerNetUsd") == "N/A" and sm_data.get("takerNetUsd"):
+                        pkg["takerNetUsd"] = sm_data["takerNetUsd"]
+                    pkg["smart_money"] = {
+                        "available": True,
+                        "weighted_long_pct": sm_data.get("weighted_long_pct", "--"),
+                        "net_flow_usdt": sm_data.get("takerNetUsd", "--"),
+                        "avg_long_entry": "--",
+                        "avg_short_entry": "--",
+                        "top_win_rate": "--",
+                    }
+        except DeadlineExceeded:
+            raise
+        except Exception as exc:
+            print(f"[AI Brain Batch] 聪明钱数据注入降级: {exc}")
 
-    # 审计 P2-12：跨所 id 归一（模块级 canonical_position_inst_id，含单元测试）
-    def _canonical_inst_id(raw: Any) -> str:
-        return canonical_position_inst_id(raw)
+        positions_context = active_positions_detail
+        active_positions_detail = active_positions_detail or []
 
-    active_inst_ids = {
-        _canonical_inst_id(p.get("instId")) for p in active_positions_detail if p.get("instId")
-    }
-    active_inst_ids.discard("")
-    active_position_sides = {
-        _canonical_inst_id(p.get("instId")): str(p.get("side", p.get("posSide", ""))).lower()
-        for p in active_positions_detail if p.get("instId")
-    }
-    active_position_sides.pop("", None)
-    # 审计D(2026-09-13)：package_by_id 死构造清除（全函数无消费）
+        # 2026 前缀防抖归一化：将持仓浮盈 upl 等浮点数规范化为 2 位定点数，消除微末浮点抖动
+        for _p in active_positions_detail:
+            if isinstance(_p, dict) and "upl" in _p:
+                try:
+                    _p["upl"] = round(float(_p["upl"] or 0.0), 2)
+                except (TypeError, ValueError):
+                    pass
 
-    # Automatically Update & Persist Comprehensive Factor Library Snapshot
-    update_factor_library_snapshot(
-        WORKSPACE_DIR=WORKSPACE_DIR,
-        os=os,
-        sys=sys    )
+        # 审计 P2-12：跨所 id 归一（模块级 canonical_position_inst_id，含单元测试）
+        def _canonical_inst_id(raw: Any) -> str:
+            return canonical_position_inst_id(raw)
 
-    # 刷新本轮数据包中的 7 梯队因子快照，确保发给模型的 Prompt 拥有最新因子
-    try:
+        active_inst_ids = {
+            _canonical_inst_id(p.get("instId")) for p in active_positions_detail if p.get("instId")
+        }
+        active_inst_ids.discard("")
+        active_position_sides = {
+            _canonical_inst_id(p.get("instId")): str(p.get("side", p.get("posSide", ""))).lower()
+            for p in active_positions_detail if p.get("instId")
+        }
+        active_position_sides.pop("", None)
+        # 审计D(2026-09-13)：package_by_id 死构造清除（全函数无消费）
+
+        # Automatically Update & Persist Comprehensive Factor Library Snapshot
+        _bounded_collection_call(update_factor_library_snapshot,
+            WORKSPACE_DIR=WORKSPACE_DIR,
+            os=os,
+            sys=sys    )
+
+        # 刷新本轮数据包中的 7 梯队因子快照，确保发给模型的 Prompt 拥有最新因子
         try:
-            from scripts.brain.packages import load_quant_factor_tiers
-        except ImportError:
-            from brain.packages import load_quant_factor_tiers
-        for _pkg in packages:
-            _fresh_tiers = load_quant_factor_tiers(_pkg.get("instId", ""))
-            if _fresh_tiers:
-                _pkg["quant_factors"] = _fresh_tiers
-    except Exception as _qf_err:
-        print(f"[AI Brain Batch] Quant factor refresh warning: {_qf_err}")
+            try:
+                from scripts.brain.packages import load_quant_factor_tiers
+            except ImportError:
+                from brain.packages import load_quant_factor_tiers
+            for _pkg in packages:
+                _fresh_tiers = load_quant_factor_tiers(_pkg.get("instId", ""))
+                if _fresh_tiers:
+                    _pkg["quant_factors"] = _fresh_tiers
+        except Exception as _qf_err:
+            print(f"[AI Brain Batch] Quant factor refresh warning: {_qf_err}")
 
-    # Fetch live pending limit orders from exchange（V5 直签 REST，行为契约见 fetch_pending_orders_list）
-    pending_orders_list = fetch_pending_orders_list()
+        # Fetch live pending limit orders from exchange（V5 直签 REST，行为契约见 fetch_pending_orders_list）
+        pending_orders_list = _bounded_collection_call(fetch_pending_orders_list)
 
-    runtime_context = {}
-    prompt = construct_full_market_prompt(packages, pos_summary, positions_context, pending_orders_detail=pending_orders_list, current_time_str=time_str, usdt_available=usdt_available, runtime_context_out=runtime_context, policy_snapshot=policy_snapshot)
+        runtime_context = {}
+        prompt = construct_full_market_prompt(packages, pos_summary, positions_context, pending_orders_detail=pending_orders_list, current_time_str=time_str, usdt_available=usdt_available, runtime_context_out=runtime_context, policy_snapshot=policy_snapshot)
 
-    profile = active_profile()
-    # 审计 P1-3：覆盖层由 get_effective_system_prompt 在布局**之后**追加（此前被布局丢弃）
-    effective_system_prompt = get_effective_system_prompt(profile=profile, context=runtime_context)
+        profile = active_profile()
+        # 审计 P1-3：覆盖层由 get_effective_system_prompt 在布局**之后**追加（此前被布局丢弃）
+        effective_system_prompt = get_effective_system_prompt(profile=profile, context=runtime_context)
 
-    # Save Realtime Prompt Snapshot for Web Transparent Inspection
-    write_prompt_snapshot(
-        AI_LAST_PROMPT_FILE=AI_LAST_PROMPT_FILE,
-        _build_effective_prompt_text=_build_effective_prompt_text,
-        effective_system_prompt=effective_system_prompt,
-        os=os,
-        prompt=prompt,
-        time_str=time_str    )
+        # Save Realtime Prompt Snapshot for Web Transparent Inspection
+        write_prompt_snapshot(
+            AI_LAST_PROMPT_FILE=AI_LAST_PROMPT_FILE,
+            _build_effective_prompt_text=_build_effective_prompt_text,
+            effective_system_prompt=effective_system_prompt,
+            os=os,
+            prompt=prompt,
+            time_str=time_str    )
+        check_deadline()
 
     (api_format, api_key, base_url, effort, execute_llm_request, model_name, thinking_timeout) = resolve_llm_runtime(
         api_key=api_key,
         base_url=base_url,
         os=os    )
 
+    check_deadline()
     telemetry = ModelCallTelemetry(
         "trading_brain", model_name, str(effort), effective_system_prompt, prompt
     )

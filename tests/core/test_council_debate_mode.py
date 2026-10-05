@@ -47,8 +47,12 @@ class DebateModeOrchestrationTests(unittest.TestCase):
         def _load_config():
             return {"roles": ROLES, "consensus_mode": "debate"}
 
+        clock = [time_seq[0] if time_seq is not None else 0.0]
+
         def _call_trader(*args, **kwargs):
             self.trader_calls.append(args)
+            if time_seq is not None and len(self.trader_calls) == 2:
+                clock[0] = time_seq[3]
             key = args[0]
             if proposal_for is not None:
                 return proposal_for(key)
@@ -66,9 +70,8 @@ class DebateModeOrchestrationTests(unittest.TestCase):
 
         patches = []
         if time_seq is not None:
-            ticks = iter(time_seq)
-            patches.append(mock.patch("astra_backend.council.debate.time.time",
-                                      side_effect=lambda: next(ticks, 999.0)))
+            patches.append(mock.patch("astra_backend.deadline.time.monotonic",
+                                      side_effect=lambda: clock[0]))
         for p in patches:
             p.start()
             self.addCleanup(p.stop)
@@ -118,8 +121,10 @@ class DebateModeOrchestrationTests(unittest.TestCase):
 
     def test_low_budget_safe_degradation(self):
         # 时间不足 (< 7s) 时安全降级跳过对抗辩论，但仍保留 >= 5s 确保 CIO 终审
-        seq = [0.0, 0.0, 4.0, 9.0, 9.5, 9.5]
-        res, exc = self._run(15.0, time_seq=seq)
+        # The two mock seats consume the stage budget; six seconds remain
+        # on the monotonic council scope for CIO, with no new second round.
+        seq = [0.0, 0.0, 0.0, 24.0]
+        res, exc = self._run(30.0, time_seq=seq)
         self.assertIsNone(exc)
         self.assertIsNotNone(res)
         out, transcript = res

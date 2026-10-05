@@ -14,7 +14,12 @@ import socket
 import time
 import urllib.error
 import urllib.request
+import uuid
 from typing import Any, Dict, List, Optional, Tuple
+
+from astra_backend.deadline import (
+    DeadlineExceeded, beijing_now, check_deadline, cycle_metadata, deadline_scope,
+)
 
 from astra_backend.llm.capabilities import _detect_reasoning_type
 from astra_backend.llm.providers import _join_api_path
@@ -48,7 +53,7 @@ class _LLMHardError(Exception):
 
 def _is_transient_http(code: int, body: str) -> bool:
     low = (body or "").lower()
-    if code in (408, 409, 425, 429, 500, 502, 503, 504):
+    if code in (408, 409, 425, 429, 500, 502, 503, 504, 524):
         return True
     if code in (400, 401, 402, 403) and any(m in low for m in TRANSIENT_MARKERS):
         return True
@@ -355,93 +360,175 @@ def build_chat_payload(
     return payload
 
 
-def _attempt_llm_call(
-    cand: Dict[str, Any],
-    messages: List[Dict[str, str]],
-    temperature: Optional[float],
-    response_format: Optional[Dict[str, Any]],
-    effective_timeout: float,
-) -> Tuple[str, str, Dict[str, Any], int]:
-    """单次请求一个模型；失败时抛 _LLMTransientError（可重试）或 _LLMHardError（换模型）。"""
-    endpoint, headers, payload = build_request_spec(
-        model=cand["model"],
-        messages=messages,
-        base_url=cand["base_url"],
-        api_key=cand.get("api_key", ""),
-        api_format=cand.get("api_format", "openai_chat"),
-        reasoning_effort=cand.get("reasoning_effort", "high"),
-        temperature=temperature,
-        response_format=response_format,
-        reasoning_type=cand.get("reasoning_type", "auto"),
-        api_path=cand.get("api_path", ""),
-    )
+def _server_request_id(response) -> str:
+    headers = getattr(response, "headers", None)
+    if headers is None:
+        return ""
+    for name in ("X-Newapi-Request-Id", "X-Request-Id", "Request-Id"):
+        value = headers.get(name, "")
+        if isinstance(value, str) and 0 < len(value) <= 160 and all(
+            c.isascii() and (c.isalnum() or c in "._:-") for c in value
+        ):
+            return value
+    return ""
 
+
+def _read_with_deadline(response) -> bytes:
+    """read1 avoids one large read renewing its socket timeout on trickle data.
+
+    urllib uses fp.raw._sock (HTTPResponse) or fp.fp.raw._sock (HTTPError).
+    DNS and trickled response headers still rely on the scheduler hardguard.
+    """
+    owner = response
+    if not callable(getattr(type(owner), "read1", None)):
+        fp = getattr(response, "fp", None)
+        if callable(getattr(type(fp), "read1", None)):
+            owner = fp
+        else:
+            # Compatibility with in-memory responses implementing only read().
+            check_deadline()
+            body = response.read()
+            check_deadline()
+            return body
+    chunks = []
+    while True:
+        left = check_deadline()
+        fp = getattr(owner, "fp", None)
+        raw = getattr(fp, "raw", None)
+        sock = getattr(raw, "_sock", None)
+        if sock is not None:
+            sock.settimeout(left)
+        chunk = owner.read1(65536)
+        check_deadline()
+        if not chunk:
+            return b"".join(chunks)
+        chunks.append(chunk)
+
+
+def _record_http_attempt(record: dict) -> None:
+    try:
+        from astra_gateway.telemetry import record_model_request
+        record_model_request(record)
+    except Exception:
+        # Observability must not turn a completed request into a second request.
+        pass
+
+
+def _send_http(cand, endpoint, headers, payload, *, adaptive=False):
+    """Record each actual HTTP attempt, including rejected adaptive parameters."""
+    check_deadline()
+    record = {
+        **cycle_metadata(), "model": cand["model"],
+        "client_request_id": str(uuid.uuid4()), "request_id": "",
+        "started_at": beijing_now(), "status": "running", "http_status": None,
+        "error_type": "",
+    }
     t0 = time.perf_counter()
     req = urllib.request.Request(endpoint, data=json.dumps(payload).encode("utf-8"), headers=headers)
+    _record_http_attempt(dict(record))
     try:
-        resp_handle = urllib.request.urlopen(req, timeout=effective_timeout)
-    except urllib.error.HTTPError as exc:
-        err_b = ""
         try:
-            err_b = exc.read().decode("utf-8", errors="replace")
-        except Exception:
-            pass
-        # Adaptive fallback retry on rejected parameter (400: reasoning_effort/temperature/response_format)
-        if (
-            exc.code == 400
-            and cand.get("api_format", "openai_chat") == "openai_chat"
-            and any(kw in err_b.lower() for kw in ["reasoning_effort", "temperature", "response_format", "invalid parameter"])
-        ):
-            fb_payload = {"model": cand["model"], "messages": messages}
-            fb_req = urllib.request.Request(endpoint, data=json.dumps(fb_payload).encode("utf-8"), headers=headers)
+            response = urllib.request.urlopen(req, timeout=check_deadline())
+        except urllib.error.HTTPError as exc:
+            record.update(http_status=exc.code, request_id=_server_request_id(exc))
             try:
-                with urllib.request.urlopen(fb_req, timeout=effective_timeout) as fb_resp:
-                    latency_ms = int((time.perf_counter() - t0) * 1000)
-                    fb_json = json.loads(fb_resp.read().decode("utf-8", errors="replace"))
-                content, reasoning, usage = _parse_llm_response(cand.get("api_format", "openai_chat"), fb_json)
-                if not content and not reasoning:
-                    raise _LLMTransientError(f"模型 {cand['model']} 返回空正文（已自适应去参数重试）")
-                return content, reasoning, usage, latency_ms
-            except (urllib.error.URLError, TimeoutError, socket.timeout, ValueError) as fb_exc:
-                fb_code = getattr(fb_exc, "code", 0) or 0
-                if fb_code and not _is_transient_http(fb_code, str(getattr(fb_exc, "msg", "") or fb_exc)):
-                    raise _LLMHardError(f"LLM 网关返回 HTTP {fb_code}（模型 {cand['model']}）：{str(fb_exc)[:280]}") from fb_exc
-                raise _LLMTransientError(f"LLM 网关返回 HTTP {exc.code}（模型 {cand['model']}）：{(err_b or '')[:280]}") from fb_exc
-        if _is_transient_http(exc.code, err_b):
-            raise _LLMTransientError(
-                f"LLM 网关返回 HTTP {exc.code}（模型 {cand['model']}）：{(err_b or '')[:280]}",
-                fail_over_now=(exc.code == 504),  # 504=上游已超时：链上有下一个模型则立即切换
-            ) from exc
-        raise _LLMHardError(f"LLM 网关返回 HTTP {exc.code}（模型 {cand['model']}）：{(err_b or '')[:280]}") from exc
-    except (TimeoutError, socket.timeout) as exc:
-        raise _LLMTransientError(
-            f"LLM 推演超时（已达到思考上限时间 {effective_timeout:.0f}s）：模型思考链过长未在时限内完成响应，可前往后台 AI 模型设置中调大思考上限时间",
-            timed_out=True,
-            fail_over_now=True,  # 慢故障：有回退链时立即切换，不再原地烧第二个超时窗口
-        ) from exc
-    except urllib.error.URLError as exc:
-        # 连接层异常（拒绝/重置/DNS/TLS/断线）与超时包装同样属于瞬时故障：
-        # 旧版在此处直接 raise，导致「失败一次就不再请求」——现在纳入重试与回退。
-        reason = getattr(exc, "reason", None)
-        timed_out = isinstance(reason, (socket.timeout, TimeoutError))
-        raise _LLMTransientError(
-            f"LLM 连接层异常（模型 {cand['model']}）：{type(reason).__name__ if reason is not None else type(exc).__name__}: {str(reason or exc)[:220]}",
-            timed_out=timed_out,
-            fail_over_now=timed_out,  # 连接层包装的超时同样按慢故障快速换模型
-        ) from exc
-    except (ValueError, OSError) as exc:
-        # 响应体非 JSON（如反代 HTML 错误页）、读取中断等：可重试
-        raise _LLMTransientError(f"LLM 响应体解析失败（模型 {cand['model']}）：{str(exc)[:200]}") from exc
-
-    with resp_handle as resp:
-        latency_ms = int((time.perf_counter() - t0) * 1000)
-        body_bytes = resp.read()
+                exc._astra_body = _read_with_deadline(exc).decode("utf-8", errors="replace")
+            except DeadlineExceeded:
+                raise
+            except Exception:
+                exc._astra_body = ""
+            finally:
+                exc.close()
+            check_deadline()
+            raise
+        with response as resp:
+            record.update(http_status=resp.getcode(), request_id=_server_request_id(resp))
+            body = _read_with_deadline(resp)
+        check_deadline()
         try:
-            res_json = json.loads(body_bytes.decode("utf-8", errors="replace"))
+            res_json = json.loads(body.decode("utf-8", errors="replace"))
         except ValueError as exc:
-            raise _LLMTransientError(f"LLM 响应体非 JSON（模型 {cand['model']}）：{str(body_bytes[:160])!r}") from exc
+            raise _LLMTransientError(f"LLM 响应体非 JSON（模型 {cand['model']}）") from exc
+        content, reasoning, usage = _parse_llm_response(cand.get("api_format", "openai_chat"), res_json)
+        check_deadline()
+        if not content and not reasoning:
+            detail = "已自适应去参数重试" if adaptive else "HTTP 200 但无 content/reasoning，疑似上游静默失败"
+            raise _LLMTransientError(f"模型 {cand['model']} 返回空正文（{detail}）")
+        record["status"] = "success"
+        return content, reasoning, usage, record
+    except BaseException as exc:
+        reason = getattr(exc, "reason", exc)
+        if isinstance(exc, (DeadlineExceeded, TimeoutError, socket.timeout)) or isinstance(reason, (TimeoutError, socket.timeout)):
+            record.update(status="timeout", error_type="deadline_exceeded" if isinstance(exc, DeadlineExceeded) else "timeout")
+        elif isinstance(exc, urllib.error.HTTPError):
+            record.update(status="failed", error_type="http_error")
+        elif isinstance(exc, (KeyboardInterrupt, SystemExit)) or "cancel" in str(reason).lower():
+            record.update(status="cancelled", error_type="cancelled")
+        else:
+            record.update(status="error", error_type="connection_error" if isinstance(exc, urllib.error.URLError) else "response_error")
+        raise
+    finally:
+        record.update(completed_at=beijing_now(), duration_ms=int((time.perf_counter() - t0) * 1000))
+        _record_http_attempt(dict(record))
 
-    content, reasoning, usage = _parse_llm_response(cand.get("api_format", "openai_chat"), res_json)
-    if not content and not reasoning:
-        raise _LLMTransientError(f"模型 {cand['model']} 返回空正文（HTTP 200 但无 content/reasoning，疑似上游静默失败）")
-    return content, reasoning, usage, latency_ms
+
+def _attempt_llm_call(
+    cand: Dict[str, Any], messages: List[Dict[str, str]],
+    temperature: Optional[float], response_format: Optional[Dict[str, Any]],
+    effective_timeout: float,
+) -> Tuple[str, str, Dict[str, Any], int]:
+    """One candidate and optional adaptive retry, inside the same deadline."""
+    with deadline_scope(timeout=effective_timeout):
+        endpoint, headers, payload = build_request_spec(
+            model=cand["model"], messages=messages, base_url=cand["base_url"],
+            api_key=cand.get("api_key", ""), api_format=cand.get("api_format", "openai_chat"),
+            reasoning_effort=cand.get("reasoning_effort", "high"), temperature=temperature,
+            response_format=response_format, reasoning_type=cand.get("reasoning_type", "auto"),
+            api_path=cand.get("api_path", ""),
+        )
+        t0 = time.perf_counter()
+        try:
+            try:
+                content, reasoning, usage, record = _send_http(cand, endpoint, headers, payload)
+            except urllib.error.HTTPError as exc:
+                err_body = getattr(exc, "_astra_body", "")
+                if (exc.code == 400 and cand.get("api_format", "openai_chat") == "openai_chat"
+                    and any(kw in err_body.lower() for kw in ("reasoning_effort", "temperature", "response_format", "invalid parameter"))):
+                    check_deadline()
+                    content, reasoning, usage, record = _send_http(
+                        cand, endpoint, headers, {"model": cand["model"], "messages": messages},
+                        adaptive=True,
+                    )
+                else:
+                    raise
+        except DeadlineExceeded:
+            raise
+        except urllib.error.HTTPError as exc:
+            body = getattr(exc, "_astra_body", "")
+            if _is_transient_http(exc.code, body):
+                raise _LLMTransientError(
+                    f"LLM 网关返回 HTTP {exc.code}（模型 {cand['model']}）：{body[:280]}",
+                    fail_over_now=exc.code == 504,
+                ) from exc
+            raise _LLMHardError(f"LLM 网关返回 HTTP {exc.code}（模型 {cand['model']}）：{body[:280]}") from exc
+        except (TimeoutError, socket.timeout) as exc:
+            check_deadline()
+            raise _LLMTransientError(
+                f"LLM 推演超时（已达到思考上限时间 {effective_timeout:.0f}s）：模型思考链过长未在时限内完成响应，可前往后台 AI 模型设置中调大思考上限时间",
+                timed_out=True, fail_over_now=True,
+            ) from exc
+        except urllib.error.URLError as exc:
+            check_deadline()
+            reason = getattr(exc, "reason", None)
+            timed_out = isinstance(reason, (socket.timeout, TimeoutError))
+            raise _LLMTransientError(
+                f"LLM 连接层异常（模型 {cand['model']}）：{type(reason).__name__ if reason is not None else type(exc).__name__}: {str(reason or exc)[:220]}",
+                timed_out=timed_out, fail_over_now=timed_out,
+            ) from exc
+        except (ValueError, OSError) as exc:
+            raise _LLMTransientError(f"LLM 响应体解析失败（模型 {cand['model']}）：{str(exc)[:200]}") from exc
+        check_deadline()
+        usage["_astra_trace"] = {key: record[key] for key in (
+            "model", "request_id", "client_request_id", "started_at", "completed_at",
+        )}
+        return content, reasoning, usage, int((time.perf_counter() - t0) * 1000)

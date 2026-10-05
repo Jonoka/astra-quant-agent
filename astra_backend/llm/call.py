@@ -14,6 +14,10 @@ import urllib.error
 import urllib.request
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
+from astra_backend.deadline import (
+    DeadlineExceeded, check_deadline, deadline_scope, remaining, sleep_with_deadline,
+)
+
 from astra_backend.llm.capabilities import (
     _detect_api_format,
     _detect_capabilities,
@@ -215,6 +219,23 @@ def execute_llm_request(get_active_runtime: Callable[[], Dict[str, Any]], resolv
     use_cache: bool = False,
     cache_ttl: float = 0.0,
 ) -> Tuple[str, str, Dict[str, Any], int]:
+    """Use one logical-call budget for every candidate, retry and body read."""
+    runtime = get_active_runtime()
+    budget = float(timeout) if timeout is not None and float(timeout) > 0 else float(runtime.get("thinking_timeout") or 120.0)
+    with deadline_scope(timeout=min(budget, FAILOVER_MAX_TOTAL_WAIT)):
+        return _execute_llm_request(
+            lambda: runtime, resolve_runtime, on_failover, messages, model,
+            base_url, api_key, api_format, reasoning_effort, temperature,
+            response_format, timeout, allow_fallback,
+            use_cache=use_cache, cache_ttl=cache_ttl,
+        )
+
+
+def _execute_llm_request(get_active_runtime, resolve_runtime, on_failover,
+    messages, model=None, base_url=None, api_key=None, api_format=None,
+    reasoning_effort=None, temperature=0.2, response_format=None, timeout=None,
+    allow_fallback=True, *, use_cache=False, cache_ttl=0.0,
+) -> Tuple[str, str, Dict[str, Any], int]:
     """Unified resilient executor for LLM calls across all 3 protocols.
 
     韧性链路：每个模型按后台「请求次数」重试（指数退避），瞬时耗尽或遇
@@ -284,15 +305,16 @@ def execute_llm_request(get_active_runtime: Callable[[], Dict[str, Any]], resolv
     for cand_idx, cand in enumerate(candidates):
         cand_timeout = effective_timeout if cand_idx == 0 else float(cand.get("thinking_timeout") or effective_timeout)
         for attempt in range(attempts):
-            if attempt > 0:
-                if (time.perf_counter() - call_started) > FAILOVER_MAX_TOTAL_WAIT:
-                    deadline_hit = True
-                    break
-                time.sleep(min(2.0 * attempt, 8.0))
+            candidate_call_started = False
             try:
+                check_deadline()
+                if attempt > 0:
+                    sleep_with_deadline(min(2.0 * attempt, 8.0))
+                candidate_call_started = True
                 content, reasoning, usage, latency = _attempt_llm_call(
-                    cand, messages, temperature, response_format, cand_timeout
+                    cand, messages, temperature, response_format, min(cand_timeout, check_deadline())
                 )
+                check_deadline()
                 if cand_idx > 0:
                     print(
                         f"[LLM Failover] ✅ 主模型 {primary['model']} 请求失败，已回退至模型 {cand['model']}"
@@ -314,6 +336,15 @@ def execute_llm_request(get_active_runtime: Callable[[], Dict[str, Any]], resolv
                     from astra_backend.llm.query_cache import put_cached_query
                     put_cached_query(ckey, cand["model"], cand["base_url"], content, reasoning, usage, latency, cache_ttl)
                 return content, reasoning, usage, latency
+            except DeadlineExceeded as exc:
+                failures.append(str(exc))
+                last_error = exc
+                last_timed_out = True
+                # The transport candidate scope has unwound. A shorter candidate
+                # may expire while the logical parent still has budget for the
+                # next candidate; never retry this exhausted candidate.
+                deadline_hit = not candidate_call_started or remaining() <= 0
+                break
             except _LLMHardError as exc:
                 failures.append(str(exc))
                 last_error = exc
@@ -333,6 +364,14 @@ def execute_llm_request(get_active_runtime: Callable[[], Dict[str, Any]], resolv
             break
 
     summary_tail = " | ".join(failures[-6:]) if failures else (str(last_error) if last_error else "无响应")
+    if deadline_hit:
+        on_failover({
+            "type": "chain_failed", "from_model": primary["model"],
+            "to_model": "", "attempts_per_model": attempts,
+            "elapsed_seconds": round(time.perf_counter() - call_started, 1),
+            "deadline_hit": True, "succeeded": False,
+        })
+        raise DeadlineExceeded("LLM shared call deadline exhausted") from last_error
     if len(candidates) == 1:
         # 单模型（未配置回退）：保持旧版异常语义，前端提示文案不变
         if isinstance(last_error, _LLMHardError):
@@ -341,6 +380,8 @@ def execute_llm_request(get_active_runtime: Callable[[], Dict[str, Any]], resolv
             if last_error.timed_out:
                 raise TimeoutError(str(last_error)) from last_error
             raise RuntimeError(str(last_error)) from last_error
+        if isinstance(last_error, DeadlineExceeded):
+            raise TimeoutError(str(last_error)) from last_error
         raise RuntimeError(f"LLM 请求未获得响应（模型 {primary['model']}）")
 
     on_failover({

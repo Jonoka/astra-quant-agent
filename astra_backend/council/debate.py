@@ -8,10 +8,18 @@
 from __future__ import annotations
 
 import concurrent.futures
+from contextvars import copy_context
+from functools import wraps
+from inspect import signature
 import json
 import os
 import time
 from typing import Any, Callable, Dict, Optional, Tuple
+
+from astra_backend.deadline import (
+    DeadlineExceeded, check_deadline, deadline_scope, remaining,
+    request_scope, sleep_with_deadline,
+)
 
 from astra_backend.council.role_normalizer import (
     process_brain_output as _normalize_cio_adopted_roles,
@@ -24,6 +32,73 @@ from astra_backend.council.policy import (
     MIN_SAFE_REASONING_TIME,
     VALID_CONSENSUS_MODES,
 )
+
+
+def _budgeted(caller: str, maximum: Optional[float] = None):
+    """Scope the complete operation, including its retries and cleanup."""
+    def decorate(fn):
+        sig = signature(fn)
+        @wraps(fn)
+        def run(*args, **kwargs):
+            bound = sig.bind(*args, **kwargs)
+            bound.apply_defaults()
+            timeout = max(0.0, float(bound.arguments["timeout"]))
+            if maximum is not None:
+                timeout = min(timeout, maximum)
+            seat = bound.arguments.get("role_id")
+            label = f"{caller}:{seat}" if seat else caller
+            with deadline_scope(timeout=timeout), request_scope(label):
+                result = fn(*args, **kwargs)
+                check_deadline()
+                return result
+        return run
+    return decorate
+
+
+def _run_parallel_seats(roles, keys, call, args_for, budget, *, stagger=False):
+    """One stage deadline covers submission, queueing and all worker waits.
+
+    A timed out stage never joins overdue workers. HTTP workers inherit this
+    deadline and close their requests; the scheduled process boundary remains
+    the final protection for an uncooperative non-HTTP dependency.
+    """
+    results = {}
+    futures = {}
+    pool = concurrent.futures.ThreadPoolExecutor(max_workers=max(1, len(keys)))
+    def invoke(key):
+        check_deadline(reserve=MIN_SAFE_REASONING_TIME)
+        result = call(*args_for(key, check_deadline()))
+        check_deadline()
+        return result
+    try:
+        with deadline_scope(timeout=budget):
+            for idx, key in enumerate(keys):
+                if stagger and idx:
+                    sleep_with_deadline(0.8)
+                check_deadline(reserve=MIN_SAFE_REASONING_TIME)
+                futures[pool.submit(copy_context().run, invoke, key)] = key
+            for future in concurrent.futures.as_completed(futures, timeout=check_deadline()):
+                key = futures[future]
+                try:
+                    results[key] = future.result()
+                except Exception:
+                    results[key] = _seat_failure(key, roles, "seat_failed")
+    except (DeadlineExceeded, concurrent.futures.TimeoutError):
+        pass
+    finally:
+        for future in futures:
+            future.cancel()
+        pool.shutdown(wait=False, cancel_futures=True)
+    for key in keys:
+        if key not in results:
+            results[key] = _seat_failure(key, roles, "stage_deadline_exhausted")
+    return results
+
+
+def _seat_failure(key, roles, reason):
+    return {"proposal_id": f"{key}_prop", "role_id": key,
+            "role_name": roles[key].get("name", key), "status": "error",
+            "content": reason, "reason": reason, "weight": 0.0, "latency_ms": 0}
 
 
 def _render_seat_prompt(prompt: str, runtime_context: Optional[Dict[str, Any]]) -> str:
@@ -48,6 +123,7 @@ def _render_seat_prompt(prompt: str, runtime_context: Optional[Dict[str, Any]]) 
     return render_variables(prompt, runtime_context)
 
 
+@_budgeted("council.proposal")
 def _call_single_trader(resolve_seat: Callable[..., Any], 
     role_id: str,
     role_spec: Dict[str, Any],
@@ -114,14 +190,14 @@ def _call_single_trader(resolve_seat: Callable[..., Any],
             api_format=override_format,
             reasoning_effort=override_effort,
             temperature=temperature,
-            timeout=timeout,
+            timeout=check_deadline(),
             allow_fallback=False,  # 委员会成员优先以其登记模型作答
         )
         return {
             "proposal_id": proposal_id,
             "role_id": role_id,
             "role_name": role_name,
-            "model_used": override_model or get_active_llm_runtime().get("model", "default"),
+            "model_used": (usage or {}).get("_astra_trace", {}).get("model") or override_model or get_active_llm_runtime().get("model", "default"),
             "model_requested": resolved["requested"],
             "model_registered": resolved["registered"],
             "model_fallback": resolved["fallback"],
@@ -135,11 +211,12 @@ def _call_single_trader(resolve_seat: Callable[..., Any],
     except Exception as e:
         # 遇网关并发 504/502 超时，退避 1.5s 后自适应降低强度并重试一次，保住席位
         err_str = str(e)
-        if ("504" in err_str or "502" in err_str or "timeout" in err_str.lower()) and timeout > 35.0:
+        if not isinstance(e, DeadlineExceeded) and ("504" in err_str or "502" in err_str or "524" in err_str or "timeout" in err_str.lower()) and timeout > 35.0:
             try:
-                time.sleep(1.5)
+                check_deadline(reserve=1.5 + MIN_SAFE_REASONING_TIME)
+                sleep_with_deadline(1.5)
                 retry_effort = "medium" if override_effort == "high" else override_effort
-                c_retry, r_retry, _, lat_retry = execute_llm_request(
+                c_retry, r_retry, retry_usage, lat_retry = execute_llm_request(
                     messages=messages,
                     model=override_model,
                     base_url=override_url,
@@ -147,14 +224,14 @@ def _call_single_trader(resolve_seat: Callable[..., Any],
                     api_format=override_format,
                     reasoning_effort=retry_effort,
                     temperature=temperature,
-                    timeout=max(20.0, timeout - 20.0),
+                    timeout=check_deadline(),
                     allow_fallback=True,
                 )
                 return {
                     "proposal_id": proposal_id,
                     "role_id": role_id,
                     "role_name": role_name,
-                    "model_used": override_model or get_active_llm_runtime().get("model", "default"),
+                    "model_used": (retry_usage or {}).get("_astra_trace", {}).get("model") or override_model or get_active_llm_runtime().get("model", "default"),
                     "model_requested": resolved["requested"],
                     "model_registered": resolved["registered"],
                     "model_fallback": resolved["fallback"],
@@ -185,6 +262,7 @@ def _call_single_trader(resolve_seat: Callable[..., Any],
         }
 
 
+@_budgeted("council.critique")
 def _call_single_trader_critique(resolve_seat: Callable[..., Any], 
     role_id: str,
     role_spec: Dict[str, Any],
@@ -245,13 +323,13 @@ def _call_single_trader_critique(resolve_seat: Callable[..., Any],
             api_format=override_format,
             reasoning_effort=override_effort,
             temperature=temperature,
-            timeout=timeout,
+            timeout=check_deadline(),
             allow_fallback=False,  # 委员会成员必须以其登记模型作答，保住模型身份；只享重试
         )
         return {
             "role_id": role_id,
             "role_name": role_name,
-            "model_used": override_model or get_active_llm_runtime().get("model", "default"),
+            "model_used": (usage or {}).get("_astra_trace", {}).get("model") or override_model or get_active_llm_runtime().get("model", "default"),
             "model_requested": resolved["requested"],
             "model_registered": resolved["registered"],
             "model_fallback": resolved["fallback"],
@@ -273,6 +351,7 @@ def _call_single_trader_critique(resolve_seat: Callable[..., Any],
         }
 
 
+@_budgeted("council", MAX_COUNCIL_TIMEOUT)
 def execute_council_debate(load_config: Callable[[], Dict[str, Any]], resolve_seat: Callable[..., Any], call_trader: Callable[..., Any], call_critique: Callable[..., Any], 
     market_prompt: str,
     original_system_prompt: str,
@@ -286,8 +365,8 @@ def execute_council_debate(load_config: Callable[[], Dict[str, Any]], resolve_se
     - "cross_examination": Round 1 proposals -> Round 2 peer cross-examination -> CIO verdict.
 
     Strict Timeout Control:
-    - Anchored on deadline = t_start + timeout.
-    - Dynamically evaluates rem = deadline - time.time() before every stage.
+    - One monotonic deadline inherits the caller's remaining inference budget.
+    - Each stage and retry can shorten the deadline but cannot renew it.
     - Safely downgrades or raises TimeoutError if remaining budget < MIN_SAFE_REASONING_TIME (5.0s).
 
     Structured Contract & Adoption Traceability:
@@ -317,13 +396,9 @@ def execute_council_debate(load_config: Callable[[], Dict[str, Any]], resolve_se
         consensus_mode = DEFAULT_CONSENSUS_MODE
 
     t_start = time.time()
-    effective_timeout = max(1.0, float(timeout))
-    # 审计 P2-13：这里只夹**上限**（防手改配置撞调度器 600s 击杀）；
-    # 下限不夹——显式传入极小超时是"立即中止"的既有契约（测试与降级路径依赖它）。
-    effective_timeout = min(float(MAX_COUNCIL_TIMEOUT), max(0.0, float(effective_timeout)))
-    deadline = t_start + effective_timeout
+    # The enclosing monotonic scope also includes the parent inference limit.
 
-    rem = deadline - time.time()
+    rem = remaining()
     if rem < MIN_SAFE_REASONING_TIME:
         raise TimeoutError(
             f"Council deliberation timeout: remaining time {rem:.2f}s is below safety threshold {MIN_SAFE_REASONING_TIME}s"
@@ -349,7 +424,7 @@ def execute_council_debate(load_config: Callable[[], Dict[str, Any]], resolve_se
         pass
     elif consensus_mode == "cross_examination":
         # === MODE: Cross-Examination (Double-Round Real Debate) ===
-        rem = deadline - time.time()
+        rem = remaining()
         if rem < MIN_SAFE_REASONING_TIME * 2.0:
             raise TimeoutError(
                 f"Council timeout: remaining time {rem:.2f}s insufficient for cross-examination mode (requires >= {MIN_SAFE_REASONING_TIME * 2.0}s)"
@@ -361,37 +436,15 @@ def execute_council_debate(load_config: Callable[[], Dict[str, Any]], resolve_se
         # 审计 P2-14：跨审模式同样为 CIO 预留（两轮之后仍要有裁决时间）
         cio_reserve = min(CIO_MIN_ARBITRATION_TIME, max(MIN_SAFE_REASONING_TIME * 2.0, rem * 0.35))
         round1_budget = max(2.0, min(max(rem * 0.55, 90.0), rem - cio_reserve))
-        with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, len(trader_keys))) as pool:
-            futures = {}
-            for idx, key in enumerate(trader_keys):
-                if idx > 0:
-                    time.sleep(0.8)  # 错峰 0.8s 提交，防毫秒级并发打穿代理连接池
-                fut = pool.submit(
-                    call_trader,
-                    key,
-                    roles[key],
-                    market_prompt,
-                    original_system_prompt,
-                    round1_budget,
-                    runtime_context,
-                )
-                futures[fut] = key
-            for fut in concurrent.futures.as_completed(futures):
-                key = futures[fut]
-                try:
-                    trader_proposals[key] = fut.result()
-                except Exception as exc:
-                    trader_proposals[key] = {
-                        "proposal_id": f"{key}_prop",
-                        "role_id": key,
-                        "role_name": roles[key].get("name", key),
-                        "status": "error",
-                        "content": f"Proposal exception: {exc}",
-                        "weight": 0.0,
-                    }
+        trader_proposals = _run_parallel_seats(
+            roles, trader_keys, call_trader,
+            lambda key, left: (key, roles[key], market_prompt,
+                               original_system_prompt, left, runtime_context),
+            round1_budget, stagger=True,
+        )
 
         # Stage 2: Round 2 Cross-Examination Critiques
-        rem = deadline - time.time()
+        rem = remaining()
         if rem < MIN_SAFE_REASONING_TIME + 2.0:
             # Insufficient budget for second round -> safe degradation: skip critiques to preserve CIO verdict
             for k in trader_keys:
@@ -404,46 +457,28 @@ def execute_council_debate(load_config: Callable[[], Dict[str, Any]], resolve_se
                 }
         else:
             round2_budget = max(2.0, min(rem * 0.40, rem - min(CIO_MIN_ARBITRATION_TIME, max(MIN_SAFE_REASONING_TIME, rem * 0.5))))
-            with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, len(trader_keys))) as pool:
-                critique_futures = {}
-                for k in trader_keys:
-                    my_prop = trader_proposals.get(k, {}).get("content", "（该交易员第一轮未提交有效提案）")
-                    peers_text_list = []
-                    for pk in trader_keys:
-                        if pk != k:
-                            p_res = trader_proposals.get(pk, {})
-                            p_id = p_res.get("proposal_id", f"{pk}_prop")
-                            p_name = p_res.get("role_name", pk)
-                            peers_text_list.append(
-                                f"=== 【{p_name}】(提案标识: {p_id}) ===\n"
-                                f"{p_res.get('content', '（未提交）')}"
-                            )
-                    peers_text = "\n\n".join(peers_text_list) if peers_text_list else "（无其他同行提案）"
-                    critique_futures[pool.submit(
-                        call_critique,
-                        k,
-                        roles[k],
-                        my_prop,
-                        peers_text,
-                        original_system_prompt,
-                        round2_budget,
-                        runtime_context,
-                    )] = k
-                for fut in concurrent.futures.as_completed(critique_futures):
-                    k = critique_futures[fut]
-                    try:
-                        trader_critiques[k] = fut.result()
-                    except Exception as exc:
-                        trader_critiques[k] = {
-                            "role_id": k,
-                            "role_name": roles[k].get("name", k),
-                            "status": "error",
-                            "content": f"质询异常: {exc}",
-                            "latency_ms": 0,
-                        }
+            def args_for_critique(k, left):
+                my_prop = trader_proposals.get(k, {}).get("content", "（该交易员第一轮未提交有效提案）")
+                peers_text_list = []
+                for pk in trader_keys:
+                    if pk != k:
+                        p_res = trader_proposals.get(pk, {})
+                        p_id = p_res.get("proposal_id", f"{pk}_prop")
+                        p_name = p_res.get("role_name", pk)
+                        peers_text_list.append(
+                            f"=== 【{p_name}】(提案标识: {p_id}) ===\n"
+                            f"{p_res.get('content', '（未提交）')}"
+                        )
+                peers_text = "\n\n".join(peers_text_list) if peers_text_list else "（无其他同行提案）"
+                return (k, roles[k], my_prop, peers_text,
+                        original_system_prompt, left, runtime_context)
+            trader_critiques = _run_parallel_seats(
+                roles, trader_keys, call_critique, args_for_critique, round2_budget
+            )
+
     elif consensus_mode == "debate":
         # === MODE: Adversarial Debate (Round 1 Proposals -> Dispute Detection -> Round 2 Debate) ===
-        rem = deadline - time.time()
+        rem = remaining()
         if rem < MIN_SAFE_REASONING_TIME * 2.0:
             raise TimeoutError(
                 f"Council timeout: remaining time {rem:.2f}s insufficient for debate mode (requires >= {MIN_SAFE_REASONING_TIME * 2.0}s)"
@@ -452,34 +487,12 @@ def execute_council_debate(load_config: Callable[[], Dict[str, Any]], resolve_se
         # Stage 1: Round 1 Independent Proposals
         cio_reserve = min(CIO_MIN_ARBITRATION_TIME, max(MIN_SAFE_REASONING_TIME * 2.0, rem * 0.35))
         round1_budget = max(2.0, min(max(rem * 0.55, 90.0), rem - cio_reserve))
-        with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, len(trader_keys))) as pool:
-            futures = {}
-            for idx, key in enumerate(trader_keys):
-                if idx > 0:
-                    time.sleep(0.8)
-                fut = pool.submit(
-                    call_trader,
-                    key,
-                    roles[key],
-                    market_prompt,
-                    original_system_prompt,
-                    round1_budget,
-                    runtime_context,
-                )
-                futures[fut] = key
-            for fut in concurrent.futures.as_completed(futures):
-                key = futures[fut]
-                try:
-                    trader_proposals[key] = fut.result()
-                except Exception as exc:
-                    trader_proposals[key] = {
-                        "proposal_id": f"{key}_prop",
-                        "role_id": key,
-                        "role_name": roles[key].get("name", key),
-                        "status": "error",
-                        "content": f"Proposal exception: {exc}",
-                        "weight": 0.0,
-                    }
+        trader_proposals = _run_parallel_seats(
+            roles, trader_keys, call_trader,
+            lambda key, left: (key, roles[key], market_prompt,
+                               original_system_prompt, left, runtime_context),
+            round1_budget, stagger=True,
+        )
 
         # Stage 1.5: Detect Disputed Symbols via Consensus Engine
         from astra_backend.council.consensus import (
@@ -490,7 +503,7 @@ def execute_council_debate(load_config: Callable[[], Dict[str, Any]], resolve_se
         disputed_symbols = extract_disputed_symbols(early_consensus)
 
         # Stage 2: Targeted Adversarial Debate on Disputed Symbols
-        rem = deadline - time.time()
+        rem = remaining()
         if rem < MIN_SAFE_REASONING_TIME + 2.0:
             for k in trader_keys:
                 trader_debates[k] = {
@@ -511,47 +524,29 @@ def execute_council_debate(load_config: Callable[[], Dict[str, Any]], resolve_se
                 }
         else:
             round2_budget = max(2.0, min(rem * 0.40, rem - min(CIO_MIN_ARBITRATION_TIME, max(MIN_SAFE_REASONING_TIME, rem * 0.5))))
-            with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, len(trader_keys))) as pool:
-                debate_futures = {}
-                dispute_header = f"【核心争议对抗标的清单】: {', '.join(disputed_symbols)}（多空存在严重方向撕裂）"
-                for k in trader_keys:
-                    my_prop = trader_proposals.get(k, {}).get("content", "（该交易员第一轮未提交有效提案）")
-                    debate_peers_list = [dispute_header]
-                    for pk in trader_keys:
-                        if pk != k:
-                            p_res = trader_proposals.get(pk, {})
-                            p_id = p_res.get("proposal_id", f"{pk}_prop")
-                            p_name = p_res.get("role_name", pk)
-                            debate_peers_list.append(
-                                f"=== 【{p_name}】(提案标识: {p_id}) ===\n"
-                                f"{p_res.get('content', '（未提交）')}"
-                            )
-                    peers_text = "\n\n".join(debate_peers_list)
-                    debate_futures[pool.submit(
-                        call_critique,
-                        k,
-                        roles[k],
-                        my_prop,
-                        peers_text,
-                        original_system_prompt,
-                        round2_budget,
-                        runtime_context,
-                    )] = k
-                for fut in concurrent.futures.as_completed(debate_futures):
-                    k = debate_futures[fut]
-                    try:
-                        trader_debates[k] = fut.result()
-                    except Exception as exc:
-                        trader_debates[k] = {
-                            "role_id": k,
-                            "role_name": roles[k].get("name", k),
-                            "status": "error",
-                            "content": f"对抗辩论异常: {exc}",
-                            "latency_ms": 0,
-                        }
+            dispute_header = f"【核心争议对抗标的清单】: {', '.join(disputed_symbols)}（多空存在严重方向撕裂）"
+            def args_for_critique(k, left):
+                my_prop = trader_proposals.get(k, {}).get("content", "（该交易员第一轮未提交有效提案）")
+                debate_peers_list = [dispute_header]
+                for pk in trader_keys:
+                    if pk != k:
+                        p_res = trader_proposals.get(pk, {})
+                        p_id = p_res.get("proposal_id", f"{pk}_prop")
+                        p_name = p_res.get("role_name", pk)
+                        debate_peers_list.append(
+                            f"=== 【{p_name}】(提案标识: {p_id}) ===\n"
+                            f"{p_res.get('content', '（未提交）')}"
+                        )
+                peers_text = "\n\n".join(debate_peers_list)
+                return (k, roles[k], my_prop, peers_text,
+                        original_system_prompt, left, runtime_context)
+            trader_debates = _run_parallel_seats(
+                roles, trader_keys, call_critique, args_for_critique, round2_budget
+            )
+
     else:
         # === MODE: Standard (Single-Round Proposals -> CIO Verdict) ===
-        rem = deadline - time.time()
+        rem = remaining()
         if rem < MIN_SAFE_REASONING_TIME + 2.0:
             raise TimeoutError(
                 f"Council timeout: remaining time {rem:.2f}s insufficient for standard deliberation (requires >= {MIN_SAFE_REASONING_TIME + 2.0}s)"
@@ -561,34 +556,12 @@ def execute_council_debate(load_config: Callable[[], Dict[str, Any]], resolve_se
         # MIN_SAFE_REASONING_TIME(5s)，四席思考型模型吃满后 CIO 只能在几秒内草率定稿。
         cio_reserve = min(CIO_MIN_ARBITRATION_TIME, max(MIN_SAFE_REASONING_TIME, rem * 0.35))
         member_timeout = max(2.0, min(max(rem * 0.55, 90.0), rem - cio_reserve))
-        with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, len(trader_keys))) as pool:
-            futures = {}
-            for idx, key in enumerate(trader_keys):
-                if idx > 0:
-                    time.sleep(0.8)  # 错峰 0.8s 提交，防毫秒级并发打穿代理连接池
-                fut = pool.submit(
-                    call_trader,
-                    key,
-                    roles[key],
-                    market_prompt,
-                    original_system_prompt,
-                    member_timeout,
-                    runtime_context,
-                )
-                futures[fut] = key
-            for fut in concurrent.futures.as_completed(futures):
-                key = futures[fut]
-                try:
-                    trader_proposals[key] = fut.result()
-                except Exception as exc:
-                    trader_proposals[key] = {
-                        "proposal_id": f"{key}_prop",
-                        "role_id": key,
-                        "role_name": roles[key].get("name", key),
-                        "status": "error",
-                        "content": f"Proposal exception: {exc}",
-                        "weight": 0.0,
-                    }
+        trader_proposals = _run_parallel_seats(
+            roles, trader_keys, call_trader,
+            lambda key, left: (key, roles[key], market_prompt,
+                               original_system_prompt, left, runtime_context),
+            member_timeout, stagger=True,
+        )
 
     # Compile the Structured Investment Committee Docket
     transcript_blocks = []
@@ -649,7 +622,7 @@ def execute_council_debate(load_config: Callable[[], Dict[str, Any]], resolve_se
         )
 
     # CIO Final Review & Funding Verdict
-    rem = deadline - time.time()
+    rem = remaining()
     if rem < MIN_SAFE_REASONING_TIME:
         raise TimeoutError(
             f"Council deliberation timeout before CIO arbitration: {rem:.2f}s remaining is below safety threshold {MIN_SAFE_REASONING_TIME}s"
@@ -716,23 +689,26 @@ def execute_council_debate(load_config: Callable[[], Dict[str, Any]], resolve_se
         "3. 在 decisions 中对标的池全部标的逐一下达方案采纳或驳回批复（包含 adopted_role 与 reasoning），并给出完整四维点位！"
     )
 
-    cio_timeout = max(MIN_SAFE_REASONING_TIME, deadline - time.time())
-    content, reasoning, usage, latency = execute_llm_request(
-        messages=[
-            {"role": "system", "content": cio_system_prompt},
-            {"role": "user", "content": cio_user_prompt},
-        ],
-        model=override_model,
-        base_url=override_url,
-        api_key=override_key,
-        api_format=override_format,
-        reasoning_effort=override_effort,
-        temperature=cio_temperature,
-        response_format={"type": "json_object"},
-        timeout=cio_timeout,
-        allow_fallback=False,  # CIO 终审同理由登记模型作答；整链失败由上层降级单模型决策
-    )
+    check_deadline(reserve=MIN_SAFE_REASONING_TIME)
+    cio_timeout = check_deadline()
+    with request_scope("council.cio"):
+        content, reasoning, usage, latency = execute_llm_request(
+            messages=[
+                {"role": "system", "content": cio_system_prompt},
+                {"role": "user", "content": cio_user_prompt},
+            ],
+            model=override_model,
+            base_url=override_url,
+            api_key=override_key,
+            api_format=override_format,
+            reasoning_effort=override_effort,
+            temperature=cio_temperature,
+            response_format={"type": "json_object"},
+            timeout=cio_timeout,
+            allow_fallback=False,  # CIO 终审同理由登记模型作答；整链失败由上层降级单模型决策
+        )
 
+    check_deadline()
     clean_content = content.strip()
     if clean_content.startswith("```json"):
         clean_content = clean_content[7:]
@@ -757,7 +733,7 @@ def execute_council_debate(load_config: Callable[[], Dict[str, Any]], resolve_se
         "total_duration_ms": int((time.time() - t_start) * 1000),
         "arbitrator": {
             "role_name": cio_spec.get("name", "首席投资官 (CIO)"),
-            "model_used": override_model or get_active_llm_runtime().get("model", "default"),
+            "model_used": (usage or {}).get("_astra_trace", {}).get("model") or override_model or get_active_llm_runtime().get("model", "default"),
             "model_requested": cio_resolved["requested"],
             "model_registered": cio_resolved["registered"],
             "model_fallback": cio_resolved["fallback"],
@@ -771,5 +747,8 @@ def execute_council_debate(load_config: Callable[[], Dict[str, Any]], resolve_se
         "consensus_metrics": consensus_data,
     }
 
+    brain_output.pop("_astra_trace", None)
+    if isinstance(usage, dict) and isinstance(usage.get("_astra_trace"), dict):
+        brain_output["_astra_trace"] = usage["_astra_trace"]
     brain_output["council_transcript"] = council_transcript
     return brain_output, council_transcript

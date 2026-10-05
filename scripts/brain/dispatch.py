@@ -18,6 +18,26 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
+from astra_backend.deadline import (
+    BRAIN_PERSISTENCE_SECONDS, beijing_now, check_deadline, cycle_metadata,
+    deadline_scope, request_scope,
+)
+
+
+def _execution_metadata(trace):
+    metadata = cycle_metadata()
+    metadata.pop("caller", None)
+    if isinstance(trace, dict):
+        for source, target in (("model", "actual_model"), ("request_id", "request_id"),
+                               ("client_request_id", "client_request_id"),
+                               ("started_at", "request_started_at"),
+                               ("completed_at", "request_completed_at")):
+            value = trace.get(source)
+            if isinstance(value, str) and value:
+                metadata[target] = value[:200]
+    metadata["completed_at"] = beijing_now()
+    return metadata
+
 
 def dispatch_llm_and_persist_decisions(*,
         AI_DECISION_CACHE_FILE,
@@ -69,116 +89,141 @@ def dispatch_llm_and_persist_decisions(*,
     一起透传即可 —— 无需哨兵、无需回传列表。
     """
     try:
+        check_deadline()
         t0 = time.time()
-        raw_res = None
-        brain_output = None
+        # Keep the last minute of the brain scope for validation and durable
+        # persistence; model calls and parsing may only use earlier time.
+        with deadline_scope(timeout=check_deadline(reserve=BRAIN_PERSISTENCE_SECONDS)):
+            raw_res = None
+            brain_output = None
+            trace = None
 
-        # Transparent check: is Multi-Agent Council enabled?
-        council_enabled = False
-        try:
-            from astra_backend.council_manager import load_council_config, execute_council_debate
-            c_cfg = load_council_config()
-            council_enabled = bool(c_cfg.get("enabled"))
-        except Exception:
+            # Transparent check: is Multi-Agent Council enabled?
             council_enabled = False
-
-        # 委员会运行状态对前台透明（2026-09-10）：此前静默降级——50 周期 0 成功也
-        # 无处诊断。ran=False 必带降级原因，进 per-symbol 缓存与历史审计。
-        council_status: Dict[str, Any] = {"ran": False, "reason": "未启用（后台投委会开关关闭）"}
-        if council_enabled:
-            council_status = {"ran": False, "reason": "辩论未返回"}
-            print("[AI Brain Council] 🏛️ 多模型委员会已开启，正在启动各专家参谋现场辩论与首席仲裁...")
             try:
-                # 审计 P1-4d：席位提示词里的 {{account_balance}}/{{market_matrix}}/{{trading_memory}}
-                # 等占位符此前从不渲染（render_variables 在委员会全文 0 次）→ 模型只看得到花括号。
-                # 这里把本轮真实运行上下文交给委员会，让席位提示词与交易提示词同源渲染。
-                brain_output, council_transcript = execute_council_debate(
-                    market_prompt=prompt,
-                    original_system_prompt=effective_system_prompt,
-                    timeout=float(c_cfg.get("timeout_seconds", 240.0)),
-                    runtime_context=runtime_context,
-                )
-                council_status = {
-                    "ran": True,
-                    "duration_ms": int(council_transcript.get("total_duration_ms") or 0),
-                    "consensus_mode": council_transcript.get("consensus_mode"),
-                    "advisors_ok": sum(
-                        1 for v in (council_transcript.get("advisors") or {}).values()
-                        if isinstance(v, dict) and v.get("status") != "error"
-                    ),
-                    "advisors_total": len(council_transcript.get("advisors") or {}),
-                }
-                print(f"[AI Brain Council] ✅ 委员会辩论与终审完成，耗时: {council_status['duration_ms']}ms"
-                      f"（参谋 {council_status['advisors_ok']}/{council_status['advisors_total']} 提案有效）")
-            except Exception as e:
-                council_status = {"ran": False, "reason": f"{type(e).__name__}: {str(e)[:300]}"}
-                print(f"[AI Brain Council] ⚠️ 委员会决策超时或异常: {e}，自动降级为单模型极速决策！")
-                brain_output = None
+                from astra_backend.council_manager import load_council_config, execute_council_debate
+                c_cfg = load_council_config()
+                council_enabled = bool(c_cfg.get("enabled"))
+            except Exception:
+                council_enabled = False
 
-        if brain_output is None:
-            print(f"[AI Brain Batch] 🚀 正在发起单次全市场大模型宏观决策推演 ({model_name} / {api_format} / 思考上限 {thinking_timeout:.0f}s)...")
-            if execute_llm_request:
-                content, _, usage_dict, _ = execute_llm_request(
-                    messages=[
-                        {"role": "system", "content": effective_system_prompt},
-                        {"role": "user", "content": prompt}
-                    ],
-                    model=model_name,
-                    base_url=base_url,
-                    api_key=api_key,
-                    api_format=api_format,
-                    reasoning_effort=effort,
-                    temperature=0.2,
-                    response_format={"type": "json_object"},
-                    timeout=thinking_timeout,
-                )
-                raw_res = {"usage": usage_dict} if isinstance(usage_dict, dict) else {}
-            else:
-                payload = {
-                    "model": model_name,
-                    "messages": [
-                        {"role": "system", "content": effective_system_prompt},
-                        {"role": "user", "content": prompt}
-                    ],
-                    "temperature": 0.2,
-                    "response_format": {"type": "json_object"}
-                }
-                if effort not in ("none", "auto"):
-                    payload["reasoning_effort"] = effort
-                req = urllib.request.Request(
-                    f"{base_url}/chat/completions",
-                    data=json.dumps(payload).encode("utf-8"),
-                    headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json", "User-Agent": "Mozilla/5.0"}
-                )
-                with urllib.request.urlopen(req, timeout=thinking_timeout) as resp:
-                    res = json.loads(resp.read().decode("utf-8"))
-                    content = res["choices"][0]["message"]["content"].strip()
-                    raw_res = res
-
-            if content.startswith("```json"): content = content[7:]
-            if content.startswith("```"): content = content[3:]
-            if content.endswith("```"): content = content[:-3]
-
-            try:
-                brain_output = json.loads(content.strip())
-            except ValueError as parse_error:
-                # 容错修复（2026-09-30，与自进化复盘共用 `repair_json_object`）：
-                # 裸控制字符 / 尾逗号 / 前后散文在模型输出里很常见，而这里解析失败会走到
-                # 外层 except ⇒ `_record_cycle_health("failed")` + 返回 None
-                # ⇒ **整个交易周期没有任何决策**。修不动就抛**原始**错误，
-                # 行为与修复前逐字一致（fail-closed，不新增任何决策语义）。
+            # 委员会运行状态对前台透明（2026-09-10）：此前静默降级——50 周期 0 成功也
+            # 无处诊断。ran=False 必带降级原因，进 per-symbol 缓存与历史审计。
+            council_status: Dict[str, Any] = {"ran": False, "reason": "未启用（后台投委会开关关闭）"}
+            if council_enabled:
+                council_status = {"ran": False, "reason": "辩论未返回"}
+                print("[AI Brain Council] 🏛️ 多模型委员会已开启，正在启动各专家参谋现场辩论与首席仲裁...")
                 try:
-                    brain_output, _repair_report = repair_json_object(content=content)
-                except ValueError:
-                    raise parse_error
-            if not isinstance(brain_output, dict):
-                raise ValueError("LLM response root must be an object")
-            output_chars = len(content)
-        else:
-            # Council returns a parsed decision object, not the single-model
-            # content string. Count its actual serialized output; token usage
-            # remains unknown here because this path receives no usage payload.
-            output_chars = len(json.dumps(brain_output, ensure_ascii=False))
+                    # 审计 P1-4d：席位提示词里的 {{account_balance}}/{{market_matrix}}/{{trading_memory}}
+                    # 等占位符此前从不渲染（render_variables 在委员会全文 0 次）→ 模型只看得到花括号。
+                    # 这里把本轮真实运行上下文交给委员会，让席位提示词与交易提示词同源渲染。
+                    with deadline_scope(timeout=float(c_cfg.get("timeout_seconds", 240.0))):
+                        brain_output, council_transcript = execute_council_debate(
+                            market_prompt=prompt,
+                            original_system_prompt=effective_system_prompt,
+                            timeout=float(c_cfg.get("timeout_seconds", 240.0)),
+                            runtime_context=runtime_context,
+                        )
+                        check_deadline()
+                    council_status = {
+                        "ran": True,
+                        "duration_ms": int(council_transcript.get("total_duration_ms") or 0),
+                        "consensus_mode": council_transcript.get("consensus_mode"),
+                        "advisors_ok": sum(
+                            1 for v in (council_transcript.get("advisors") or {}).values()
+                            if isinstance(v, dict) and v.get("status") != "error"
+                        ),
+                        "advisors_total": len(council_transcript.get("advisors") or {}),
+                    }
+                    print(f"[AI Brain Council] ✅ 委员会辩论与终审完成，耗时: {council_status['duration_ms']}ms"
+                          f"（参谋 {council_status['advisors_ok']}/{council_status['advisors_total']} 提案有效）")
+                except Exception as e:
+                    council_status = {"ran": False, "reason": f"{type(e).__name__}: {str(e)[:300]}"}
+                    print(f"[AI Brain Council] ⚠️ 委员会决策超时或异常: {e}，自动降级为单模型极速决策！")
+                    brain_output = None
+
+            if brain_output is None:
+                # A council failure does not renew the whole inference allowance.
+                check_deadline(reserve=5.0)
+                fallback_timeout = min(float(thinking_timeout), check_deadline())
+                print(f"[AI Brain Batch] 🚀 正在发起单次全市场大模型宏观决策推演 ({model_name} / {api_format} / 思考上限 {thinking_timeout:.0f}s)...")
+                with deadline_scope(timeout=fallback_timeout), request_scope("brain.single_model"):
+                    if execute_llm_request:
+                        content, _, usage_dict, _ = execute_llm_request(
+                            messages=[
+                                {"role": "system", "content": effective_system_prompt},
+                                {"role": "user", "content": prompt}
+                            ],
+                            model=model_name,
+                            base_url=base_url,
+                            api_key=api_key,
+                            api_format=api_format,
+                            reasoning_effort=effort,
+                            temperature=0.2,
+                            response_format={"type": "json_object"},
+                            timeout=fallback_timeout,
+                        )
+                        raw_res = {"usage": usage_dict} if isinstance(usage_dict, dict) else {}
+                        trace = usage_dict.get("_astra_trace") if isinstance(usage_dict, dict) else None
+                    else:
+                        payload = {
+                            "model": model_name,
+                            "messages": [
+                                {"role": "system", "content": effective_system_prompt},
+                                {"role": "user", "content": prompt}
+                            ],
+                            "temperature": 0.2,
+                            "response_format": {"type": "json_object"}
+                        }
+                        if effort not in ("none", "auto"):
+                            payload["reasoning_effort"] = effort
+                        # Keep the legacy payload while using the same bounded,
+                        # correlated transport as managed model requests.
+                        from astra_backend.llm.transport import _send_http
+                        content, _, usage_dict, attempt = _send_http(
+                            {"model": model_name, "api_format": "openai_chat"},
+                            f"{base_url}/chat/completions",
+                            {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json", "User-Agent": "Mozilla/5.0"},
+                            payload,
+                        )
+                        trace = {key: attempt.get(key) for key in
+                                 ("model", "request_id", "client_request_id", "started_at", "completed_at")}
+                        usage_dict["_astra_trace"] = trace
+                        raw_res = {"usage": usage_dict}
+
+                    check_deadline()
+                check_deadline()
+
+                if content.startswith("```json"): content = content[7:]
+                if content.startswith("```"): content = content[3:]
+                if content.endswith("```"): content = content[:-3]
+
+                try:
+                    brain_output = json.loads(content.strip())
+                except ValueError as parse_error:
+                    # 容错修复（2026-09-30，与自进化复盘共用 `repair_json_object`）：
+                    # 裸控制字符 / 尾逗号 / 前后散文在模型输出里很常见，而这里解析失败会走到
+                    # 外层 except ⇒ `_record_cycle_health("failed")` + 返回 None
+                    # ⇒ **整个交易周期没有任何决策**。修不动就抛**原始**错误，
+                    # 行为与修复前逐字一致（fail-closed，不新增任何决策语义）。
+                    try:
+                        brain_output, _repair_report = repair_json_object(content=content)
+                    except ValueError:
+                        raise parse_error
+                if not isinstance(brain_output, dict):
+                    raise ValueError("LLM response root must be an object")
+                output_chars = len(content)
+            else:
+                # Council returns a parsed decision object, not the single-model
+                # content string. Count its actual serialized output; token usage
+                # remains unknown here because this path receives no usage payload.
+                output_chars = len(json.dumps(brain_output, ensure_ascii=False))
+                trace = brain_output.get("_astra_trace")
+                if isinstance(trace, dict):
+                    # CIO request identity is known; aggregated council token usage
+                    # remains unknown instead of being synthesized.
+                    raw_res = {"usage": {"_astra_trace": trace}}
+            check_deadline()
         decisions_dict = brain_output.get("decisions", {})
         pos_mgmt_list = brain_output.get("position_management", [])
         macro_summary = str(brain_output.get("macro_assessment", "宏观中性震荡"))[:120]
@@ -194,6 +239,7 @@ def dispatch_llm_and_persist_decisions(*,
         # Execute Pending Orders Cancellation if AI Brain decides CANCEL
         pending_mgmt_list = brain_output.get("pending_orders_management", [])
         if isinstance(pending_mgmt_list, list):
+            check_deadline()
             execute_brain_pending_cancels(pending_mgmt_list)
 
         standard_cache = assemble_decision_cache(
@@ -210,6 +256,7 @@ def dispatch_llm_and_persist_decisions(*,
         # 审计③(2026-09-13)：整档覆盖与 trader 的 venue-decision 读-改-写互斥
         # （astra_backend.file_locks，同锁文件路径即同临界区），防互相回退。
         from astra_backend.file_locks import file_lock
+        check_deadline()
         with file_lock(AI_DECISION_CACHE_FILE):
             atomic_write_json(AI_DECISION_CACHE_FILE, standard_cache)
         atomic_write_json(AI_POSITION_MANAGEMENT_FILE, {
@@ -233,6 +280,7 @@ def dispatch_llm_and_persist_decisions(*,
                                 if isinstance(brain_output, dict) else None),
             packages=packages, standard_cache=standard_cache,
         )
+        history_record["execution"] = _execution_metadata(trace)
 
         history_list = []
         if os.path.exists(AI_DECISION_HISTORY_FILE):
@@ -252,7 +300,9 @@ def dispatch_llm_and_persist_decisions(*,
                 if len(p_text) > 500:
                     item["ai_last_prompt"] = p_text[:200] + "...(历史轮次已精简收敛)"
 
+        check_deadline()
         atomic_write_json(AI_DECISION_HISTORY_FILE, history_list)
+        check_deadline()
 
         latency = round(time.time() - t0, 2)
         telemetry.finish("success", raw_res, output_chars=output_chars)

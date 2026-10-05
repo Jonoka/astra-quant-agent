@@ -29,6 +29,7 @@ for _p in (str(ROOT), str(ROOT / "scripts")):
 
 import astra_backend.council_manager as council_manager  # noqa: E402
 import astra_backend.file_locks as file_locks  # noqa: E402
+from astra_backend.llm import transport  # noqa: E402
 from scripts.brain import dispatch  # noqa: E402
 from scripts.evolution.review_context import repair_json_object  # noqa: E402
 
@@ -44,6 +45,9 @@ class _Telemetry:
 class _Resp:
     def __init__(self, payload):
         self._raw = json.dumps(payload).encode("utf-8")
+
+    def getcode(self):
+        return 200
 
     def read(self):
         return self._raw
@@ -62,6 +66,9 @@ def _no_lock(path):
 
 class _Harness(unittest.TestCase):
     def setUp(self):
+        recorder = patch.object(transport, "_record_http_attempt")
+        recorder.start()
+        self.addCleanup(recorder.stop)
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
@@ -378,7 +385,8 @@ class LlmRequestTests(_Harness, unittest.TestCase):
             out = self._run(execute_llm_request=None)
         self.assertEqual(seen["url"], "https://api.example.com/chat/completions")
         self.assertEqual(seen["headers"]["Authorization"], "Bearer SECRET")
-        self.assertEqual(seen["timeout"], 30.0)
+        self.assertGreater(seen["timeout"], 29.0)
+        self.assertLessEqual(seen["timeout"], 30.0)
         self.assertIn("assembled", out)
 
     def test_reasoning_effort_is_omitted_for_none_and_auto(self):

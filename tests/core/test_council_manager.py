@@ -252,7 +252,9 @@ class LoadConfigTests(_Base):
         即"配置路径被目录占住"这种误配置会让读配置直接崩。按实际行为钉住。"""
         self.file.mkdir(parents=True, exist_ok=True)
         with mock.patch("sys.stdout", new_callable=lambda: __import__("io").StringIO()):
-            with self.assertRaises(IsADirectoryError):
+            # Linux raises IsADirectoryError; Windows raises PermissionError.
+            # Both reject replacing the destination directory.
+            with self.assertRaises(OSError):
                 CM.load_council_config()
         self.assertEqual(list(self.tmp.glob("council_config_corrupt_*.json")), [],
                          "这条路径不产生备份（与「损坏文件」路径不同）")

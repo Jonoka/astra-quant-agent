@@ -2,6 +2,7 @@
 from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 import hashlib
+import re
 import time
 from typing import Any
 
@@ -9,6 +10,42 @@ from astra_gateway.publisher import DB_PATH
 from astra_gateway.store import GatewayStore
 
 BJ_TZ = timezone(timedelta(hours=8))
+
+
+def _safe_identifier(value: Any, maximum: int = 160) -> str:
+    value = str(value or "")
+    return value if len(value) <= maximum and re.fullmatch(r"[A-Za-z0-9_.:/-]*", value) else ""
+
+
+def record_model_request(record: dict[str, Any]) -> None:
+    """Best-effort metadata projection; arbitrary producer keys are denied."""
+    try:
+        projected = {key: _safe_identifier(record.get(key)) for key in (
+            "caller", "client_request_id", "request_id", "model", "error_type")}
+        if not projected["client_request_id"] or not projected["model"]:
+            return
+        for key in ("scheduled_at", "started_at", "completed_at"):
+            raw = str(record.get(key) or "")
+            if raw:
+                datetime.fromisoformat(raw)
+            projected[key] = raw[:40]
+        if not projected["started_at"]:
+            return
+        status = str(record.get("status") or "")
+        if status not in {"running", "success", "failed", "timeout", "cancelled", "deadline_exceeded", "error"}:
+            return
+        if status != "running" and not projected["completed_at"]:
+            return
+        projected["status"] = status
+        job_id = record.get("job_run_id")
+        projected["job_run_id"] = int(job_id) if job_id is not None and int(job_id) > 0 else None
+        code = record.get("http_status")
+        projected["http_status"] = int(code) if code is not None and 100 <= int(code) <= 599 else None
+        projected["duration_ms"] = max(0, int(record.get("duration_ms") or 0))
+        GatewayStore(DB_PATH).record_model_request(projected)
+    except Exception:
+        # Telemetry must not expose raw DB/HTTP diagnostics or fail inference.
+        pass
 
 
 class ModelCallTelemetry:
@@ -26,6 +63,11 @@ class ModelCallTelemetry:
         usage = (response or {}).get("usage", {}) if isinstance(response, dict) else {}
         if not isinstance(usage, dict):
             usage = {}
+        trace = usage.get("_astra_trace") or (response or {}).get("_astra_trace") or {}
+        if isinstance(trace, dict) and trace.get("model"):
+            actual_model = _safe_identifier(trace["model"])
+            if actual_model:
+                self.model = actual_model
         input_tokens = usage.get("prompt_tokens") or usage.get("input_tokens") or 0
         output_tokens = usage.get("completion_tokens") or usage.get("output_tokens") or 0
         total_tokens = usage.get("total_tokens") or (input_tokens + output_tokens)
@@ -66,7 +108,7 @@ class ModelCallTelemetry:
         else:
             cache_status = "miss"
         # 只留 usage 的**顶层键名**（诊断上游到底报了什么），绝不落任何内容。
-        usage_keys = ",".join(sorted(str(key) for key in usage.keys()))[:200]
+        usage_keys = ",".join(sorted(str(key) for key in usage.keys() if not str(key).startswith("_astra_")))[:200]
 
         record = {
             "caller": self.caller,

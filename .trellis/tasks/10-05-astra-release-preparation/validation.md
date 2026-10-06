@@ -115,3 +115,22 @@ skips. The old-loader negative control and same-basename module check passed.
 Evidence: workspace/independent-discovery-replay/replay.log. A fresh hosted build
 must reach terminal success before any image or deployment attestation is made.
 No production operation is included in Ready/merge/build authorization.
+
+## Second hosted CI correction: shallow acceptance mount
+
+Run 37399376984 passed the deadline regressions, hosted Linux locks, state
+rehearsals, source guard and candidate build, then failed before candidate lock
+tests: os.environ.get eagerly evaluated parents[2] for the shallow /acceptance
+mount despite an explicit /app source root. No image was published.
+
+The helper now evaluates its repository-path fallback only when the source-root
+environment variable is absent; the empty-string behavior remains unchanged.
+A source-guard regression imports the actual helper from the exact shallow path
+and requires discovery of all seven lock cases. All 11 source checks passed.
+Independent Linux verification used the existing dependency image with frozen
+current source files and the exact shallow mount, network disabled, read-only
+root and tmpfs: seven real fcntl cases passed, zero skips, Docker exit 0.
+Evidence: workspace/independent-shallow-lock/shallow-lock.log and source hashes.
+This proves the entry-point correction; acceptance of a newly built candidate
+and its published immutable digest still requires the next hosted run. No
+production operations are authorized by this CI correction.

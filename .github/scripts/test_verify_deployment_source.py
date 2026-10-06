@@ -154,6 +154,17 @@ class DeploymentSourceGuardTests(unittest.TestCase):
         self.assertEqual(steps['Upload verified raw deployment bundle']['with']['name'],
                          'astraquant-v8.6.1-cycle-deadline-deployment')
 
+    def test_singleton_acceptance_imports_from_shallow_mount_with_explicit_source_root(self):
+        root = Path(__file__).resolve().parents[2]
+        source = (root / '.github/scripts/test_linux_singleton_lock.py').read_text(encoding='utf-8')
+        namespace = dict(__file__='/acceptance/test_linux_singleton_lock.py',
+                         __name__='shallow_acceptance_regression')
+        with patch.dict(os.environ, {'ASTRA_LOCK_TEST_SOURCE_ROOT': str(root)}):
+            exec(compile(source, namespace['__file__'], 'exec'), namespace)
+        self.assertEqual(namespace['ROOT'], root.resolve())
+        self.assertEqual(unittest.TestLoader().loadTestsFromTestCase(
+            namespace['LinuxSingletonLockTests']).countTestCases(), 7)
+
     def test_smoke_rejects_missing_patch_labels_and_different_published_image(self):
         import smoke_release_compose as smoke
         env = dict(SOURCE_SHA='a' * 40, SOURCE_VERSION='v8.6.1', SOURCE_REPOSITORY='Jonoka/astra-quant-agent',

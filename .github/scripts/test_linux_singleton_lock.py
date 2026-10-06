@@ -11,7 +11,8 @@ import threading
 import time
 import unittest
 
-ROOT = Path(os.environ.get('ASTRA_LOCK_TEST_SOURCE_ROOT', str(Path(__file__).resolve().parents[2]))).resolve()
+SOURCE_ROOT = os.environ.get('ASTRA_LOCK_TEST_SOURCE_ROOT')
+ROOT = (Path(SOURCE_ROOT) if SOURCE_ROOT is not None else Path(__file__).resolve().parents[2]).resolve()
 CHILD = r'''
 import ast, functools, os, pathlib, sys
 sys.path.insert(0, sys.argv[1])

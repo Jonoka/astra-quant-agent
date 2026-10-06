@@ -49,3 +49,15 @@ rehearsals passed against both historical 90f9f3a and current f53e579. All five
 reviewed taker application blobs retain their exact approved SHA256 values.
 Hosted shared-preflight execution, independent review, final official bundle
 verification and production cutover remain separate acceptance steps.
+
+Independent review R1 (P2) reproduced an obsolete accepted A->B operation
+stopping a later C deployment. The original report and failed independent log
+remain untouched. Rollback now checks journal phase, frozen non-writable source,
+immutable image/config identity and captured previous/candidate/recovery container
+IDs before every stop or ROOT rename. Partial Compose failures durably register
+only matching operation images; unhealthy owned services do not require health
+acceptance before recovery. Missing-ROOT and recovery-start retries keep their
+explicit source and record bindings. Nineteen real Linux control-flow tests cover
+foreign source/image/IDs, late drift, legitimate partial starts and both rename
+interruptions, while preserving latest records and deletions. A journal without
+source identity fails closed; no old operation plan is automatically reapproved.

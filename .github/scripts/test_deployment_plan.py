@@ -50,6 +50,7 @@ class DeploymentPlanTests(unittest.TestCase):
         self.obj.image = 'ghcr.io/jonoka/astra-quant-agent@sha256:' + 'c' * 64
         self.obj.manifest_sha = 'fixture'
         self.obj.state = {'manifest_sha': 'fixture', 'extras': [], 'prompt_refreshed': False}
+        (self.live / 'source-marker').write_bytes(b'previous-source')
         config = {n: M.digest(self.live / n) if (self.live / n).is_file() else None for n in M.CONFIG}
         self.plan = {'schema': 1, 'previous_source': self.obj.previous,
             'previous_image': self.obj.previous_image, 'release_source': self.obj.release,
@@ -79,8 +80,11 @@ class DeploymentPlanTests(unittest.TestCase):
         self.gates()
         candidate = self.op / 'candidate'
         candidate.mkdir()
+        (candidate / 'source-marker').write_bytes(b'candidate-source')
         self.obj.state.update(phase='prepared', guard=self.obj.guard(self.live),
-            candidate=M.tree_manifest(candidate), baseline={}, endpoints={})
+            candidate=M.tree_manifest(candidate), baseline={}, endpoints={},
+            deployment_sources={'previous': M.deployment_source(self.live),
+                                'release': M.deployment_source(candidate)})
 
     def database(self, running=False):
         with closing(sqlite3.connect(self.live / M.GATEWAY_DATABASE)) as db:
@@ -328,7 +332,8 @@ class DeploymentPlanTests(unittest.TestCase):
         self.database()
         changed = self.pool.read_bytes() + b' '
         self.obj.stop.side_effect = lambda: self.pool.write_bytes(changed)
-        with patch.object(M.time, 'time', return_value=1800), self.assertRaisesRegex(M.GateError, 'upgrade_failed_recovery_incomplete'):
+        with patch.object(M.time, 'time', return_value=1800), patch.object(M, 'containers', return_value={}), \
+                self.assertRaisesRegex(M.GateError, 'upgrade_failed_recovery_incomplete'):
             self.obj.execute()
         self.assertEqual(self.pool.read_bytes(), changed)
         self.obj.compose.assert_not_called()
@@ -347,11 +352,14 @@ class DeploymentPlanTests(unittest.TestCase):
         shutil.copytree(original, self.op / 'stopped-snapshot')
         self.obj.state.update(phase='candidate-active', snapshot=snapshot, databases=M.db_state(original))
         (self.live / 'source-marker').write_bytes(b'candidate-source')
+        self.obj.state['deployment_sources'] = {'previous': M.deployment_source(original),
+                                              'release': M.deployment_source(self.live)}
         (self.live / 'data/retained.json').write_bytes(b'new-record')
         (self.live / 'data/deleted.json').unlink()
         changed = self.pool.read_bytes() + b' '
         self.pool.write_bytes(changed)
-        with patch.object(M, 'env_gate'), self.assertRaisesRegex(M.GateError, 'pool_config_drift'):
+        with patch.object(M, 'env_gate'), patch.object(M, 'containers', return_value={}), \
+                self.assertRaisesRegex(M.GateError, 'pool_config_drift'):
             self.obj.rollback()
         self.assertEqual(self.pool.read_bytes(), changed)
         self.assertEqual((self.live / 'data/retained.json').read_bytes(), b'new-record')

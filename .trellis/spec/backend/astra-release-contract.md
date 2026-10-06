@@ -87,3 +87,15 @@ persisted data and deletions; it never restores the stale snapshot over new data
 Unapproved configuration drift stays preserved and blocks restart for review.
 An already-deployed deadline gateway is accepted only with byte-identical gateway
 source; the original independently specified additive migration remains supported.
+
+Rollback also freezes operation-owned deployment identity. Before every stop or
+ROOT rename, it reconciles the journal phase with non-writable source bytes and
+metadata, previous/candidate image provenance and captured container IDs. Healthy,
+unhealthy, stopped and partially created owned containers remain recoverable;
+an external release or recreated same-image container is refused before mutation.
+Candidate/recovery container IDs are journaled even after partial Compose failure.
+Missing-ROOT recovery verifies its staged source and stopped/full recovery evidence
+before restoring it. Rejected direct rollback records a separate identity-rejection
+file and leaves prior failure evidence and the external deployment intact. An old
+journal without deployment-source identity fails closed; no new approval pin is
+derived from a changed live deployment.

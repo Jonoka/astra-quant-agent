@@ -38,6 +38,8 @@ class RuntimeUpgradeTests(unittest.TestCase):
         # These fixtures exercise the original unrelated lifecycle gates. The
         # pinned-plan/native-pool guards have their own real filesystem suite.
         obj.pool_guard = Mock()
+        obj.deployment_guard = Mock()
+        obj.remember_started_containers = Mock()
         return obj
 
     def schema_fixture(self, *, additive=False):

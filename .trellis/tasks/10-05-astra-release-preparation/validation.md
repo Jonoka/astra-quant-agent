@@ -96,3 +96,22 @@ zero skips and precise current-source versus historical image scope. All retaine
 release baseline pins, labels, exact schema/AST guards and latest-state rollback
 contracts remain. New candidate/GHCR/published Compose and production gates remain
 pending; no release workflow was dispatched and no deployment occurred.
+
+## Approved hosted release and direct CI correction
+
+PR #2 was marked Ready and merged as 19181fe8ffa1640da67ac9e946265e092be1d754;
+the merge tree exactly matched accepted 4e532a2 and retained deployed 90f9f3a.
+First hosted build run 37398704112 passed source ancestry, official tests and
+both state rehearsals, then stopped before build/publication because unittest's
+shared default loader retained the first directory as its top-level root.
+
+Only the repeated tests/* discovery now creates a fresh TestLoader and uses the
+project root for qualified module names. Independent AST comparison confirms all
+targets, minima and zero-skip assertions unchanged; isolated .github helpers,
+source/rollback pins, labels, package visibility and workflow permissions remain.
+An independent Linux 3.11.17 replay of the exact corrected YAML body passed 226
+tests across all 11 target suites, plus 10 source gates, with zero failures/errors/
+skips. The old-loader negative control and same-basename module check passed.
+Evidence: workspace/independent-discovery-replay/replay.log. A fresh hosted build
+must reach terminal success before any image or deployment attestation is made.
+No production operation is included in Ready/merge/build authorization.

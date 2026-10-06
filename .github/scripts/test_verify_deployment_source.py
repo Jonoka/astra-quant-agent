@@ -120,6 +120,8 @@ class DeploymentSourceGuardTests(unittest.TestCase):
         regressions = steps['Require all cycle deadline regressions']['run']
         for name in guard.DEADLINE_REGRESSIONS:
             self.assertIn(name, regressions)
+        self.assertIn('unittest.TestLoader().discover', regressions)
+        self.assertIn('top_level_dir=str(Path.cwd())', regressions)
         self.assertIn('suite.countTestCases() >= minimum', regressions)
         self.assertIn('result.testsRun >= minimum', regressions)
         self.assertIn('assert not result.skipped', regressions)

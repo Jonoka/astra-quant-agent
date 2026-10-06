@@ -129,7 +129,7 @@ jobs:
           for name, minimum in targets:
               target = Path(name)
               assert target.is_file(), f'Required suite missing: {target}'
-              suite = unittest.defaultTestLoader.discover(str(target.parent), pattern=target.name)
+              suite = unittest.TestLoader().discover(str(target.parent), pattern=target.name, top_level_dir=str(Path.cwd()))
               assert suite.countTestCases() >= minimum, f'Incomplete discovery: {target}'
               result = unittest.TextTestRunner(verbosity=2).run(suite)
               assert result.wasSuccessful() and result.testsRun >= minimum and result.testsRun > len(result.skipped), f'Suite failed or incomplete: {target}'

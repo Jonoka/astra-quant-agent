@@ -45,3 +45,17 @@ An explicit -- stays missing. Testing only the local getter is insufficient.
 Required checks: valid positive/negative/equal volume, invalid structure/values,
 no silent zero, original pure CVD scenarios, genuine zero in cache/prompt/backend,
 factor preferred and legacy fallback, and existing affected module regressions.
+
+PRs targeting codex/deploy run `.github/workflows/test-taker-parsing.yml`
+on opened/synchronize/reopened/ready_for_review, including draft PRs. The job
+checks out and verifies the exact PR head, with read-only repository permissions
+and no persisted checkout credentials. It installs requirements and runs the
+regression gate's own tests, then `run_taker_regressions.py` on Linux.
+The offline runner copies source into a temporary directory, excluding runtime
+data/logs, .env files and Git credentials; it seeds only the tracked prompt
+template and preserves tests/data fixtures. Network calls are denied before
+application imports. Seventeen explicit suites require at least 411 tests total
+and individual minimum counts. Failures, errors, skips, expected failures and
+incomplete discovery fail the job. Review-only external suites are separate
+evidence and are not counted as hosted tests. Release/helper workflows remain
+manual and unchanged.

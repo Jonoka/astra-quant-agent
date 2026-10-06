@@ -141,21 +141,21 @@ class OkxRubikSourceTests(_HttpMixin, unittest.TestCase):
         res = self._okx({"long-short-pos-ratio": {"code": "0", "data": [["t", "3.0"]]},
                          "taker-volume": {"code": "0", "data": [["t", "30000", "10000"]]}},
                         price=100.0)
-        self.assertEqual(res["notional"]["netNotionalUsdt"], 20000.0)
-        self.assertEqual(res["takerNetUsd"], "2.0万 U")
+        self.assertEqual(res["notional"]["netNotionalUsdt"], -20000.0)
+        self.assertEqual(res["takerNetUsd"], "-2.0万 U")
 
     def test_taker_uses_the_second_and_third_columns(self):
         res = self._okx({"long-short-pos-ratio": {"code": "0", "data": [["t", "1.0"]]},
                          "taker-volume": {"code": "0", "data": [["t", "600", "100"]]}})
-        self.assertEqual(res["notional"]["netNotionalUsdt"], 500.0)
+        self.assertEqual(res["notional"]["netNotionalUsdt"], -500.0)
         # 小额分支走 `round(x, 0)` ⇒ float ⇒ 带 ".0"
-        self.assertEqual(res["takerNetUsd"], "500.0 U")
+        self.assertEqual(res["takerNetUsd"], "-500.0 U")
 
     def test_taker_failure_leaves_the_placeholder(self):
         res = self._okx({"long-short-pos-ratio": {"code": "0", "data": [["t", "3.0"]]},
                          "taker-volume": OSError("x")})
         self.assertEqual(res["takerNetUsd"], "--")
-        self.assertEqual(res["notional"]["netNotionalUsdt"], 0.0)
+        self.assertIsNone(res["notional"]["netNotionalUsdt"])
 
     def test_long_short_ratio_is_not_derived_when_the_exchange_gave_one(self):
         # OKX 把交易所给的比值**原样**放进 longShortRatio（不做推导）。

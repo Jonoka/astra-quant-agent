@@ -394,7 +394,7 @@ class CryptoOnlySourceTests(_Base, unittest.TestCase):
 
     def test_taker_net_is_formatted_in_ten_thousands(self):
         pkg = self._run()
-        self.assertEqual(pkg["takerNetUsd"], "1.0万 U")  # (50000-40000)/1e4
+        self.assertEqual(pkg["takerNetUsd"], "-1.0万 U")  # (buy 40000 - sell 50000)/1e4
 
     def test_no_ccy_skips_rubik_queries(self):
         pkg = self._run(item=self._item(ccy=""))

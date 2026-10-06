@@ -38,6 +38,7 @@ from scripts.factors.defaults import build_default_factors
 from scripts.factors.scoring import score_composite_alpha
 from scripts.factors.candles_15m import compute_15m_indicators, mark_15m_missing
 from scripts.factors import okx_quant_factors as qf
+from scripts.okx_taker import latest_taker_volumes
 from concurrent.futures import ThreadPoolExecutor
 
 _BJ = timezone(timedelta(hours=8))
@@ -208,9 +209,9 @@ def compute_instrument_factors(item: Dict[str, Any], smart_money_pool: Dict[str,
         # ★ 先置缺失：`taker_5m` 取不到时原实现留着默认 "0 U"，
         #   提示词会显示"5M主动吃单净差=0 U"——那是"零净流"这个**结论**。
         factors["volume_money_flow"]["taker_net_usd"] = "--"
-        if taker_5m:
-            buy = safe_float(taker_5m[0][2]) if len(taker_5m[0]) > 2 else 0.0
-            sell = safe_float(taker_5m[0][1]) if len(taker_5m[0]) > 1 else 0.0
+        volumes = latest_taker_volumes(taker_5m)
+        if volumes is not None:
+            buy, sell = volumes
             net_diff = buy - sell
             factors["volume_money_flow"]["taker_net_usd"] = (
                 f"{round(net_diff / 1e4, 1)}万 U" if abs(net_diff) >= 1e4
@@ -243,8 +244,10 @@ def compute_instrument_factors(item: Dict[str, Any], smart_money_pool: Dict[str,
         notional = sm.get("notional", {})
         win = sm.get("winRate", {})
         w_long = round(safe_float(ls.get("weightedLongRatio", 0.5)) * 100, 1)
-        net_usdt = safe_float(notional.get("netNotionalUsdt", 0))
-        net_str = f"{round(net_usdt / 1e4, 1)}万 U" if abs(net_usdt) >= 1e4 else f"{round(net_usdt, 0)} U"
+        net_usdt = notional.get("netNotionalUsdt")
+        net_str = "--"
+        if net_usdt is not None:
+            net_str = f"{round(net_usdt / 1e4, 1)}万 U" if abs(net_usdt) >= 1e4 else f"{round(net_usdt, 0)} U"
         
         factors["smart_money_derivatives"]["weighted_long_pct"] = w_long
         factors["smart_money_derivatives"]["smart_money_flow_usd"] = net_str
@@ -265,9 +268,9 @@ def compute_instrument_factors(item: Dict[str, Any], smart_money_pool: Dict[str,
             if short_win > 0:
                 parts.append(f"空胜率{round(short_win * 100, 1)}%")
             factors["smart_money_derivatives"]["top_win_rate"] = " / ".join(parts)
-        if w_long >= 65.0 and net_usdt > 0:
+        if net_usdt is not None and w_long >= 65.0 and net_usdt > 0:
             factors["smart_money_derivatives"]["signal"] = "BULL_ACCUMULATION"
-        elif w_long <= 35.0 and net_usdt < 0:
+        elif net_usdt is not None and w_long <= 35.0 and net_usdt < 0:
             factors["smart_money_derivatives"]["signal"] = "BEAR_DISTRIBUTION"
 
     # ★ 2026-10 用户拍板：预估型强平热力图**已整块移除**（构建/透传/渲染/看板卡片）。

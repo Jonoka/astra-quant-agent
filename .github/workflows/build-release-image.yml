@@ -83,6 +83,14 @@ jobs:
           test "$(git -C validation rev-parse HEAD)" = "$SOURCE_SHA"
           python ci/.github/scripts/verify_deployment_source.py validation "$UPSTREAM_SHA" "$SOURCE_SHA"
 
+      - name: Require reviewed taker parsing regressions
+        working-directory: source
+        env:
+          ASTRA_CI_EXPECTED_SHA: ${{ env.SOURCE_SHA }}
+        run: |
+          python -m unittest discover -s .github/scripts -p test_taker_regression_gate.py -v
+          python .github/scripts/run_taker_regressions.py
+
       - name: Run official migration and administrator tests
         working-directory: validation
         shell: bash

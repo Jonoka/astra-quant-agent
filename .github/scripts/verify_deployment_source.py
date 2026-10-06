@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import ast
+import hashlib
 from pathlib import Path
 import re
 import subprocess
@@ -13,6 +14,19 @@ PREVIOUS_SHA = "90f9f3a558bdbea0171b19a42c58e2fae7ed8e9d"
 # source guard is deliberately exact so an unrelated application edit cannot
 # enter a release image through a workflow-only review.
 APPLICATION_PATCH = {
+    '.trellis/spec/backend/okx-taker-parsing.md',
+    '.trellis/tasks/10-06-okx-taker-parse/boundary-verification.md',
+    '.trellis/tasks/10-06-okx-taker-parse/design.md',
+    '.trellis/tasks/10-06-okx-taker-parse/implement.md',
+    '.trellis/tasks/10-06-okx-taker-parse/prd.md',
+    '.trellis/tasks/10-06-okx-taker-parse/task.json',
+    '.trellis/tasks/10-06-okx-taker-parse/verification.md',
+    'scripts/okx_taker.py',
+    'tests/extraction/test_brain_package_extraction.py',
+    'tests/ops/test_brain_packages.py',
+    'tests/ops/test_factors_smart_money.py',
+    'tests/trading/test_okx_taker_consistency.py',
+    'tests/trading/test_okx_taker_decimal.py',
     '.trellis/spec/backend/astra-cycle-deadlines.md',
     '.trellis/spec/backend/astra-release-contract.md',
     '.trellis/spec/backend/index.md',
@@ -77,6 +91,16 @@ APPLICATION_PATCH = {
     'tests/venues/test_market_data_service_tails.py',
     'tests/venues/test_okx_public_data.py',
     'tests/venues/test_okx_public_domains.py',
+}
+
+# Exact blobs from independently reviewed PR3 head 8b6a4bf. Extending the path
+# set must not authorize arbitrary changes inside the repaired application files.
+TAKER_PATCH_SHA256 = {
+    'scripts/okx_taker.py': 'bd8540601ab614d9d42f054b01e588778b1afd28af90d27a90974a6eee42b2e0',
+    'scripts/brain/packages.py': '4a1646100bb5985b863dca72691979949a9ef2638081bed95747ec14ed10cb18',
+    'scripts/factors/smart_money.py': '78ef086483931433f6b7c1a28d8cd624972c0bf4748028da128cf9933ae446f9',
+    'scripts/factor_library.py': '7c16adb40962b23b2dd7b65a4c75dd3001ab10f5d70104afe5066bbbf45b6ae1',
+    'scripts/factors/okx_quant_factors.py': 'dbedeccd639e74ac52388f1f2d77d8ddd4e21c3f90190a78e4c26b9bbfa7f770',
 }
 
 # Independently reviewed names include all 62 original cycle-deadline regressions.
@@ -190,6 +214,11 @@ def verify(source: Path, upstream: str, revision: str) -> None:
     application = {path for path in changes if not path.startswith(".github/")}
     assert application == APPLICATION_PATCH, "Missing retained patch or unreviewed application changes"
     assert not git("status", "--porcelain"), "Source changed after revision verification"
+    for relative, expected in TAKER_PATCH_SHA256.items():
+        path = source / relative
+        assert path.is_file(), f"Required reviewed taker source missing: {relative}"
+        assert hashlib.sha256(path.read_bytes()).hexdigest() == expected, (
+            f"Reviewed taker source changed: {relative}")
     suite_path = source / "tests/ops/test_brain_dispatch.py"
     tree = ast.parse(suite_path.read_text(encoding="utf-8"))
     suites = [node for node in tree.body if isinstance(node, ast.ClassDef)

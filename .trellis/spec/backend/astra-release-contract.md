@@ -2,6 +2,12 @@
 
 The deployment fork is `Jonoka/astra-quant-agent`, deploy branch `codex/deploy`.
 Each release builds its actual `github.sha`; upstream `main` remains unchanged.
+PR3's reviewed taker repair extends the exact application path set. Its five
+application files must match SHA-256 blobs from independently reviewed head
+`8b6a4bf1948b6e19e175b881e36eb4d3bf78e504`; missing or changed files are rejected.
+Formal release also requires the same offline 411-test taker gate and its five
+self-tests before building, retaining all prior ancestry, migration, deadline,
+Linux lock, Compose and immutable publication gates.
 The reviewed current runtime baseline is source
 `90f9f3a558bdbea0171b19a42c58e2fae7ed8e9d`, upstream
 `e0b29fef1818e0ff9c6b210eb73234620e276a02`, and image

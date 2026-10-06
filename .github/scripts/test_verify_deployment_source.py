@@ -67,7 +67,8 @@ class DeploymentSourceGuardTests(unittest.TestCase):
         root = Path(__file__).resolve().parents[2]
         with tempfile.TemporaryDirectory() as tmp:
             source = Path(tmp)
-            for relative in (*guard.DEADLINE_REGRESSIONS, 'tests/ops/test_brain_dispatch.py'):
+            for relative in (*guard.DEADLINE_REGRESSIONS, *guard.TAKER_PATCH_SHA256,
+                             'tests/ops/test_brain_dispatch.py'):
                 target = source / relative
                 target.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copyfile(root / relative, target)
@@ -83,6 +84,33 @@ class DeploymentSourceGuardTests(unittest.TestCase):
             (source / 'tests/llm/test_llm_deadline.py').unlink()
             with self.assertRaisesRegex(AssertionError, 'Required deadline regression missing'):
                 self._verify(source=source)
+
+    def test_reviewed_taker_files_cannot_disappear_or_change(self):
+        root = Path(__file__).resolve().parents[2]
+        self.assertEqual(len(guard.TAKER_PATCH_SHA256), 5)
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp)
+            for relative in guard.TAKER_PATCH_SHA256:
+                target = source / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(root / relative, target)
+            for relative in guard.TAKER_PATCH_SHA256:
+                target = source / relative
+                original = target.read_bytes()
+                target.write_bytes(original + b'\n# unreviewed mutation\n')
+                with self.subTest(relative=relative), self.assertRaisesRegex(
+                        AssertionError, 'Reviewed taker source changed'):
+                    self._verify(source=source)
+                target.unlink()
+                with self.subTest(missing=relative), self.assertRaisesRegex(
+                        AssertionError, 'Required reviewed taker source missing'):
+                    self._verify(source=source)
+                target.write_bytes(original)
+        for relative in ('scripts/okx_taker.py', 'tests/trading/test_okx_taker_decimal.py',
+                         'tests/trading/test_okx_taker_consistency.py'):
+            with self.subTest(missing_path=relative), self.assertRaisesRegex(
+                    AssertionError, 'Missing retained patch'):
+                self._verify(guard.APPLICATION_PATCH - {relative})
 
     def test_deadline_and_review_documents_cannot_disappear_or_accept_other_paths(self):
         for path in ('astra_backend/deadline.py', '.trellis/spec/backend/astra-release-contract.md',

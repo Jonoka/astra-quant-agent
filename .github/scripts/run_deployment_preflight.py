@@ -53,11 +53,11 @@ require_complete_result(result,minimum)
 '''
         for name, minimum in SUITES.items():
             command = [sys.executable, '-c', loader, str(source / '.github/scripts' / name), str(minimum)]
-            if name == 'test_deployment_plan.py' and os.geteuid() != 0:
+            if name in {'test_deployment_plan.py', 'test_deployment_identity.py'} and os.geteuid() != 0:
                 # Real ownership refusal cases require root-owned disposable
                 # fixtures. Escalate this synthetic suite only, on hosted CI.
                 if env.get('GITHUB_ACTIONS') != 'true':
-                    raise RuntimeError('Plan ownership acceptance needs a root Linux sandbox')
+                    raise RuntimeError('Deployment ownership acceptance needs a root Linux sandbox')
                 command = ['sudo', '-n', '--preserve-env=ASTRA_PREVIOUS_SOURCE,ASTRA_DEPLOYED_SOURCE,PYTHONDONTWRITEBYTECODE',
                            *command]
             subprocess.run(command, check=True, env=env, timeout=180, cwd=source)

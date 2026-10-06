@@ -128,19 +128,19 @@ class MoveIsLosslessTest(unittest.TestCase):
 
         The old pre-move comparison already fails on unmodified f53e579.
         Its fixture remains historical evidence; the active guard permits only
-        the exact four-line taker-parser replacement reviewed in this repair.
+        the exact decimal-net parser replacement reviewed in this repair.
         Sign and malformed-row behavior have separate runtime coverage.
         """
         source = "\n".join(_submodule_function_lines())
         parser_block = "\n".join([
-            '                    volumes = latest_taker_volumes(d["data"])',
-            '                    if volumes is None:',
+            '                    net_diff = latest_taker_net(d["data"])',
+            '                    if net_diff is None:',
             '                        raise ValueError("Invalid OKX taker-volume row")',
-            '                    b_vol, s_vol = volumes',
         ])
         deployed_block = "\n".join([
             '                    b_vol = float(d["data"][0][1])',
             '                    s_vol = float(d["data"][0][2])',
+            '                    net_diff = b_vol - s_vol',
         ])
         self.assertEqual(source.count(parser_block), 1)
         normalised = source.replace(parser_block, deployed_block)

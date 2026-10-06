@@ -13,6 +13,24 @@ remain None, string factors -- (primary legacy N/A); a malformed aligned
 divergence window remains INSUFFICIENT_DATA. Genuine zero stays numeric zero.
 SmartMoney missing numeric net is None, and overlays must preserve it.
 
+Validate the original decimal token's structure/sign/finiteness before float
+conversion. Nonzero values that convert to float zero are unavailable, as are
+nonfinite float magnitudes. Signed mathematical zero remains valid. String
+volumes and JSON integers retain all input digits; JSON floats can preserve
+only their already-decoded shortest decimal representation.
+
+Subtract and sum original Decimal volumes exactly, with precision derived from
+their digit/exponent span and a carry allowance, not the default 28-digit context.
+Decide divergence from the unrounded Decimal sum. Do not add an epsilon or new
+direction threshold. Unsupported final magnitudes/underflow remain unavailable.
+Convert only final numeric outputs to the existing floats, then retain existing
+display rounding. A small valid flow may display zero at that existing precision.
+Ratios also retain float output/rounding and remain missing if unrepresentable.
+
+The float-pair parse_taker_row/latest_taker_volumes wrappers remain compatible
+but must not be used for net arithmetic. Producers use the decimal/net helpers;
+no Decimal object enters persisted snapshots, cache or backend JSON payloads.
+
 Existing route/period/retry, formatting/unit labels, model source priority and
 trade/risk thresholds remain unchanged. Corrected input signs can affect model
 judgment; that is not evidence of a historical WAIT cause. Snapshot refresh and

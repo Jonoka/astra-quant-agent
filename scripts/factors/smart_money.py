@@ -13,10 +13,10 @@ from typing import Any, Dict, List, Optional
 
 try:
     from scripts.okx_public import public_json_get
-    from scripts.okx_taker import latest_taker_volumes
+    from scripts.okx_taker import latest_taker_net
 except ImportError:                                    # pragma: no cover - script import
     from okx_public import public_json_get
-    from okx_taker import latest_taker_volumes
+    from okx_taker import latest_taker_net
 
 _HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
 
@@ -76,10 +76,8 @@ def _fetch_from_okx_rubik(ccy: str, price: float = 0.0, timeout: float = 3.5) ->
                               opener=urllib.request.urlopen, timeout=timeout,
                               user_agent=_HEADERS["User-Agent"])
         if d_t.get("code") == "0" and d_t.get("data") and len(d_t["data"]) > 0:
-            volumes = latest_taker_volumes(d_t["data"])
-            if volumes is not None:
-                b_vol, s_vol = volumes
-                net_notional_usd = b_vol - s_vol
+            net_notional_usd = latest_taker_net(d_t["data"])
+            if net_notional_usd is not None:
                 taker_str = (
                     f"{round(net_notional_usd / 1e4, 1)}万 U"
                     if abs(net_notional_usd) >= 1e4

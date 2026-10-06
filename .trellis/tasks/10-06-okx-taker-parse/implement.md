@@ -14,6 +14,10 @@
    fallback imports; the rest of the application still needs its scripts package.
 5. Review diff separately against official schema, negative-input cases and
    allowed scope; document remaining limits, then create a local commit only.
+6. Address independent review F1/F2/F3 in the same numeric-validation scope;
+   retain review failures, replay its 21 tests unchanged, add precision-boundary
+   regressions, and repeat all affected suites before another local commit and
+   resubmission to the original independent review thread.
 
 Rollback for this unshipped change is to leave the original clean checkout
 untouched and decline the separate repair branch. No runtime rollback occurs.

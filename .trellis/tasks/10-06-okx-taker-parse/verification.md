@@ -1,5 +1,9 @@
 # Local repair verification
 
+Historical first-commit verification. Independent review and its numeric
+boundary follow-up are recorded in boundary-verification.md; the original
+evidence files below are preserved.
+
 Base: deployed `f53e579b0db091f351f271f79ebbb99da1e6f7c2`; separate branch
 `fix/okx-taker-parse-validation`. Both original checkouts remain clean at their
 original heads (workspace f53e579; D:\vps checkout e4fe084). The protected release

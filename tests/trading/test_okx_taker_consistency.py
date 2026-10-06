@@ -42,8 +42,13 @@ class ParserTests(unittest.TestCase):
                     "for name in ('brain.packages', 'factors.smart_money', 'factors.okx_quant_factors'):",
                     "    module = importlib.import_module(prefix + name)",
                     "    assert root in pathlib.Path(module.__file__).resolve().parents",
-                    "    assert module.latest_taker_volumes([['t', '1', '2']]) == (2.0, 1.0)",
-                    "    assert module.latest_taker_volumes.__module__ == prefix + 'okx_taker'",
+                    "    helper = getattr(module, 'latest_taker_net', None)",
+                    "    if helper is not None:",
+                    "        assert helper([['t', '1', '2']]) == 1.0",
+                    "    else:",
+                    "        helper = module.latest_taker_volumes_decimal",
+                    "        assert helper([['t', '1', '2']]) == (2.0, 1.0)",
+                    "    assert helper.__module__ == prefix + 'okx_taker'",
                 ])
                 result = subprocess.run([sys.executable, "-B", "-c", code], cwd=root,
                                         capture_output=True, text=True, timeout=20)

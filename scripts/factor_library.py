@@ -38,7 +38,7 @@ from scripts.factors.defaults import build_default_factors
 from scripts.factors.scoring import score_composite_alpha
 from scripts.factors.candles_15m import compute_15m_indicators, mark_15m_missing
 from scripts.factors import okx_quant_factors as qf
-from scripts.okx_taker import latest_taker_volumes
+from scripts.okx_taker import latest_taker_net
 from concurrent.futures import ThreadPoolExecutor
 
 _BJ = timezone(timedelta(hours=8))
@@ -209,10 +209,8 @@ def compute_instrument_factors(item: Dict[str, Any], smart_money_pool: Dict[str,
         # ★ 先置缺失：`taker_5m` 取不到时原实现留着默认 "0 U"，
         #   提示词会显示"5M主动吃单净差=0 U"——那是"零净流"这个**结论**。
         factors["volume_money_flow"]["taker_net_usd"] = "--"
-        volumes = latest_taker_volumes(taker_5m)
-        if volumes is not None:
-            buy, sell = volumes
-            net_diff = buy - sell
+        net_diff = latest_taker_net(taker_5m)
+        if net_diff is not None:
             factors["volume_money_flow"]["taker_net_usd"] = (
                 f"{round(net_diff / 1e4, 1)}万 U" if abs(net_diff) >= 1e4
                 else f"{net_diff:.0f} U")

@@ -42,7 +42,7 @@ only the two Astra services, copy consistent stopped state and preserve current
 data/config. On failure use original source/image with newest writable state;
 never restore stale pre-cutover records. Wiki evidence uses its lock/CAS protocol.
 
-Local Linux acceptance: 87 tests (37 original helper, 27 plan/capture/manifest,
+Local Linux acceptance: 89 tests (37 original helper, 29 plan/capture/manifest,
 12 source guard, 4 state rehearsal, 7 genuine process locks), zero failures,
 errors or skipped tests. Separate actual-source SQLite upgrade/rollback
 rehearsals passed against both historical 90f9f3a and current f53e579. All five

@@ -133,6 +133,19 @@ class DeploymentPlanTests(unittest.TestCase):
         with self.assertRaisesRegex(M.GateError, 'approved_configuration_drift'):
             self.obj.pool_guard()
 
+    def test_configuration_directory_cannot_be_accepted_as_absence(self):
+        (self.live / 'data/risk_config.json').mkdir()
+        with self.assertRaisesRegex(M.GateError, 'configuration_file_type'):
+            self.obj.pool_guard()
+
+    def test_runtime_scope_requires_strict_boolean_and_integer_types(self):
+        for key, value in (('demo', 1), ('schedule_seconds', 900.0),
+                           ('minimum_idle_window_seconds', 480.0)):
+            plan = copy.deepcopy(self.plan)
+            plan['runtime'][key] = value
+            with self.subTest(key=key), self.assertRaisesRegex(M.GateError, 'deployment_runtime_scope'):
+                M.validate_deployment_plan(plan)
+
     def test_existing_configuration_drift_is_rejected_without_printing_it(self):
         (self.live / '.env').write_bytes(b'new-synthetic-secret')
         with self.assertRaisesRegex(M.GateError, '^approved_configuration_drift$'):

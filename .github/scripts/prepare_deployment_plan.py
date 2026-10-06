@@ -15,7 +15,7 @@ import stat
 from runtime_release_upgrade import (
     ROOT, PROJECT, SERVICES, NAMES, CONFIG, UPSTREAM, IMAGE_RE, PATCH_ID,
     OKX_PATCH_ID, DEADLINE_PATCH_ID, digest, sha, plain_path, operation_path,
-    require, run, env_gate, validate_deployment_plan,
+    require, run, env_gate, validate_deployment_plan, configuration_hash,
 )
 from stage_release_bundle import source_identity, save
 
@@ -36,8 +36,7 @@ def capture(operation, expected_source, expected_image, approved_names):
             'gid': before.st_gid, 'mode': stat.S_IMODE(before.st_mode)}
     config = {}
     for name in CONFIG:
-        path = plain_path(ROOT / name)
-        config[name] = digest(path) if path.is_file() else None
+        config[name] = configuration_hash(ROOT / name)
     plan = {'schema': 1, 'previous_source': expected_source, 'previous_image': expected_image,
             'release_source': release, 'image': image,
             'helper_sha256': digest(operation / 'runtime_release_upgrade.py'),
@@ -89,7 +88,7 @@ print(json.dumps({'names':[i['name'] for i in items],
     require(raw == pool_path.read_bytes() and
             (before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns) ==
             (after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns) and
-            all((digest(ROOT / name) if (ROOT / name).is_file() else None) == value
+            all(configuration_hash(ROOT / name) == value
                 for name, value in config.items()), 'baseline_capture_drift')
     return plan
 

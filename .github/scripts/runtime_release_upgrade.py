@@ -151,6 +151,8 @@ def validate_deployment_plan(plan):
             all(v is None or isinstance(v, str) and re.fullmatch(r'[0-9a-f]{64}', v)
                 for v in config.values()), 'deployment_configuration_hashes')
     require(isinstance(plan['runtime'], dict) and type(plan['runtime'].get('demo')) is bool and
+            type(plan['runtime'].get('schedule_seconds')) is int and
+            type(plan['runtime'].get('minimum_idle_window_seconds')) is int and
             plan['runtime'] == {'project': PROJECT, 'services': list(SERVICES), 'demo': True,
                                'schedule_seconds': 900, 'minimum_idle_window_seconds': 480},
             'deployment_runtime_scope')
@@ -204,6 +206,20 @@ def plain_path(path):
     for parent in (path, *path.parents):
         require(not parent.is_symlink(), "symlink_path")
     return path
+
+
+def configuration_hash(path):
+    path = plain_path(path)
+    require(not path.exists() or path.is_file(), 'configuration_file_type')
+    if not path.exists():
+        return None
+    before = path.stat()
+    value = digest(path)
+    after = path.stat()
+    require((before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns) ==
+            (after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns),
+            'configuration_read_drift')
+    return value
 
 
 def operation_path(path):
@@ -610,8 +626,7 @@ class Upgrade:
                 (pool['uid'], pool['gid'], pool['mode'], pool['size']) and
                 sha(raw) == pool['sha256'], 'pool_config_drift')
         for name, expected in plan['protected_config'].items():
-            protected = plain_path(ROOT / name)
-            require((digest(protected) if protected.is_file() else None) == expected,
+            require(configuration_hash(ROOT / name) == expected,
                     'approved_configuration_drift')
         return pool
 

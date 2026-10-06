@@ -15,7 +15,7 @@ from stage_release_bundle import extract
 SUITES = {
     'test_verify_deployment_source.py': 12,
     'test_runtime_release_upgrade.py': 37,
-    'test_deployment_plan.py': 27,
+    'test_deployment_plan.py': 29,
     'test_linux_singleton_lock.py': 7,
     'test_rehearse_cycle_deadline_upgrade.py': 4,
     'test_taker_regression_gate.py': 5,

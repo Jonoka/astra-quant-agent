@@ -46,3 +46,17 @@ admin/agents route exposes a bounded safe per-attempt list.
 No image, CI release pin, production configuration, authentication or deployment
 changes. Hosted build/source allowlist adaptation remains a separate reviewed
 deployment prerequisite after owner approval to push/build.
+
+## Approved PR #2 review follow-up
+
+The owner authorized independent review, minimal fixes/tests and a normal update
+of the same draft branch. No merge, release dispatch, image publication or
+production operation is authorized by this follow-up.
+
+Independently reproduced late publication after lock waiting and after slow fsync;
+shared deadlines now bound waiting and atomic replace. Only failed/skipped health
+writes have a narrow audit exception, without changing the decision budget.
+Persist known response-header identity before body reads; retain explicit Beijing
+timezone on scheduler-ended attempts. Serialize old-DB column migration within a
+write transaction to prevent duplicate-column races between services/handlers.
+No schema, strategy, authentication or trading-parameter change was added.

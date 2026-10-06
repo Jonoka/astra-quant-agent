@@ -28,6 +28,7 @@ APPLICATION_PATCH = {
     '.trellis/tasks/10-05-astra-release-preparation/validation.md',
     'astra_backend/council/debate.py',
     'astra_backend/deadline.py',
+    'astra_backend/file_locks.py',
     'astra_backend/exchanges/diagnostics.py',
     'astra_backend/exchanges/listing.py',
     'astra_backend/exchanges/okx.py',
@@ -67,8 +68,10 @@ APPLICATION_PATCH = {
     'tests/llm/test_llm_deadline.py',
     'tests/llm/test_llm_transport_tails.py',
     'tests/ops/test_brain_deadline.py',
+    'tests/ops/test_brain_atomic_deadline.py',
     'tests/ops/test_brain_dispatch.py',
     'tests/ops/test_cycle_deadline.py',
+    'tests/ops/test_file_lock_deadline.py',
     'tests/venues/test_exchange_diagnostics_tails.py',
     'tests/venues/test_market_data_service.py',
     'tests/venues/test_market_data_service_tails.py',
@@ -76,7 +79,7 @@ APPLICATION_PATCH = {
     'tests/venues/test_okx_public_domains.py',
 }
 
-# Independently reviewed names: all 62 cycle-deadline regressions must remain.
+# Independently reviewed names include all 62 original cycle-deadline regressions.
 DEADLINE_REGRESSIONS = {
     'tests/core/test_council_deadline.py': {
         'test_insufficient_cio_time_never_starts_request',
@@ -87,6 +90,8 @@ DEADLINE_REGRESSIONS = {
         'test_stage_wait_is_bounded_and_workers_inherit_parent_context',
     },
     'tests/llm/test_llm_deadline.py': {
+        'test_known_response_identity_is_recorded_before_body_read_can_block',
+        'test_known_error_identity_is_recorded_before_error_body_can_block',
         'test_524_at_deadline_cannot_start_fallback',
         'test_524_retry_uses_remaining_after_backoff',
         'test_adaptive_400_cannot_renew_expired_budget',
@@ -105,6 +110,9 @@ DEADLINE_REGRESSIONS = {
         'test_timeout_consuming_budget_has_no_retry_or_fallback',
     },
     'tests/ops/test_brain_deadline.py': {
+        'test_slow_telemetry_does_not_mark_expired_cycle_healthy_or_return_fresh_success',
+        'test_cache_lock_expiry_does_not_publish_decisions_or_position_instructions',
+        'test_cache_write_expiry_does_not_publish_later_position_or_history_files',
         'test_active_cycle_lock_records_skip_before_reading_runtime_or_starting_request',
         'test_actual_fallback_request_metadata_round_trips_without_secrets',
         'test_collection_is_capped_even_when_unscheduled_cycle_has_more_time',
@@ -124,6 +132,7 @@ DEADLINE_REGRESSIONS = {
         'test_whole_cycle_caps_collection_and_reserves_120_seconds_for_inference',
     },
     'tests/ops/test_cycle_deadline.py': {
+        'test_concurrent_old_database_initialization_serializes_column_migration',
         'test_additive_schema_preserves_old_job_writer_and_old_rows',
         'test_aggregate_uses_actual_fallback_model_and_internal_trace_is_not_usage',
         'test_attempt_start_and_completion_upsert_one_row',
@@ -147,6 +156,21 @@ DEADLINE_REGRESSIONS = {
         'test_storage_admission_can_exhaust_budget_without_a_process',
         'test_storage_admission_delay_is_deducted_immediately_before_launch',
         'test_successful_job_closes_lost_completion_as_unknown_not_fake_success',
+    },
+    'tests/ops/test_file_lock_deadline.py': {
+        'test_without_deadline_retains_blocking_and_reentrant_lock',
+        'test_contended_lock_wait_expires_before_entering_or_renewing_budget',
+        'test_contended_then_available_lock_enters_inside_original_deadline',
+        'test_expiry_at_acquisition_unlocks_without_entering',
+        'test_expired_reentry_does_not_enter_or_release_the_outer_lock',
+        'test_real_cross_process_contention_times_out_then_lock_remains_usable',
+        'test_real_same_process_thread_contention_preserves_absolute_deadline',
+    },
+    'tests/ops/test_brain_atomic_deadline.py': {
+        'test_expired_success_health_cannot_replace_a_previous_failed_audit',
+        'test_fsync_expiry_preserves_existing_file_and_cleans_temporary_output',
+        'test_without_deadline_keeps_real_atomic_publication_behavior',
+        'test_expired_failure_health_is_durable_without_renewing_decision_budget',
     },
 }
 
@@ -188,7 +212,7 @@ def verify(source: Path, upstream: str, revision: str) -> None:
                  for node in suite.body if isinstance(node, ast.FunctionDef)
                  and node.name.startswith("test_")}
         assert expected and expected <= cases, f"Incomplete deadline regression: {relative}"
-    print("PASS: exact corrected fork commit, upstream ancestry, reviewed delta, retained council and all 62 deadline regressions")
+    print("PASS: exact corrected fork commit, upstream ancestry, reviewed delta, retained council and all reviewed deadline regressions")
 
 
 if __name__ == "__main__":

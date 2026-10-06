@@ -157,7 +157,7 @@ def _record_cycle_health(status: str, reason: str = "") -> None:
             "total_failures": int(prev.get("total_failures", 0) or 0) + 1,
         }
     try:
-        atomic_write_json(_ai_health_path(), payload)
+        atomic_write_json(_ai_health_path(), payload, enforce_deadline=(status == "ok"))
     except Exception as exc:
         print(f"[AI Brain Batch] warn ai_health 旁车写入失败: {exc}")
 AI_POSITION_MANAGEMENT_FILE = os.path.join(DATA_DIR, "ai_position_management.json")
@@ -194,7 +194,7 @@ except Exception:  # pragma: no cover - scripts/ 直接运行时走兜底
             return s.replace("-", "").replace("_", "")
 
 
-def atomic_write_json(path: str, payload: Any) -> None:
+def atomic_write_json(path: str, payload: Any, *, enforce_deadline: bool = True) -> None:
     """Replace JSON atomically so readers never observe a partial cache."""
     os.makedirs(os.path.dirname(path), exist_ok=True)
     fd, tmp_path = tempfile.mkstemp(prefix=".ai-brain-", suffix=".tmp", dir=os.path.dirname(path))
@@ -203,6 +203,8 @@ def atomic_write_json(path: str, payload: Any) -> None:
             json.dump(payload, f, ensure_ascii=False, indent=2)
             f.flush()
             os.fsync(f.fileno())
+        if enforce_deadline:
+            check_deadline()
         os.replace(tmp_path, path)
     finally:
         if os.path.exists(tmp_path):

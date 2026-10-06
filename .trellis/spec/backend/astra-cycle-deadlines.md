@@ -111,3 +111,25 @@ chunk framing can still block inside urllib; the subprocess hard boundary is the
 final guard for those cases. A hosted Linux build/lock check and controlled mock
 upstream canary remain deployment prerequisites. Production must not be changed
 or probed by workstation tests.
+
+## PR #2 independent review hardening (2026-10-06)
+
+Persistence lock waiting consumes the current absolute deadline: bounded
+nonblocking flock polling, no renewal, and a second check after acquisition.
+Calls without a deadline retain blocking and same-thread reentrant semantics.
+Fresh cache/position/history publication checks the budget before writing;
+atomic JSON publication checks again after fsync and before replacing the file.
+Expired temporary output is removed and the previous file remains intact.
+Failed/skipped health auditing alone may persist after expiry; successful health
+and returning a fresh result remain bounded, including telemetry wait time.
+
+Known safe response-header request IDs and HTTP status are persisted in the
+existing attempt row before reading either success or error bodies. A hard-killed
+chunk read retains already received identity; unavailable IDs remain blank.
+Scheduler termination/recovery timestamps for model_requests use explicit +08:00
+ISO times. Existing job_runs display/storage formats remain compatible.
+
+Concurrent GatewayStore initializers serialize additive column detection and
+ALTER statements in a BEGIN IMMEDIATE transaction. The schema and old/new writer
+contracts remain unchanged. Required source gates retain all 62 original cases
+and require all 79 reviewed deadline/locking/migration/publication regressions.

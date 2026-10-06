@@ -115,9 +115,11 @@ jobs:
           import unittest
           targets = (
               ('tests/core/test_council_deadline.py', 6),
-              ('tests/llm/test_llm_deadline.py', 16),
-              ('tests/ops/test_brain_deadline.py', 17),
-              ('tests/ops/test_cycle_deadline.py', 23),
+              ('tests/llm/test_llm_deadline.py', 18),
+              ('tests/ops/test_brain_deadline.py', 20),
+              ('tests/ops/test_cycle_deadline.py', 24),
+              ('tests/ops/test_file_lock_deadline.py', 7),
+              ('tests/ops/test_brain_atomic_deadline.py', 4),
               ('tests/core/test_council_debate_mode.py', 1),
               ('tests/llm/test_council_manager.py', 1),
               ('tests/llm/test_llm_call_tails.py', 1),
@@ -146,9 +148,9 @@ jobs:
           target = Path('.github/scripts/test_linux_singleton_lock.py')
           assert target.is_file(), 'Linux singleton suite missing'
           suite = unittest.defaultTestLoader.discover(str(target.parent), pattern=target.name)
-          assert suite.countTestCases() >= 5, 'Incomplete Linux singleton discovery'
+          assert suite.countTestCases() >= 7, 'Incomplete Linux singleton discovery'
           result = unittest.TextTestRunner(verbosity=2).run(suite)
-          assert result.wasSuccessful() and result.testsRun >= 5 and not result.skipped, 'Linux singleton suite failed, incomplete or skipped'
+          assert result.wasSuccessful() and result.testsRun >= 7 and not result.skipped, 'Linux singleton suite failed, incomplete or skipped'
           PY
 
       - name: Rehearse cycle deadline upgrade and latest-state rollback

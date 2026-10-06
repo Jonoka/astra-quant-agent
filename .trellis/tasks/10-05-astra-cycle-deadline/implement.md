@@ -10,3 +10,11 @@
 7. Commit locally; do not push, run production probes, restart or deploy.
 
 Recovery: discard this isolated branch only after delivery; production unchanged.
+
+## Owner-approved review follow-up
+
+Use independent reviewers for inference/persistence and release/migration, reproduce
+findings with synthetic data, implement minimal corrections, require actual Linux
+lock/HTTP/SQLite and retained regressions, then normally push the current original
+branch and update PR #2. Recheck remote drift immediately before pushing; do not
+force, replace the PR, merge, dispatch release workflows or operate production.

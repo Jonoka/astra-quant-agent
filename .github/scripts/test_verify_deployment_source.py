@@ -61,9 +61,9 @@ class DeploymentSourceGuardTests(unittest.TestCase):
         with self.assertRaisesRegex(AssertionError, "Source changed after revision verification"):
             self._verify(status=b" M scripts/okx_public.py\n")
 
-    def test_all_62_reviewed_deadline_cases_are_required(self):
-        self.assertEqual(sum(len(cases) for cases in guard.DEADLINE_REGRESSIONS.values()), 62)
-        self.assertEqual(len(guard.DEADLINE_REGRESSIONS), 4)
+    def test_all_reviewed_deadline_cases_are_required(self):
+        self.assertEqual(sum(len(cases) for cases in guard.DEADLINE_REGRESSIONS.values()), 79)
+        self.assertEqual(len(guard.DEADLINE_REGRESSIONS), 6)
         root = Path(__file__).resolve().parents[2]
         with tempfile.TemporaryDirectory() as tmp:
             source = Path(tmp)
@@ -127,8 +127,8 @@ class DeploymentSourceGuardTests(unittest.TestCase):
         for label in ('council-completion-v1', 'okx-public-domains-v1', 'cycle-deadline-v1'):
             self.assertIn(label, steps['Build candidate from corrected fork and reviewed release recipe']['with']['labels'])
         self.assertIn('test_linux_singleton_lock.py', steps['Verify Linux real singleton locks']['run'])
-        self.assertIn('suite.countTestCases() >= 5', steps['Verify Linux real singleton locks']['run'])
-        self.assertIn('result.testsRun >= 5 and not result.skipped', steps['Verify Linux real singleton locks']['run'])
+        self.assertIn('suite.countTestCases() >= 7', steps['Verify Linux real singleton locks']['run'])
+        self.assertIn('result.testsRun >= 7 and not result.skipped', steps['Verify Linux real singleton locks']['run'])
         lock = steps['Verify candidate image real singleton locks']
         self.assertIn("docker image inspect --format '{{.Id}}' astraquant:ci", lock['run'])
         self.assertIn('docker run --rm --network none --read-only --tmpfs /tmp:rw,nosuid,nodev,size=16m', lock['run'])

@@ -85,3 +85,14 @@ baselines, confirm every hosted gate, pull the immutable image, make a fresh con
 backup and use guarded no-build/no-deps cutover with latest-state rollback. Current
 baseline is source `90f9f3a`, image digest `8b471e...`; old operation backups that would
 return to `e4fe084` are not the rollback target for this repair.
+
+## Later PR #2 review acceptance
+
+The owner's later authorization covers normal feature-branch push and updating
+the same draft PR. Independent review found and fixed persistence-lock/atomic
+publication deadlines, concurrent old-DB column migration and request-ID/timezone
+observability issues. See the cycle task validation for 632 actual Linux tests,
+zero skips and precise current-source versus historical image scope. All retained
+release baseline pins, labels, exact schema/AST guards and latest-state rollback
+contracts remain. New candidate/GHCR/published Compose and production gates remain
+pending; no release workflow was dispatched and no deployment occurred.

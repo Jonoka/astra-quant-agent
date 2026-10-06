@@ -5,6 +5,7 @@ import tempfile
 import threading
 import time
 import unittest
+from contextlib import contextmanager
 from unittest.mock import Mock, call, patch
 
 from astra_backend import deadline
@@ -13,6 +14,44 @@ from tests.ops.test_brain_dispatch import _Harness
 
 
 class BrainDispatchDeadlineTests(_Harness):
+    def test_slow_telemetry_does_not_mark_expired_cycle_healthy_or_return_fresh_success(self):
+        clock = [100.0]
+        original_finish = self.telemetry.finish
+        def slow_finish(*args, **kwargs):
+            original_finish(*args, **kwargs)
+            if args[0] == "success":
+                clock[0] += 121
+        self.telemetry.finish = slow_finish
+        with patch.object(deadline.time, "monotonic", lambda: clock[0]), deadline.deadline_scope(timeout=120):
+            result = self._run()
+        self.assertIsNone(result)
+        self.assertEqual(self.health[0][0], "failed")
+
+    def test_cache_lock_expiry_does_not_publish_decisions_or_position_instructions(self):
+        clock = [100.0]
+        @contextmanager
+        def delayed_lock(path):
+            clock[0] += 121
+            yield
+        self._lock = delayed_lock
+        with patch.object(deadline.time, "monotonic", lambda: clock[0]), deadline.deadline_scope(timeout=120):
+            result = self._run()
+        self.assertIsNone(result)
+        self.assertEqual(self.written, {})
+        self.assertEqual(self.health[0][0], "failed")
+
+    def test_cache_write_expiry_does_not_publish_later_position_or_history_files(self):
+        clock = [100.0]
+        def write(path, value):
+            self._atomic_write(path, value)
+            if path == self.paths["cache"]:
+                clock[0] += 121
+        with patch.object(deadline.time, "monotonic", lambda: clock[0]), deadline.deadline_scope(timeout=120):
+            result = self._run(atomic_write_json=write)
+        self.assertIsNone(result)
+        self.assertEqual(set(self.written), {self.paths["cache"]})
+        self.assertEqual(self.health[0][0], "failed")
+
     def test_exhausted_council_does_not_start_fallback_or_publish_fresh_history(self):
         clock = [100.0]
         fallback = Mock()
@@ -135,7 +174,7 @@ class BrainDispatchDeadlineTests(_Harness):
             from scripts.brain.dispatch import dispatch_llm_and_persist_decisions
             result = dispatch_llm_and_persist_decisions(**self.kw)
         self.assertIs(result, self.written[self.paths["cache"]])
-        self.assertEqual([item["status"] for item in attempts], ["running", "success"])
+        self.assertEqual([item["status"] for item in attempts], ["running", "running", "success"])
         metadata = self.written[self.paths["history"]][0]["execution"]
         self.assertEqual(metadata["actual_model"], "m1")
         self.assertEqual(metadata["client_request_id"], attempts[1]["client_request_id"])

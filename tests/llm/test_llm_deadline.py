@@ -93,6 +93,30 @@ class LlmDeadlineTests(unittest.TestCase):
             usage = self.execute()[2]
         self.assertEqual(usage["_astra_trace"]["request_id"], "")
 
+    def test_known_response_identity_is_recorded_before_body_read_can_block(self):
+        def blocked_body(response):
+            self.assertEqual(self.starts[-1]["request_id"], "known-server-id")
+            self.assertEqual(self.starts[-1]["http_status"], 200)
+            self.assertEqual(len({item["client_request_id"] for item in self.starts}), 1)
+            self.clock.advance(10)
+            raise deadline.DeadlineExceeded("synthetic body deadline")
+        with patch.object(transport.urllib.request, "urlopen", return_value=Response(self.clock, headers={"X-Request-Id": "known-server-id"})), \
+             patch.object(transport, "_read_with_deadline", blocked_body):
+            with self.assertRaises(deadline.DeadlineExceeded):
+                self.execute(allow_fallback=False)
+
+    def test_known_error_identity_is_recorded_before_error_body_can_block(self):
+        def blocked_body(response):
+            self.assertEqual(self.starts[-1]["request_id"], "known-error-id")
+            self.assertEqual(self.starts[-1]["http_status"], 429)
+            self.assertEqual(len({item["client_request_id"] for item in self.starts}), 1)
+            self.clock.advance(10)
+            raise deadline.DeadlineExceeded("synthetic error body deadline")
+        with patch.object(transport.urllib.request, "urlopen", side_effect=http_error(429, request_id="known-error-id")), \
+             patch.object(transport, "_read_with_deadline", blocked_body):
+            with self.assertRaises(deadline.DeadlineExceeded):
+                self.execute(allow_fallback=False)
+
     def test_body_trickle_expires_total_budget_and_closes_response(self):
         resp = Response(self.clock, delay=3, chunks=[b"{", b'"x"', b":", b"1", b"}", b""])
         with patch.object(transport.urllib.request, "urlopen", return_value=resp) as opened:

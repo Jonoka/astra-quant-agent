@@ -111,6 +111,9 @@ class GatewayStore:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self.connect() as connection:
             connection.executescript(SCHEMA)
+            # Both services and request handlers can initialize the shared old
+            # database concurrently. Serialize the read/ALTER migration pair.
+            connection.execute("BEGIN IMMEDIATE")
             self._ensure_columns(connection)
         self._secure_files()
 
@@ -260,7 +263,8 @@ class GatewayStore:
     def recover_stale_job_runs(self) -> int:
         """审计#12(2026-09-13)：worker 被杀/崩溃时 running 行无人收尾——面板「运行中」
         永久假亮。新 worker 启动时收编为 interrupted（诚实标注，不冒充 success/failed）。"""
-        now = datetime.now(BJ_TZ).strftime("%Y-%m-%d %H:%M:%S")
+        timestamp = datetime.now(BJ_TZ)
+        now = timestamp.strftime("%Y-%m-%d %H:%M:%S")
         with self.connect() as connection:
             cursor = connection.execute(
                 "UPDATE job_runs SET status='interrupted', finished_at=?, detail='进程终止未收尾——worker 启动时收编僵尸 running 行'"
@@ -268,12 +272,13 @@ class GatewayStore:
             connection.execute(
                 "UPDATE model_requests SET status='cancelled', completed_at=?, error_type='WorkerInterrupted' "
                 "WHERE status='running' AND job_run_id IN (SELECT id FROM job_runs WHERE status='interrupted')",
-                (now,),
+                (timestamp.isoformat(),),
             )
             return cursor.rowcount
 
     def finish_job(self, run_id: int, return_code: int, detail: str) -> None:
-        now = datetime.now(BJ_TZ).strftime("%Y-%m-%d %H:%M:%S")
+        timestamp = datetime.now(BJ_TZ)
+        now = timestamp.strftime("%Y-%m-%d %H:%M:%S")
         status = "success" if return_code == 0 else "failed"
         with self.connect() as connection:
             connection.execute(
@@ -282,7 +287,7 @@ class GatewayStore:
             )
             connection.execute(
                 "UPDATE model_requests SET status=?, completed_at=?, error_type=? WHERE job_run_id=? AND status='running'",
-                ("cancelled" if return_code else "unknown", now,
+                ("cancelled" if return_code else "unknown", timestamp.isoformat(),
                  "JobTerminated" if return_code else "TelemetryIncomplete", run_id),
             )
 

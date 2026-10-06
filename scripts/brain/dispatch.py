@@ -258,7 +258,9 @@ def dispatch_llm_and_persist_decisions(*,
         from astra_backend.file_locks import file_lock
         check_deadline()
         with file_lock(AI_DECISION_CACHE_FILE):
+            check_deadline()
             atomic_write_json(AI_DECISION_CACHE_FILE, standard_cache)
+        check_deadline()
         atomic_write_json(AI_POSITION_MANAGEMENT_FILE, {
             "timestamp": int(time.time()),
             "time_str": time_str,
@@ -306,6 +308,7 @@ def dispatch_llm_and_persist_decisions(*,
 
         latency = round(time.time() - t0, 2)
         telemetry.finish("success", raw_res, output_chars=output_chars)
+        check_deadline()
         print(f"[AI Brain Batch] ✅ 全标的池({len(packages)} 币种)全景决策完成 (耗时 {latency}s, 宏观基调: {macro_summary})")
         _record_cycle_health("ok")
         return standard_cache

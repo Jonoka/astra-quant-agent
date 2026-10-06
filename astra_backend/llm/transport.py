@@ -431,6 +431,7 @@ def _send_http(cand, endpoint, headers, payload, *, adaptive=False):
             response = urllib.request.urlopen(req, timeout=check_deadline())
         except urllib.error.HTTPError as exc:
             record.update(http_status=exc.code, request_id=_server_request_id(exc))
+            _record_http_attempt(dict(record))
             try:
                 exc._astra_body = _read_with_deadline(exc).decode("utf-8", errors="replace")
             except DeadlineExceeded:
@@ -443,6 +444,9 @@ def _send_http(cand, endpoint, headers, payload, *, adaptive=False):
             raise
         with response as resp:
             record.update(http_status=resp.getcode(), request_id=_server_request_id(resp))
+            # The process hardguard may terminate a trickled body/chunk frame
+            # before finally runs. Preserve already known upstream identity now.
+            _record_http_attempt(dict(record))
             body = _read_with_deadline(resp)
         check_deadline()
         try:

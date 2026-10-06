@@ -1,11 +1,13 @@
 """Isolated scheduler/deadline/storage contracts; never starts a trader process."""
-from concurrent.futures import Future
+from concurrent.futures import Future, ThreadPoolExecutor
+from contextlib import closing
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import os
 import sqlite3
 import subprocess
 import tempfile
+import threading
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -143,6 +145,7 @@ class SchedulerBudgetTests(unittest.TestCase):
         self.assertEqual(trace["request_id"], "")
         self.assertEqual(trace["error_type"], "JobTerminated")
         self.assertTrue(trace["completed_at"])
+        self.assertEqual(datetime.fromisoformat(trace["completed_at"]).utcoffset(), timedelta(hours=8))
 
     def test_non_trader_timeout_unchanged_and_stale_boundary_removed(self):
         done = MagicMock(returncode=0, stdout="done", stderr="")
@@ -191,6 +194,7 @@ class TraceStorageTests(unittest.TestCase):
         self.assertEqual([r["status"] for r in rows], ["cancelled", "success"])
         self.assertEqual(rows[0]["error_type"], "WorkerInterrupted")
         self.assertEqual(rows[1]["request_id"], "server-ok")
+        self.assertEqual(datetime.fromisoformat(rows[0]["completed_at"]).utcoffset(), timedelta(hours=8))
 
     def test_successful_job_closes_lost_completion_as_unknown_not_fake_success(self):
         self.store.record_model_request(request(self.job))
@@ -199,6 +203,7 @@ class TraceStorageTests(unittest.TestCase):
         self.assertEqual((row["status"], row["error_type"]), ("unknown", "TelemetryIncomplete"))
         self.assertTrue(row["completed_at"])
         self.assertEqual(row["request_id"], "")
+        self.assertEqual(datetime.fromisoformat(row["completed_at"]).utcoffset(), timedelta(hours=8))
 
     def test_safe_projection_drops_prompt_url_secret_and_invalid_id(self):
         with patch.object(T, "DB_PATH", self.path):
@@ -237,6 +242,48 @@ class TraceStorageTests(unittest.TestCase):
         conn.close()
         self.assertEqual(len(upgraded.job_runs(10)), 2)
         self.assertEqual(upgraded.recent_model_requests(), [])
+
+    def test_concurrent_old_database_initialization_serializes_column_migration(self):
+        old = self.path.parent / "concurrent-old.db"
+        with closing(sqlite3.connect(old)) as conn:
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("CREATE TABLE job_runs(id INTEGER PRIMARY KEY AUTOINCREMENT,job_name TEXT NOT NULL,status TEXT NOT NULL,started_at TEXT NOT NULL,finished_at TEXT NOT NULL DEFAULT '',return_code INTEGER,detail TEXT NOT NULL DEFAULT '')")
+            conn.execute("INSERT INTO job_runs(job_name,status,started_at) VALUES ('trader','success','2026-10-05 12:00:00')")
+            conn.commit()
+        barrier = threading.Barrier(2)
+        real_connect = sqlite3.connect
+
+        class ConcurrentConnection(sqlite3.Connection):
+            def executescript(self, script):
+                result = super().executescript(script)
+                barrier.wait(timeout=5)
+                return result
+
+            def execute(self, sql, *args, **kwargs):
+                result = super().execute(sql, *args, **kwargs)
+                # If detection has no write transaction, reproduce the legal
+                # interleaving where both services observe the old schema before
+                # either ALTER starts. Transactional reads serialize naturally.
+                if sql == "PRAGMA table_info(job_runs)" and not self.in_transaction:
+                    captured = result.fetchall()
+                    result.close()
+                    barrier.wait(timeout=5)
+                    return captured
+                return result
+
+        def connect(*args, **kwargs):
+            kwargs["factory"] = ConcurrentConnection
+            return real_connect(*args, **kwargs)
+
+        with patch.object(sqlite3, "connect", side_effect=connect), ThreadPoolExecutor(max_workers=2) as executor:
+            jobs = [executor.submit(GatewayStore, old) for _ in range(2)]
+            upgraded = [job.result(timeout=10) for job in jobs]
+        self.assertEqual(len(upgraded), 2)
+        for store in upgraded:
+            self.assertEqual(store.job_runs(10)[0]["scheduled_at"], "")
+        with closing(real_connect(old)) as conn:
+            self.assertEqual([row[1] for row in conn.execute("PRAGMA table_info(job_runs)")].count("scheduled_at"), 1)
+            self.assertEqual(conn.execute("PRAGMA integrity_check").fetchall(), [("ok",)])
 
 
 class AdminAttemptReadTests(unittest.TestCase):

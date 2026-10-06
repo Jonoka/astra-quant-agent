@@ -45,7 +45,7 @@ jobs:
           target = Path('.github/scripts/test_linux_singleton_lock.py')
           assert target.is_file(), 'Linux singleton suite missing'
           suite = unittest.defaultTestLoader.discover(str(target.parent), pattern=target.name)
-          assert suite.countTestCases() >= 5, 'Incomplete Linux singleton discovery'
+          assert suite.countTestCases() >= 7, 'Incomplete Linux singleton discovery'
           result = unittest.TextTestRunner(verbosity=2).run(suite)
-          assert result.wasSuccessful() and result.testsRun >= 5 and not result.skipped, 'Linux singleton suite failed, incomplete or skipped'
+          assert result.wasSuccessful() and result.testsRun >= 7 and not result.skipped, 'Linux singleton suite failed, incomplete or skipped'
           PY

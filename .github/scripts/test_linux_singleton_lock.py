@@ -7,6 +7,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 
@@ -141,8 +142,39 @@ class LinuxSingletonLockTests(unittest.TestCase):
         with open(self.target, 'a+') as handle:
             self.fcntl.flock(handle, self.fcntl.LOCK_EX | self.fcntl.LOCK_NB)
 
+    def test_brain_cycle_refuses_same_thread_recursive_entry(self):
+        health, calls = [], []
+        wrapper = self.brain_wrapper(health)
+        nested = wrapper(lambda: calls.append('nested'))
+        outer = wrapper(lambda: nested())
+        self.assertIsNone(outer())
+        self.assertEqual(calls, [])
+        self.assertEqual(health, [('skipped', 'inference_lock_active')])
+        self.assertEqual(wrapper(lambda: 'released')(), 'released')
+
+    def test_brain_cycle_refuses_another_thread_in_same_process(self):
+        entered, release = threading.Event(), threading.Event()
+        health, calls = [], []
+        wrapper = self.brain_wrapper(health)
+        def hold():
+            entered.set()
+            if not release.wait(10):
+                raise AssertionError('synthetic lock holder was not released')
+        thread = threading.Thread(target=wrapper(hold))
+        thread.start()
+        try:
+            self.assertTrue(entered.wait(10))
+            self.assertIsNone(wrapper(lambda: calls.append('overlap'))())
+            self.assertEqual(calls, [])
+            self.assertEqual(health, [('skipped', 'inference_lock_active')])
+        finally:
+            release.set()
+            thread.join(10)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(wrapper(lambda: 'released')(), 'released')
+
 
 if __name__ == '__main__':
     suite = unittest.defaultTestLoader.loadTestsFromTestCase(LinuxSingletonLockTests)
     result = unittest.TextTestRunner(verbosity=2).run(suite)
-    raise SystemExit(0 if result.wasSuccessful() and result.testsRun == 5 and not result.skipped else 1)
+    raise SystemExit(0 if result.wasSuccessful() and result.testsRun >= 7 and not result.skipped else 1)

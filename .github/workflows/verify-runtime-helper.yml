@@ -9,7 +9,7 @@ permissions:
 jobs:
   verify:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - name: Require deployment branch
@@ -19,7 +19,7 @@ jobs:
         with:
           python-version: '3.11'
       - name: Install hosted helper dependency
-        run: python -m pip install PyYAML==6.0.2
+        run: python -m pip install -r requirements.txt PyYAML==6.0.2
       - name: Verify current runtime helper
         run: |
           python - <<'PY'
@@ -34,4 +34,18 @@ jobs:
           assert result.wasSuccessful() and result.testsRun > len(result.skipped)
           helper = target.with_name('runtime_release_upgrade.py')
           print('Verified helper SHA256:', hashlib.sha256(helper.read_bytes()).hexdigest())
+          PY
+      - name: Verify Linux real singleton locks
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import sys
+          import unittest
+          assert sys.platform.startswith('linux'), 'Real Linux locks required'
+          target = Path('.github/scripts/test_linux_singleton_lock.py')
+          assert target.is_file(), 'Linux singleton suite missing'
+          suite = unittest.defaultTestLoader.discover(str(target.parent), pattern=target.name)
+          assert suite.countTestCases() >= 7, 'Incomplete Linux singleton discovery'
+          result = unittest.TextTestRunner(verbosity=2).run(suite)
+          assert result.wasSuccessful() and result.testsRun >= 7 and not result.skipped, 'Linux singleton suite failed, incomplete or skipped'
           PY

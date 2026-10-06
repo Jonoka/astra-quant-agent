@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import json
+import io
 import socket
 import unittest
 import urllib.error
@@ -42,12 +43,11 @@ def _make_mock_response(payload: dict | list | str | bytes, code: int = 200) -> 
 
 
 def _make_http_error(code: int, body: str | bytes = b"", msg: str = "HTTP Error") -> urllib.error.HTTPError:
-    err = urllib.error.HTTPError("http://test.api", code, msg, {}, None)
     if isinstance(body, str):
         body_bytes = body.encode("utf-8")
     else:
         body_bytes = body
-    err.read = lambda: body_bytes
+    err = urllib.error.HTTPError("http://test.api", code, msg, {}, io.BytesIO(body_bytes))
     return err
 
 
@@ -479,7 +479,7 @@ class LlmTransportTailsTests(unittest.TestCase):
         cand = {"model": "gpt-4o", "base_url": "https://api.openai.com/v1"}
         with self.assertRaises(_LLMTransientError) as ctx:
             _attempt_llm_call(cand, [], None, None, 5.0)
-        self.assertIn("HTTP 400", str(ctx.exception))
+        self.assertIn("HTTP 503", str(ctx.exception))
 
     @patch("urllib.request.urlopen")
     def test_attempt_llm_call_http_error_body_read_exception_handled(self, mock_urlopen):

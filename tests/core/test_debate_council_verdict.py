@@ -101,7 +101,8 @@ class VerdictTest(unittest.TestCase):
         advisors = transcript["advisors"]
         self.assertEqual(advisors["b"]["status"], "error")
         self.assertEqual(advisors["b"]["weight"], 0.0, "**沉默不得变赞成**")
-        self.assertIn("席位崩了", advisors["b"]["content"])
+        self.assertEqual(advisors["b"]["reason"], "seat_failed")
+        self.assertNotIn("席位崩了", advisors["b"]["content"], "new stage diagnostics must not copy raw upstream errors")
         self.assertEqual(advisors["a"]["weight"], 1.0, "正常席位权重不受影响")
 
     def test_transcript_is_injected_into_the_brain_output_as_the_same_object(self):

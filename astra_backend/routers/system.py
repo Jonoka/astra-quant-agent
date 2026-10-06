@@ -437,6 +437,7 @@ def admin_agents(x_astra_admin_token: str | None = Header(default=None)) -> dict
         "agents": agent_statuses(store.job_runs(100)),
         "model_stats": store.model_stats(),
         "model_calls": store.model_calls(50),
+        "model_requests": store.recent_model_requests(100),
         "prompt_policy": "交易主脑和自进化均由 Python 直接构造并传输提示词；Gateway 只记录无内容遥测。",
         "secret_store": secret_store_status(),
     }

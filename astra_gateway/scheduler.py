@@ -4,8 +4,10 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+import os
 import subprocess
 import sys
+import time
 from typing import Any
 
 from astra_backend.time_utils import parse_beijing
@@ -16,6 +18,8 @@ from astra_gateway.store import GatewayStore
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "scripts"
 BJ_TZ = timezone(timedelta(hours=8))
+TRADER_SLOT_GUARD_SECONDS = 30
+TRADER_PERSISTENCE_SECONDS = 60
 
 
 @dataclass(frozen=True)
@@ -119,6 +123,9 @@ class GatewayScheduler:
             if spec.name == "trader":
                 slot = int(now.timestamp()) // spec.interval_seconds
                 last_slot = int(last.timestamp()) // spec.interval_seconds if last else -1
+                observed = self.store.get_state("job.slot.trader")
+                if observed.isdigit():
+                    last_slot = max(last_slot, int(observed))
                 return slot > last_slot and int(now.timestamp()) % spec.interval_seconds < 10
             if spec.offset_seconds:
                 # Staggered execution aligned to clock with offset to prevent resource collisions
@@ -133,23 +140,49 @@ class GatewayScheduler:
             return False
         return not last or last.date() != now.date() or last.strftime("%H:%M") != minute
 
-    def _execute(self, spec: JobSpec) -> None:
-        run_id = self.store.begin_job(spec.name)
+    def _execute(self, spec: JobSpec, scheduled_at: str | None = None) -> None:
+        scheduled_at = scheduled_at or datetime.now(BJ_TZ).isoformat()
+        timeout = spec.timeout_seconds
+        env = dict(os.environ)
+        if spec.name == "trader" and spec.interval_seconds:
+            scheduled = parse_beijing(scheduled_at)
+            slot_end = (int(scheduled.timestamp()) // spec.interval_seconds + 1) * spec.interval_seconds
+            hard_deadline = slot_end - TRADER_SLOT_GUARD_SECONDS
+            inference_deadline = hard_deadline - TRADER_PERSISTENCE_SECONDS
+            if time.time() >= inference_deadline:
+                self.store.record_skipped_job(spec.name, scheduled_at, "budget_exhausted_before_start")
+                return
+            env["ASTRA_INFERENCE_DEADLINE_EPOCH"] = str(inference_deadline)
+        else:
+            # A non-trader subprocess must not inherit a stale trader boundary.
+            env.pop("ASTRA_INFERENCE_DEADLINE_EPOCH", None)
+        run_id = self.store.begin_job(spec.name, scheduled_at)
+        env["ASTRA_JOB_RUN_ID"] = str(run_id)
+        env["ASTRA_SCHEDULED_AT"] = scheduled_at
         try:
             command = [sys.executable, str(SCRIPTS / spec.script)]
             if spec.schedule_key.startswith("backup_job:"):
                 command.extend(["--job-id", spec.schedule_key.split(":", 1)[1]])
+            if spec.name == "trader" and spec.interval_seconds:
+                # SQLite admission can block too. Deduct it immediately before
+                # launching; never grant a timeout computed before begin_job.
+                admitted_at = time.time()
+                if admitted_at >= inference_deadline:
+                    self.store.skip_started_job(run_id, "budget_exhausted_before_start")
+                    return
+                timeout = min(timeout, hard_deadline - admitted_at)
             result = subprocess.run(
                 command,
                 cwd=ROOT,
                 text=True,
                 capture_output=True,
-                timeout=spec.timeout_seconds,
+                timeout=timeout,
+                env=env,
             )
             detail = (result.stderr if result.returncode else result.stdout)[-2000:]
             self.store.finish_job(run_id, result.returncode, detail)
-        except subprocess.TimeoutExpired as exc:
-            self.store.finish_job(run_id, 124, f"timeout after {spec.timeout_seconds}s: {exc}")
+        except subprocess.TimeoutExpired:
+            self.store.finish_job(run_id, 124, f"timeout after {timeout:g}s; execution_budget_exhausted")
         except Exception as exc:
             self.store.finish_job(run_id, 1, f"{type(exc).__name__}: {exc}")
 
@@ -159,10 +192,28 @@ class GatewayScheduler:
         schedule = load_schedule()
         launched: list[str] = []
         for spec in current_jobs():
+            if spec.name == "trader" and spec.interval_seconds:
+                slot = int(now.timestamp()) // spec.interval_seconds
+                observed = self.store.get_state("job.slot.trader")
+                last = self._last_at(spec.name)
+                prior = int(observed) if observed.isdigit() else (int(last.timestamp()) // spec.interval_seconds if last else slot - 1)
+                # Record missed windows after a stalled scheduler/restart, but do
+                # not replay stale model or trading work. Limit recovery metadata.
+                for missed in range(max(prior + 1, slot - 96), slot):
+                    at = datetime.fromtimestamp(missed * spec.interval_seconds, BJ_TZ).isoformat()
+                    self.store.record_skipped_job(spec.name, at, "scheduler_window_missed")
+                if slot > prior and (spec.name in self.running or int(now.timestamp()) % spec.interval_seconds >= 10):
+                    reason = "previous_run_active" if spec.name in self.running else "scheduler_window_missed"
+                    at = datetime.fromtimestamp(slot * spec.interval_seconds, BJ_TZ).isoformat()
+                    self.store.record_skipped_job(spec.name, at, reason)
+                    self.store.set_state("job.slot.trader", str(slot))
+                    continue
             if spec.name in self.running or not self.due(spec, now, schedule):
                 continue
             self.store.set_state(f"job.last.{spec.name}", now.isoformat())
-            self.running[spec.name] = self.executor.submit(self._execute, spec)
+            if spec.name == "trader" and spec.interval_seconds:
+                self.store.set_state("job.slot.trader", str(int(now.timestamp()) // spec.interval_seconds))
+            self.running[spec.name] = self.executor.submit(self._execute, spec, now.isoformat())
             launched.append(spec.name)
         return launched
 

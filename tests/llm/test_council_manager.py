@@ -1,4 +1,6 @@
 import time
+import tempfile
+from pathlib import Path
 import unittest
 from unittest.mock import patch, MagicMock
 from astra_backend.council_manager import (
@@ -186,7 +188,7 @@ class TestCouncilManager(unittest.TestCase):
             self.assertIn("cross_examinations", transcript)
             self.assertEqual(len(transcript["cross_examinations"]), 3)
             for k, crit in transcript["cross_examinations"].items():
-                self.assertEqual(crit["status"], "ok")
+                self.assertEqual(crit["status"], "ok", crit.get("reason", crit.get("content", "")))
                 self.assertIn("同行质询", crit["content"])
 
             self.assertEqual(brain_output["decisions"]["BTC-USDT-SWAP"]["adopted_role"], "trader_momentum")
@@ -234,7 +236,7 @@ class TestCouncilManager(unittest.TestCase):
                 "weight": 1.0,
             }
 
-        with patch("time.time", side_effect=fake_time), \
+        with patch("astra_backend.deadline.time.monotonic", side_effect=fake_time), \
              patch("astra_backend.council_manager._call_single_trader", side_effect=fake_trader_exec), \
              patch("astra_backend.llm_manager.execute_llm_request", return_value=(mock_cio_json[0], "", {}, 150)):
 
@@ -281,7 +283,8 @@ class SeatBindingWriteGateFailClosedTest(unittest.TestCase):
         from astra_backend import council_manager
         with patch("astra_backend.llm_manager.load_llm_config",
                    side_effect=OSError("模型库读不出来")), \
-             patch.object(council_manager, "COUNCIL_CONFIG_FILE", "/tmp/nonexistent-council.json"):
+             tempfile.TemporaryDirectory() as temporary, \
+             patch.object(council_manager, "COUNCIL_CONFIG_FILE", Path(temporary) / "council.json"):
             with self.assertRaises(ValueError) as ctx:
                 council_manager.save_council_config({"roles": {"cio": {"model_id": "x"}}},
                                                     enforce_models=True)

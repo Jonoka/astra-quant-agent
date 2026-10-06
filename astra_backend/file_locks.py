@@ -25,6 +25,10 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Dict, Iterator, Tuple
 
+from astra_backend.deadline import (
+    check_deadline, current_deadline, sleep_with_deadline,
+)
+
 _STATE = threading.local()
 
 
@@ -45,6 +49,7 @@ def _lock_path(target_file: str | os.PathLike[str]) -> Tuple[Path, str]:
 @contextmanager
 def file_lock(target_file: str | os.PathLike[str]) -> Iterator[None]:
     """对 target_file 的 RMW 取进程间互斥锁（阻塞式、同线程可重入）。"""
+    check_deadline()
     lock_path, key = _lock_path(target_file)
     held = _held()
     if held.get(key):
@@ -57,10 +62,22 @@ def file_lock(target_file: str | os.PathLike[str]) -> Iterator[None]:
         return
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     fd = os.open(key, os.O_RDWR | os.O_CREAT, 0o600)
-    held[key] = 1
     try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
+        if current_deadline() is None:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+        else:
+            # Waiting for another writer consumes the caller's absolute budget.
+            # Preserve ordinary blocking locks for callers without a deadline.
+            while True:
+                left = check_deadline()
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    sleep_with_deadline(min(0.05, left))
+        held[key] = 1
         try:
+            check_deadline()
             yield
         finally:
             fcntl.flock(fd, fcntl.LOCK_UN)

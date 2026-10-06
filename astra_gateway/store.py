@@ -72,6 +72,22 @@ CREATE TABLE IF NOT EXISTS model_calls (
   error_type TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_model_calls_caller ON model_calls(caller, id DESC);
+CREATE TABLE IF NOT EXISTS model_requests (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  job_run_id INTEGER,
+  scheduled_at TEXT NOT NULL DEFAULT '',
+  caller TEXT NOT NULL DEFAULT '',
+  client_request_id TEXT NOT NULL UNIQUE,
+  request_id TEXT NOT NULL DEFAULT '',
+  model TEXT NOT NULL,
+  status TEXT NOT NULL,
+  started_at TEXT NOT NULL,
+  completed_at TEXT NOT NULL,
+  duration_ms INTEGER NOT NULL,
+  http_status INTEGER,
+  error_type TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_model_requests_job ON model_requests(job_run_id, id);
 """
 
 #: `model_calls` 的历史补列（2026-09-29 缓存可观测性）。
@@ -95,6 +111,9 @@ class GatewayStore:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self.connect() as connection:
             connection.executescript(SCHEMA)
+            # Both services and request handlers can initialize the shared old
+            # database concurrently. Serialize the read/ALTER migration pair.
+            connection.execute("BEGIN IMMEDIATE")
             self._ensure_columns(connection)
         self._secure_files()
 
@@ -105,6 +124,9 @@ class GatewayStore:
         for name, declaration in MIGRATION_COLUMNS:
             if name not in existing:
                 connection.execute(f"ALTER TABLE model_calls ADD COLUMN {name} {declaration}")
+        job_columns = {row["name"] for row in connection.execute("PRAGMA table_info(job_runs)")}
+        if "scheduled_at" not in job_columns:
+            connection.execute("ALTER TABLE job_runs ADD COLUMN scheduled_at TEXT NOT NULL DEFAULT ''")
 
     def _secure_files(self) -> None:
         for candidate in (self.path, Path(str(self.path)+"-wal"), Path(str(self.path)+"-shm")):
@@ -202,29 +224,71 @@ class GatewayStore:
             )
             return cursor.rowcount == 1
 
-    def begin_job(self, job_name: str) -> int:
+    def begin_job(self, job_name: str, scheduled_at: str = "") -> int:
         now = datetime.now(BJ_TZ).strftime("%Y-%m-%d %H:%M:%S")
         with self.connect() as connection:
-            cursor = connection.execute("INSERT INTO job_runs(job_name,status,started_at) VALUES (?,'running',?)", (job_name, now))
+            cursor = connection.execute("INSERT INTO job_runs(job_name,status,started_at,scheduled_at) VALUES (?,'running',?,?)", (job_name, now, scheduled_at))
             return int(cursor.lastrowid)
+
+    def record_skipped_job(self, job_name: str, scheduled_at: str, reason: str) -> bool:
+        """One durable skip per observed slot; no replay of trading work."""
+        if reason not in {"previous_run_active", "scheduler_window_missed", "budget_exhausted_before_start"}:
+            raise ValueError("unsupported job skip reason")
+        now = datetime.now(BJ_TZ).strftime("%Y-%m-%d %H:%M:%S")
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            previous = connection.execute(
+                "SELECT 1 FROM job_runs WHERE job_name=? AND scheduled_at=? AND status='skipped' LIMIT 1",
+                (job_name, scheduled_at),
+            ).fetchone()
+            if previous:
+                return False
+            connection.execute(
+                "INSERT INTO job_runs(job_name,status,started_at,finished_at,detail,scheduled_at) VALUES (?,'skipped',?,?,?,?)",
+                (job_name, now, now, reason, scheduled_at),
+            )
+            return True
+
+    def skip_started_job(self, run_id: int, reason: str) -> None:
+        """Admission consumed the budget; no subprocess or request was started."""
+        if reason != "budget_exhausted_before_start":
+            raise ValueError("unsupported admission skip reason")
+        now = datetime.now(BJ_TZ).strftime("%Y-%m-%d %H:%M:%S")
+        with self.connect() as connection:
+            connection.execute(
+                "UPDATE job_runs SET status='skipped',finished_at=?,detail=? WHERE id=? AND status='running'",
+                (now, reason, run_id),
+            )
 
     def recover_stale_job_runs(self) -> int:
         """审计#12(2026-09-13)：worker 被杀/崩溃时 running 行无人收尾——面板「运行中」
         永久假亮。新 worker 启动时收编为 interrupted（诚实标注，不冒充 success/failed）。"""
-        now = datetime.now(BJ_TZ).strftime("%Y-%m-%d %H:%M:%S")
+        timestamp = datetime.now(BJ_TZ)
+        now = timestamp.strftime("%Y-%m-%d %H:%M:%S")
         with self.connect() as connection:
             cursor = connection.execute(
                 "UPDATE job_runs SET status='interrupted', finished_at=?, detail='进程终止未收尾——worker 启动时收编僵尸 running 行'"
                 " WHERE status='running'", (now,))
+            connection.execute(
+                "UPDATE model_requests SET status='cancelled', completed_at=?, error_type='WorkerInterrupted' "
+                "WHERE status='running' AND job_run_id IN (SELECT id FROM job_runs WHERE status='interrupted')",
+                (timestamp.isoformat(),),
+            )
             return cursor.rowcount
 
     def finish_job(self, run_id: int, return_code: int, detail: str) -> None:
-        now = datetime.now(BJ_TZ).strftime("%Y-%m-%d %H:%M:%S")
+        timestamp = datetime.now(BJ_TZ)
+        now = timestamp.strftime("%Y-%m-%d %H:%M:%S")
         status = "success" if return_code == 0 else "failed"
         with self.connect() as connection:
             connection.execute(
                 "UPDATE job_runs SET status=?, finished_at=?, return_code=?, detail=? WHERE id=?",
                 (status, now, return_code, detail[-2000:], run_id),
+            )
+            connection.execute(
+                "UPDATE model_requests SET status=?, completed_at=?, error_type=? WHERE job_run_id=? AND status='running'",
+                ("cancelled" if return_code else "unknown", timestamp.isoformat(),
+                 "JobTerminated" if return_code else "TelemetryIncomplete", run_id),
             )
 
     def prune_job_runs(self, keep_days: int | None = None,
@@ -280,6 +344,36 @@ class GatewayStore:
                 tuple(record.get(column) for column in columns),
             )
             return int(cursor.lastrowid)
+
+    def record_model_request(self, record: dict[str, Any]) -> int:
+        # The telemetry boundary has projected and validated these fields.
+        columns = ("job_run_id", "scheduled_at", "caller", "client_request_id",
+                   "request_id", "model", "status", "started_at", "completed_at",
+                   "duration_ms", "http_status", "error_type")
+        with self.connect() as connection:
+            cursor = connection.execute(
+                f"INSERT INTO model_requests({','.join(columns)}) VALUES ({','.join('?' for _ in columns)}) "
+                "ON CONFLICT(client_request_id) DO UPDATE SET "
+                + ",".join(f"{column}=excluded.{column}" for column in columns if column != "client_request_id"),
+                tuple(record.get(column) for column in columns),
+            )
+            return int(cursor.lastrowid)
+
+    def model_requests(self, job_run_id: int, limit: int = 100) -> list[dict[str, Any]]:
+        with self.connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM model_requests WHERE job_run_id=? ORDER BY id LIMIT ?",
+                (job_run_id, max(1, min(limit, 500))),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def recent_model_requests(self, limit: int = 100) -> list[dict[str, Any]]:
+        with self.connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM model_requests ORDER BY id DESC LIMIT ?",
+                (max(1, min(limit, 500)),),
+            ).fetchall()
+        return [dict(row) for row in rows]
 
     def model_calls(self, limit: int = 50) -> list[dict[str, Any]]:
         with self.connect() as connection:

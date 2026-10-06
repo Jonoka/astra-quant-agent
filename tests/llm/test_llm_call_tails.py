@@ -22,6 +22,7 @@
 from __future__ import annotations
 
 import json
+import io
 import sys
 import unittest
 import urllib.error
@@ -35,6 +36,7 @@ for _p in (str(ROOT), str(ROOT / "scripts")):
 
 import astra_backend.llm.call as call  # noqa: E402
 from astra_backend.llm.transport import _LLMHardError, _LLMTransientError  # noqa: E402
+from astra_backend.deadline import DeadlineExceeded  # noqa: E402
 
 
 def _resp(payload, *, code=200, raw=None):
@@ -47,8 +49,7 @@ def _resp(payload, *, code=200, raw=None):
 
 
 def _http_error(code, body=b'{"error":"bad"}'):
-    err = urllib.error.HTTPError("http://x", code, "boom", {}, None)
-    err.read = lambda: body
+    err = urllib.error.HTTPError("http://x", code, "boom", {}, io.BytesIO(body))
     return err
 
 
@@ -535,17 +536,20 @@ class ExecuteLlmRequestTests(unittest.TestCase):
         self.assertEqual(out[0], "ok")
 
     def test_the_total_wait_deadline_stops_retrying(self):
-        # 第 274–277 行 —— deadline_hit 后整链停止
-        ticks = iter([0.0, 1000.0, 1000.0, 1000.0, 1000.0, 1000.0])
+        clock = [0.0]
+        attempts = []
 
         def _attempt(*a, **k):
+            attempts.append(1)
+            clock[0] += 10.0
             raise _LLMTransientError("503", fail_over_now=False)
-        with patch.object(call.time, "perf_counter", lambda: next(ticks, 1000.0)), \
+        with patch.object(call.time, "monotonic", lambda: clock[0]), \
              patch.object(call.time, "sleep", lambda _s: None), \
              patch.object(call, "FAILOVER_MAX_TOTAL_WAIT", 10.0):
-            with self.assertRaises(RuntimeError):
+            with self.assertRaises(DeadlineExceeded):
                 self._run(runtime={"model": "m1", "request_attempts": 5},
                           attempt=_attempt)
+        self.assertEqual(len(attempts), 1)
 
     def test_a_single_model_hard_error_keeps_the_legacy_message(self):
         # 第 322/323 行

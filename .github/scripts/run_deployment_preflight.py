@@ -17,6 +17,7 @@ SUITES = {
     'test_runtime_release_upgrade.py': 37,
     'test_deployment_plan.py': 29,
     'test_deployment_identity.py': 19,
+    'test_recovery_journal.py': 20,
     'test_linux_singleton_lock.py': 7,
     'test_rehearse_cycle_deadline_upgrade.py': 4,
     'test_taker_regression_gate.py': 5,
@@ -53,7 +54,8 @@ require_complete_result(result,minimum)
 '''
         for name, minimum in SUITES.items():
             command = [sys.executable, '-c', loader, str(source / '.github/scripts' / name), str(minimum)]
-            if name in {'test_deployment_plan.py', 'test_deployment_identity.py'} and os.geteuid() != 0:
+            if name in {'test_deployment_plan.py', 'test_deployment_identity.py',
+                        'test_recovery_journal.py'} and os.geteuid() != 0:
                 # Real ownership refusal cases require root-owned disposable
                 # fixtures. Escalate this synthetic suite only, on hosted CI.
                 if env.get('GITHUB_ACTIONS') != 'true':

@@ -61,3 +61,14 @@ explicit source and record bindings. Nineteen real Linux control-flow tests cove
 foreign source/image/IDs, late drift, legitimate partial starts and both rename
 interruptions, while preserving latest records and deletions. A journal without
 source identity fails closed; no old operation plan is automatically reapproved.
+
+Independent re-review closed R1 and reproduced R2: recovery->ROOT rename had
+completed while disk journal still said candidate-retained, so a legitimate
+retry refused to start the stopped original services. Recovery now reconciles
+only complete stored recovery evidence, original/stopped snapshots, phase/layout,
+frozen source and stopped operation-owned image/container identity. The ready
+journal also freezes complete input bytes for safe retry before the first rename.
+Twenty new tests inject real rename/phase/atomic-journal interruptions, reload
+state.json from disk, and verify retained latest records, logs and deletions.
+Missing trusted evidence and substituted data/permissions/source/image remain
+fail-closed. Original independent R2 evidence is preserved outside the repo.

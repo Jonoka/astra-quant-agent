@@ -1266,6 +1266,51 @@ print(json.dumps({'risk':expected,'pool':[i['name'] for i in items],
                 raise GateError("upgrade_failed_recovery_incomplete") from None
             raise GateError("upgrade_failed_previous_runtime_recovered") from None
 
+    def resume_recovery_renames(self):
+        """Resume only journaled, byte-proven recovery rename windows."""
+        original = self.op / 'original-deployment'
+        failed = self.op / 'failed-candidate'
+        recovery = self.op / 'recovery'
+        phase = self.state.get('phase')
+        if recovery.exists() and ROOT.exists() and not failed.exists():
+            require(phase == 'recovery-ready', 'partial_recovery_requires_review')
+            require(self.state.get('recovery_input_manifest') and
+                    tree_manifest(ROOT) == self.state['recovery_input_manifest'],
+                    'recovery_input_drift')
+        elif failed.exists() and recovery.exists() and ROOT.exists():
+            raise GateError('recovery_phase_ambiguous')
+        elif not ((not ROOT.exists() and failed.exists() and recovery.exists()) or
+                  (ROOT.exists() and failed.exists() and not recovery.exists() and
+                   phase == 'candidate-retained')):
+            return
+        require(original.exists() and phase in {'recovery-ready', 'candidate-retained'},
+                'recovery_phase_ambiguous')
+        require(tree_manifest(original) == self.state['snapshot'] and
+                tree_manifest(self.op / 'stopped-snapshot') == self.state['snapshot'],
+                'snapshot_evidence_drift')
+        restored = recovery if recovery.exists() else ROOT
+        require(self.state.get('recovery_manifest') and
+                tree_manifest(restored) == self.state['recovery_manifest'], 'recovery_tree_drift')
+        require(deployment_source(restored, self.state['extras']) ==
+                self.state['deployment_sources']['previous'], 'foreign_restore_source')
+        if failed.exists():
+            require(deployment_source(failed, self.state['extras']) ==
+                    self.state['deployment_sources']['release'], 'foreign_failed_source')
+            if self.state.get('recovery_input_manifest'):
+                require(tree_manifest(failed) == self.state['recovery_input_manifest'],
+                        'recovery_input_drift')
+        # Identity checks alone accept broken health; this pre-start rename
+        # reconciliation additionally requires all owned containers to be stopped.
+        self.deployment_guard(renaming=True)
+        if ROOT.exists() and not failed.exists():
+            self.move(ROOT, failed)
+        if not ROOT.exists():
+            self.phase('candidate-retained')
+            self.move(recovery, ROOT)
+        # Reaching here proves the second rename by the complete frozen recovery
+        # tree, not just by a source marker or presence of a directory.
+        self.phase('recovery-active')
+
     def rollback(self):
         require(self.state and self.state.get("phase") not in ("prepared", "rolled-back"), "rollback_phase")
         require(self.manifest_sha == self.state["manifest_sha"], "manifest_drift")
@@ -1280,18 +1325,14 @@ print(json.dumps({'risk':expected,'pool':[i['name'] for i in items],
         original = self.op / "original-deployment"
         failed = self.op / "failed-candidate"
         recovery = self.op / "recovery"
+        self.resume_recovery_renames()
         # If the process died between the two renames, restore the explicitly
         # identified tree. The independent stopped snapshot remains untouched.
         if not ROOT.exists():
-            if recovery.exists() and failed.exists():
-                require(tree_manifest(recovery) == self.state["recovery_manifest"], "recovery_tree_drift")
-                self.move(recovery, ROOT)
-                self.phase("recovery-active")
-            else:
-                require(original.exists() and not failed.exists(), "missing_root_recovery_ambiguous")
-                require(tree_manifest(original) == self.state['snapshot'], 'original_source_drift')
-                self.move(original, ROOT)
-                self.phase("stopped")
+            require(original.exists() and not failed.exists(), "missing_root_recovery_ambiguous")
+            require(tree_manifest(original) == self.state['snapshot'], 'original_source_drift')
+            self.move(original, ROOT)
+            self.phase("stopped")
         if original.exists() and not failed.exists():
             require(tree_manifest(self.op / "stopped-snapshot") == self.state["snapshot"], "snapshot_evidence_drift")
             env_gate(ROOT)
@@ -1314,6 +1355,7 @@ print(json.dumps({'risk':expected,'pool':[i['name'] for i in items],
             self.state["admin"] = latest_admin
             self.state["protected_config"] = {n: tree_manifest(recovery / n) if (recovery / n).exists() else None for n in CONFIG}
             self.state["recovery_manifest"] = tree_manifest(recovery)
+            self.state['recovery_input_manifest'] = latest
             self.phase("recovery-ready")
             self.move(ROOT, failed)
             self.phase("candidate-retained")

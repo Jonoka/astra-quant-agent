@@ -99,3 +99,15 @@ before restoring it. Rejected direct rollback records a separate identity-reject
 file and leaves prior failure evidence and the external deployment intact. An old
 journal without deployment-source identity fails closed; no new approval pin is
 derived from a changed live deployment.
+
+Recovery rename retries reconcile only explicit, journaled windows. A durable
+`recovery-ready` record freezes the complete stopped input and prepared recovery
+trees. Before the first rename, the input and recovery trees must still match;
+between renames, the retained candidate, snapshots, recovery tree and stopped
+owned containers must agree. After the second rename but before `recovery-active`
+is persisted, ROOT must match the full stored recovery manifest before that phase
+is reconciled. This includes data, logs, deletion state, owners and modes, not just
+source markers. Missing full recovery evidence or changed trees never gain a new
+approval hash. An incomplete pre-ready copy remains retained for review without
+another stop or attempted overwrite. Once startup is journaled, ordinary latest
+writes remain protected by the existing source/container and continuity checks.

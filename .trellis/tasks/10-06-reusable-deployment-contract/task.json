@@ -1,0 +1,9 @@
+{
+  "name": "reusable-deployment-contract",
+  "title": "Bind Astra deployments to approved runtime and pool identity",
+  "status": "in_progress",
+  "branch": "fix/reusable-deployment-contract",
+  "base_branch": "codex/deploy",
+  "scope": "deployment helpers, shared CI gates and controlled taker cutover",
+  "created": "2026-10-06"
+}

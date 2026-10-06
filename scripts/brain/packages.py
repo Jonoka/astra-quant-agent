@@ -46,8 +46,10 @@ import urllib.request
 
 try:
     from scripts.okx_public import public_json_get
+    from scripts.okx_taker import latest_taker_net
 except ImportError:                                    # pragma: no cover - script import
     from okx_public import public_json_get
+    from okx_taker import latest_taker_net
 from pathlib import Path
 
 from typing import Any, Dict
@@ -328,9 +330,9 @@ def fetch_single_instrument_package(item: Dict[str, Any], *,
                 d = public_json_get(f"/api/v5/rubik/stat/taker-volume?ccy={ccy}&instType=CONTRACTS&period=5m", opener=urllib.request.urlopen,
                                     timeout=3, user_agent=headers["User-Agent"])
                 if d.get("code") == "0" and d.get("data") and len(d["data"]) > 0:
-                    b_vol = float(d["data"][0][1])
-                    s_vol = float(d["data"][0][2])
-                    net_diff = b_vol - s_vol
+                    net_diff = latest_taker_net(d["data"])
+                    if net_diff is None:
+                        raise ValueError("Invalid OKX taker-volume row")
                     pkg["takerNetUsd"] = f"{round(net_diff / 1e4, 1)}万 U"
             except Exception as exc:
                 note_failure("okx_taker_volume", exc)

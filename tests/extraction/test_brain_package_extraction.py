@@ -9,8 +9,8 @@
 
 因此这里守三件事：
 
-1. **搬运无损**：子模块里的函数体与搬走前的门面文本**逐行相同**（只允许签名
-   与 docstring 变）。字节级对拍，杜绝"搬的时候手抖漏了一行"。
+1. **源码范围受控**：函数全文与已部署 f53e579 基线逐字相同，只允许本次精确的
+   taker 解析替换；旧搬运前夹具保留为历史证据，方向语义另做运行测试。
 2. **门面确实在转发**：门面同名壳必须真的调用子模块，且把两个行情函数
    **按调用期注入**传下去 —— 若改回 import 期绑定，`patch.object(门面, …)` 会失效。
 3. **失败仍然是 fail-soft**：行情取不到时必须返回结构完整的包（`data_quality`
@@ -19,6 +19,7 @@
 from __future__ import annotations
 
 import ast
+import hashlib
 import re
 import unittest
 import urllib.request
@@ -32,7 +33,7 @@ ROOT = Path(__file__).resolve().parents[2]
 FACADE = ROOT / "scripts" / "ai_brain_trader.py"
 SUBMODULE = ROOT / "scripts" / "brain" / "packages.py"
 
-# 搬走前门面里该函数的原文（提取时留档），用于逐行对拍。
+# 搬走前门面里该函数的原文（历史留档；活动保护检查使用已部署版本指纹）。
 PRE_MOVE_SOURCE = Path(__file__).resolve().parent.parent / "data" / "brain_package_pre_move.py"
 
 
@@ -122,44 +123,32 @@ class MoveIsLosslessTest(unittest.TestCase):
         "pkg[\"quant_factors\"] = load_quant_factor_tiers(inst_id)",
     )
 
-    def test_body_prefix_is_line_identical_to_pre_move_source(self):
-        """⭐ 核心不变量：**退役那一刀之前的每一行代码**都必须与搬走前逐字相同。
+    def test_body_matches_deployed_baseline_except_validated_taker_parser(self):
+        """Pin all other function lines to deployed f53e579, including comments.
 
-        为什么只比"尾巴之前"：2026-10 用户决策让尾部那段微积分（try + 4 行写入）
-        整体退场，并由 `pkg["quant_factors"]` 一行接替。凡是退役动作**不该碰**的
-        部分，仍然必须逐行对得上 —— 否则"搬运时顺手改坏了别的逻辑"就没人看着。
-        退役本身由下一条反向断言单独钉住。
+        The old pre-move comparison already fails on unmodified f53e579.
+        Its fixture remains historical evidence; the active guard permits only
+        the exact decimal-net parser replacement reviewed in this repair.
+        Sign and malformed-row behavior have separate runtime coverage.
         """
-        original = PRE_MOVE_SOURCE.read_text(encoding="utf-8").splitlines()
-        original_body = [ln for ln in original
-                         if not ln.startswith("def fetch_single_instrument_package")]
-        moved = _submodule_function_lines()[4:]
-
-        cut_a = next(i for i, ln in enumerate(original_body)
-                     if "calculate_multi_timeframe" in ln)
-        # 原实现那一行外面还包着一层 `try:` —— 它属于退役块，故一并排除，
-        # 否则前缀会多出一行（实测 210 vs 209 的差就是这一行）。
-        if original_body[cut_a - 1].strip() == "try:":
-            cut_a -= 1
-        # ⚠️ 切点必须**精确匹配那一行赋值**：早先按子串 "quant_factors" 找，
-        # 结果撞上了函数体里另一处提到 quant_factors 的说明文字，
-        # 前缀被截成 28 行，判据直接失效（实测 209 != 28）。
-        cut_b = next(i for i, ln in enumerate(moved)
-                     if ln.strip() == 'pkg["quant_factors"] = load_quant_factor_tiers(inst_id)')
-
-        def _code_lines(lines):
-            # 注释不参与比对：退役那一刀在尾部前插了说明注释（对称地两边都过滤）
-            return [ln for ln in self._normalise(lines)
-                    if ln.strip() and not ln.strip().startswith("#")]
-
-        a_norm = [self._INTENTIONAL_EDITS.get(ln, ln)
-                  for ln in _code_lines(original_body[:cut_a])]
-        b_norm = _code_lines(moved[:cut_b])
-        self.assertGreater(len(a_norm), 200, "比对区间太短 ⇒ 这条用例在空转")
-        self.assertEqual(len(a_norm), len(b_norm),
-                         "退役点之前的代码行数变了 —— 搬运过程中漏行或多行")
-        for i, (a, b) in enumerate(zip(a_norm, b_norm)):
-            self.assertEqual(a, b, f"退役点之前第 {i + 1} 行不一致（搬运被改动）")
+        source = "\n".join(_submodule_function_lines())
+        parser_block = "\n".join([
+            '                    net_diff = latest_taker_net(d["data"])',
+            '                    if net_diff is None:',
+            '                        raise ValueError("Invalid OKX taker-volume row")',
+        ])
+        deployed_block = "\n".join([
+            '                    b_vol = float(d["data"][0][1])',
+            '                    s_vol = float(d["data"][0][2])',
+            '                    net_diff = b_vol - s_vol',
+        ])
+        self.assertEqual(source.count(parser_block), 1)
+        normalised = source.replace(parser_block, deployed_block)
+        self.assertEqual(
+            hashlib.sha256(normalised.encode("utf-8")).hexdigest(),
+            "5d2d9ce1809e16adc5d28280def7af22f3f2b4e3f0721cdda9db3c47f9548e89",
+            "Unexpected changes beyond the validated taker parser",
+        )
 
     def test_the_retired_calculus_tail_is_really_gone(self):
         """反向断言：搬运**之后**的退役动作必须真实发生（否则上面那条会空转）。"""

@@ -133,8 +133,12 @@ CVD_DIVERGENCE_LOOKBACK = 6
 
 try:
     from scripts.okx_public import OKX_PUBLIC_HOSTS as _OKX_HOSTS, validate_public_path
+    from scripts.okx_taker import (latest_taker_volumes_decimal, parse_taker_row_decimal,
+                                  sum_taker_net, taker_net_float, taker_ratio_float)
 except ImportError:                                    # pragma: no cover - script import
     from okx_public import OKX_PUBLIC_HOSTS as _OKX_HOSTS, validate_public_path
+    from okx_taker import (latest_taker_volumes_decimal, parse_taker_row_decimal,
+                          sum_taker_net, taker_net_float, taker_ratio_float)
 _HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
 
 #: 中性缺失占位（与 defaults.py 的 `--` 语义一致：缺失就该大声缺）
@@ -627,31 +631,30 @@ def compute_cvd_factors(taker_rows_5m: Optional[Sequence[Sequence[Any]]],
         "cvd_divergence": "INSUFFICIENT_DATA",
     }
 
-    def _row_delta(row: Sequence[Any]) -> Tuple[float, float]:
-        sell = _sf(row[1]) if len(row) > 1 else 0.0
-        buy = _sf(row[2]) if len(row) > 2 else 0.0
-        return buy, sell
-
-    if taker_rows_5m:
-        buy, sell = _row_delta(taker_rows_5m[0])
-        out["cvd_5m_usd"] = round(buy - sell, 2)
-    if taker_rows_1h:
-        buy, sell = _row_delta(taker_rows_1h[0])
-        out["cvd_1h_usd"] = round(buy - sell, 2)
-        out["taker_buy_sell_ratio"] = round(buy / sell, 4) if sell > 0 else None
+    latest_5m = latest_taker_volumes_decimal(taker_rows_5m)
+    latest_1h = latest_taker_volumes_decimal(taker_rows_1h)
+    if latest_5m is not None:
+        net = taker_net_float(latest_5m)
+        out["cvd_5m_usd"] = round(net, 2) if net is not None else None
+    if latest_1h is not None:
+        net = taker_net_float(latest_1h)
+        out["cvd_1h_usd"] = round(net, 2) if net is not None else None
+        ratio = taker_ratio_float(latest_1h)
+        out["taker_buy_sell_ratio"] = round(ratio, 4) if ratio is not None else None
 
     # 量价背离：窗口内价格方向 vs 逐根 CVD 累积方向
-    rows = list(reversed(list(taker_rows_1h or [])))
+    rows = list(reversed(taker_rows_1h)) if isinstance(taker_rows_1h, (list, tuple)) else []
     n = min(len(rows), len(closes_1h), lookback + 1)
     if n >= 4:
-        out["cvd_divergence"] = "NONE"        # 有数据才能说"无背离"
         seg_rows = rows[-n:]
         seg_px = [_sf(c) for c in list(closes_1h)[-n:]]
-        deltas = []
-        for r in seg_rows:
-            buy, sell = _row_delta(r)
-            deltas.append(buy - sell)
-        cvd_delta = sum(deltas)
+        volumes = [parse_taker_row_decimal(r) for r in seg_rows]
+        if any(pair is None for pair in volumes):
+            return out
+        cvd_delta = sum_taker_net(volumes)
+        if cvd_delta is None:
+            return out
+        out["cvd_divergence"] = "NONE"        # 有数据才能说"无背离"
         px_delta = seg_px[-1] - seg_px[0]
         if px_delta > 0 and cvd_delta < 0:
             out["cvd_divergence"] = "BEARISH"   # 价涨但主动买盘净流出 ⇒ 隐蔽派发

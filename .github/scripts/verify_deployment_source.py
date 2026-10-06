@@ -14,6 +14,9 @@ PREVIOUS_SHA = "90f9f3a558bdbea0171b19a42c58e2fae7ed8e9d"
 # source guard is deliberately exact so an unrelated application edit cannot
 # enter a release image through a workflow-only review.
 APPLICATION_PATCH = {
+    '.trellis/tasks/10-06-reusable-deployment-contract/prd.md',
+    '.trellis/tasks/10-06-reusable-deployment-contract/design.md',
+    '.trellis/tasks/10-06-reusable-deployment-contract/task.json',
     '.trellis/spec/backend/okx-taker-parsing.md',
     '.trellis/tasks/10-06-okx-taker-parse/boundary-verification.md',
     '.trellis/tasks/10-06-okx-taker-parse/design.md',

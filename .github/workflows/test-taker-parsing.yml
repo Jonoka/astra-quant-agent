@@ -20,6 +20,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
           persist-credentials: false
       - name: Verify tested commit
         env:
@@ -30,10 +31,8 @@ jobs:
           python-version: '3.11'
           cache: pip
       - name: Install test dependencies
-        run: python -m pip install -r requirements.txt
-      - name: Verify regression gate rejects incomplete results
-        run: python -m unittest discover -s .github/scripts -p test_taker_regression_gate.py -v
-      - name: Run isolated offline taker regressions
+        run: python -m pip install -r requirements.txt PyYAML==6.0.2
+      - name: Run shared deployment and offline taker preflight
         env:
           ASTRA_CI_EXPECTED_SHA: ${{ github.event.pull_request.head.sha }}
-        run: python .github/scripts/run_taker_regressions.py
+        run: python .github/scripts/run_deployment_preflight.py

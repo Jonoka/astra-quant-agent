@@ -2,6 +2,15 @@ name: Build AstraQuant release image
 
 on:
   workflow_dispatch:
+    inputs:
+      previous_source:
+        description: Approved actual current production source (full commit SHA)
+        required: true
+        type: string
+      previous_image:
+        description: Approved actual current production immutable image
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -14,7 +23,9 @@ env:
   SOURCE_VERSION: v8.6.1
   UPSTREAM_REPOSITORY: 0xethanq/astra-quant-agent
   UPSTREAM_SHA: e0b29fef1818e0ff9c6b210eb73234620e276a02
-  PREVIOUS_SHA: 90f9f3a558bdbea0171b19a42c58e2fae7ed8e9d
+  PREVIOUS_SHA: ${{ inputs.previous_source }}
+  PREVIOUS_IMAGE: ${{ inputs.previous_image }}
+  COMPATIBILITY_REFERENCE_SHA: 90f9f3a558bdbea0171b19a42c58e2fae7ed8e9d
 
 concurrency:
   group: astra-release-image
@@ -46,6 +57,10 @@ jobs:
         run: |
           case "$GITHUB_REF" in refs/heads/codex/deploy|refs/heads/codex/okx-public-domains) ;; *) exit 1 ;; esac
           test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          [[ "$PREVIOUS_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$PREVIOUS_IMAGE" =~ ^ghcr.io/jonoka/astra-quant-agent@sha256:[0-9a-f]{64}$ ]]
+          test "$PREVIOUS_SHA" != "$SOURCE_SHA"
+          git merge-base --is-ancestor "$PREVIOUS_SHA" "$SOURCE_SHA"
           git fetch "https://github.com/$UPSTREAM_REPOSITORY.git" "refs/tags/$SOURCE_VERSION:refs/tags/$SOURCE_VERSION"
           git merge-base --is-ancestor "$SOURCE_VERSION^{commit}" "$UPSTREAM_SHA"
           git merge-base --is-ancestor "$UPSTREAM_SHA" HEAD
@@ -57,13 +72,21 @@ jobs:
           '
           python ../ci/.github/scripts/verify_deployment_source.py . "$UPSTREAM_SHA" "$SOURCE_SHA"
 
-      - name: Checkout deployed fork for same-release compatibility fixtures
+      - name: Checkout historical fork for additive compatibility fixtures
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.SOURCE_REPOSITORY }}
+          ref: ${{ env.COMPATIBILITY_REFERENCE_SHA }}
+          fetch-depth: 1
+          path: previous
+
+      - name: Checkout approved current production source
         uses: actions/checkout@v4
         with:
           repository: ${{ env.SOURCE_REPOSITORY }}
           ref: ${{ env.PREVIOUS_SHA }}
           fetch-depth: 1
-          path: previous
+          path: deployed
 
       - name: Set up hosted migration test runtime
         uses: actions/setup-python@v5
@@ -74,7 +97,9 @@ jobs:
         run: python -m pip install -r source/requirements.txt PyYAML==6.0.2
 
       - name: Verify prior source pin
-        run: test "$(git -C previous rev-parse HEAD)" = "$PREVIOUS_SHA"
+        run: |
+          test "$(git -C previous rev-parse HEAD)" = "$COMPATIBILITY_REFERENCE_SHA"
+          test "$(git -C deployed rev-parse HEAD)" = "$PREVIOUS_SHA"
 
       - name: Isolate writable test fixtures from the build source
         shell: bash
@@ -83,13 +108,12 @@ jobs:
           test "$(git -C validation rev-parse HEAD)" = "$SOURCE_SHA"
           python ci/.github/scripts/verify_deployment_source.py validation "$UPSTREAM_SHA" "$SOURCE_SHA"
 
-      - name: Require reviewed taker parsing regressions
+      - name: Require shared deployment and offline taker preflight
         working-directory: source
         env:
           ASTRA_CI_EXPECTED_SHA: ${{ env.SOURCE_SHA }}
-        run: |
-          python -m unittest discover -s .github/scripts -p test_taker_regression_gate.py -v
-          python .github/scripts/run_taker_regressions.py
+          ASTRA_DEPLOYED_SOURCE: ${{ github.workspace }}/deployed
+        run: python .github/scripts/run_deployment_preflight.py
 
       - name: Run official migration and administrator tests
         working-directory: validation
@@ -163,6 +187,9 @@ jobs:
 
       - name: Rehearse cycle deadline upgrade and latest-state rollback
         run: python ci/.github/scripts/rehearse_cycle_deadline_upgrade.py --source validation --previous previous
+
+      - name: Rehearse approved current production upgrade and latest-state rollback
+        run: python ci/.github/scripts/rehearse_cycle_deadline_upgrade.py --source validation --previous deployed
 
       - name: Require real cycle deadline state rehearsal tests
         env:
@@ -248,7 +275,7 @@ jobs:
           BUILD_RECIPE_SHA256: ${{ steps.recipe.outputs.sha256 }}
           EXPECTED_IMAGE_ID: ${{ steps.candidate_lock.outputs.image_id }}
         run: |
-          python ci/.github/scripts/smoke_release_compose.py source astraquant:ci previous
+          python ci/.github/scripts/smoke_release_compose.py source astraquant:ci deployed
           printf 'image_id=%s\n' "$(docker image inspect --format '{{.Id}}' astraquant:ci)" >> "$GITHUB_OUTPUT"
 
       - name: Log in to GHCR
@@ -278,7 +305,7 @@ jobs:
         run: |
           [[ "$IMAGE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
           docker pull "$IMAGE_NAME@$IMAGE_DIGEST"
-          python ci/.github/scripts/smoke_release_compose.py source "$IMAGE_NAME@$IMAGE_DIGEST" previous
+          python ci/.github/scripts/smoke_release_compose.py source "$IMAGE_NAME@$IMAGE_DIGEST" deployed
           docker buildx imagetools inspect "$IMAGE_NAME@$IMAGE_DIGEST"
           printf '### Verified corrected release image\n\n- Source: `%s@%s`\n- Version: `%s`\n- Image: `%s@%s`\n- Platform: `linux/amd64`\n- Required council completion and all 62 cycle deadline regressions, patch retention, Linux real singleton locks, positive test discovery, cycle schema/latest-state rollback rehearsal, official migration, encrypted state, prior admin/session, custom baseline/overlay rendering and both Compose healthchecks passed.\n- Published image ID equals the smoke-tested candidate.\n' \
             "$SOURCE_REPOSITORY" "$SOURCE_SHA" "$SOURCE_VERSION" "$IMAGE_NAME" "$IMAGE_DIGEST" >> "$GITHUB_STEP_SUMMARY"
@@ -291,15 +318,16 @@ jobs:
         run: |
           mkdir release-artifacts
           git -C source archive --format=tar "$SOURCE_SHA" > release-artifacts/source-release.tar
-          git -C previous archive --format=tar "$PREVIOUS_SHA" > release-artifacts/source-previous.tar
+          git -C deployed archive --format=tar "$PREVIOUS_SHA" > release-artifacts/source-previous.tar
           cp ci/.github/scripts/runtime_release_upgrade.py release-artifacts/
           cp ci/.github/scripts/stage_release_bundle.py release-artifacts/
+          cp ci/.github/scripts/prepare_deployment_plan.py release-artifacts/
           cp ci/Dockerfile.release release-artifacts/
           python - <<'PY'
           import hashlib, json, os
           from pathlib import Path
           root = Path('release-artifacts')
-          evidence = {key: os.environ[key] for key in ('SOURCE_REPOSITORY', 'SOURCE_SHA', 'UPSTREAM_REPOSITORY', 'UPSTREAM_SHA', 'PREVIOUS_SHA', 'SOURCE_VERSION', 'IMAGE_NAME', 'IMAGE_DIGEST', 'GITHUB_SHA', 'GITHUB_RUN_ID', 'GITHUB_RUN_ATTEMPT', 'BUILD_RECIPE_SHA256')}
+          evidence = {key: os.environ[key] for key in ('SOURCE_REPOSITORY', 'SOURCE_SHA', 'UPSTREAM_REPOSITORY', 'UPSTREAM_SHA', 'PREVIOUS_SHA', 'PREVIOUS_IMAGE', 'COMPATIBILITY_REFERENCE_SHA', 'SOURCE_VERSION', 'IMAGE_NAME', 'IMAGE_DIGEST', 'GITHUB_SHA', 'GITHUB_RUN_ID', 'GITHUB_RUN_ATTEMPT', 'BUILD_RECIPE_SHA256')}
           evidence['platform'] = 'linux/amd64'
           evidence['sha256'] = {p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted(root.iterdir())}
           (root / 'provenance.json').write_text(json.dumps(evidence, indent=2) + '\n')

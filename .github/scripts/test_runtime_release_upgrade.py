@@ -18,6 +18,10 @@ sys.path.insert(0, str(Path(__file__).parent))
 import stage_release_bundle as staging
 
 
+LEGACY_REFERENCE_SHA = '90f9f3a558bdbea0171b19a42c58e2fae7ed8e9d'
+LEGACY_REFERENCE_IMAGE = 'ghcr.io/jonoka/astra-quant-agent@sha256:8b471e834dbfe633d720dc5d0ad0c4249e922dce91689719c46ca0fb6575b43b'
+
+
 class RuntimeUpgradeTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -29,6 +33,13 @@ class RuntimeUpgradeTests(unittest.TestCase):
         obj.op = self.root / "operation"
         obj.op.mkdir()
         obj.state = {"extras": []}
+        obj.previous = LEGACY_REFERENCE_SHA
+        obj.previous_image = LEGACY_REFERENCE_IMAGE
+        # These fixtures exercise the original unrelated lifecycle gates. The
+        # pinned-plan/native-pool guards have their own real filesystem suite.
+        obj.pool_guard = Mock()
+        obj.deployment_guard = Mock()
+        obj.remember_started_containers = Mock()
         return obj
 
     def schema_fixture(self, *, additive=False):
@@ -194,7 +205,7 @@ class RuntimeUpgradeTests(unittest.TestCase):
             upgrade.gateway_source_compatibility(old, new)
 
     def test_stage_identity_uses_corrected_fork_sha_and_pinned_ancestor(self):
-        evidence = {'SOURCE_SHA': 'a' * 40, 'GITHUB_SHA': 'a' * 40, 'PREVIOUS_SHA': upgrade.PREVIOUS,
+        evidence = {'SOURCE_SHA': 'a' * 40, 'GITHUB_SHA': 'a' * 40, 'PREVIOUS_SHA': LEGACY_REFERENCE_SHA,
                     'UPSTREAM_SHA': upgrade.UPSTREAM, 'SOURCE_REPOSITORY': 'Jonoka/astra-quant-agent',
                     'UPSTREAM_REPOSITORY': '0xethanq/astra-quant-agent', 'SOURCE_VERSION': 'v8.6.1',
                     'platform': 'linux/amd64'}
@@ -237,11 +248,11 @@ class RuntimeUpgradeTests(unittest.TestCase):
         obj.image = 'ghcr.io/jonoka/astra-quant-agent@sha256:' + 'b' * 64
         obj.release = 'c' * 40
         labels = {
-            'org.opencontainers.image.revision': upgrade.PREVIOUS,
+            'org.opencontainers.image.revision': LEGACY_REFERENCE_SHA,
             'org.opencontainers.image.version': 'v8.6.1',
             'org.opencontainers.image.source': 'https://github.com/Jonoka/astra-quant-agent',
         }
-        metadata = {'Config': {'Labels': labels}, 'RepoDigests': [upgrade.OLD_IMAGE],
+        metadata = {'Config': {'Labels': labels}, 'RepoDigests': [LEGACY_REFERENCE_IMAGE],
                     'Os': 'linux', 'Architecture': 'amd64', 'Id': 'old-image-id'}
         with patch.object(upgrade, 'run', return_value=upgrade.json.dumps([metadata]).encode()):
             self.assertEqual(obj.image_metadata(previous=True), 'old-image-id')
@@ -305,7 +316,7 @@ class RuntimeUpgradeTests(unittest.TestCase):
                 upgrade.relative_path(value)
 
     def test_source_checkout_crlf_proof_is_exact_and_never_normalizes_inputs(self):
-        raw = '策略\nsecond\n'.encode()
+        raw = '绛栫暐\nsecond\n'.encode()
         crlf = raw.replace(b'\n', b'\r\n')
         self.assertEqual(upgrade.source_representation(raw, raw), 'raw')
         self.assertEqual(upgrade.source_representation(crlf, raw), 'proven_utf8_crlf')
@@ -332,7 +343,7 @@ class RuntimeUpgradeTests(unittest.TestCase):
     def test_compose_requires_four_unchanged_mounts_and_only_image_change(self):
         obj = self.operator()
         obj.image = 'ghcr.io/jonoka/astra-quant-agent@sha256:' + 'a' * 64
-        old = {'services': {s: {'image': upgrade.OLD_IMAGE, 'volumes': [
+        old = {'services': {s: {'image': LEGACY_REFERENCE_IMAGE, 'volumes': [
             {'target': '/app/' + n, 'source': str(upgrade.ROOT / n), 'type': 'bind'}
             for n in ('.env', 'data', 'logs', 'backups')]} for s in upgrade.SERVICES}}
         new = copy.deepcopy(old)
@@ -354,12 +365,12 @@ class RuntimeUpgradeTests(unittest.TestCase):
 
     def test_override_patch_preserves_all_non_image_bytes(self):
         path = self.root / "override.yml"
-        before = ("# retained\r\nservices:\r\n  backend:\r\n    image: '" + upgrade.OLD_IMAGE +
-                  "' # backend\r\n  gateway:\r\n    image: \"" + upgrade.OLD_IMAGE + "\"\r\n").encode()
+        before = ("# retained\r\nservices:\r\n  backend:\r\n    image: '" + LEGACY_REFERENCE_IMAGE +
+                  "' # backend\r\n  gateway:\r\n    image: \"" + LEGACY_REFERENCE_IMAGE + "\"\r\n").encode()
         path.write_bytes(before)
         image = "ghcr.io/jonoka/astra-quant-agent@sha256:" + "a" * 64
-        upgrade.patch_override(path, upgrade.OLD_IMAGE, image)
-        self.assertEqual(path.read_bytes(), before.replace(upgrade.OLD_IMAGE.encode(), image.encode()))
+        upgrade.patch_override(path, LEGACY_REFERENCE_IMAGE, image)
+        self.assertEqual(path.read_bytes(), before.replace(LEGACY_REFERENCE_IMAGE.encode(), image.encode()))
 
     def test_override_extra_scope_rejected_before_write(self):
         path = self.root / "override.yml"

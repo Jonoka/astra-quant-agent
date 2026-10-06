@@ -140,7 +140,9 @@ class DeploymentSourceGuardTests(unittest.TestCase):
         root = Path(__file__).resolve().parents[2]
         workflow = yaml.safe_load((root / '.github/workflows/build-release-image.yml').read_text(encoding='utf-8'))
         env = workflow['env']
-        self.assertEqual(env['PREVIOUS_SHA'], '90f9f3a558bdbea0171b19a42c58e2fae7ed8e9d')
+        self.assertEqual(env['PREVIOUS_SHA'], '${{ inputs.previous_source }}')
+        self.assertEqual(env['PREVIOUS_IMAGE'], '${{ inputs.previous_image }}')
+        self.assertEqual(env['COMPATIBILITY_REFERENCE_SHA'], '90f9f3a558bdbea0171b19a42c58e2fae7ed8e9d')
         self.assertEqual(env['UPSTREAM_SHA'], 'e0b29fef1818e0ff9c6b210eb73234620e276a02')
         self.assertEqual(env['SOURCE_SHA'], '${{ github.sha }}')
         self.assertEqual(env['SOURCE_VERSION'], 'v8.6.1')
@@ -176,7 +178,7 @@ class DeploymentSourceGuardTests(unittest.TestCase):
                         list(steps).index('Require real cycle deadline state rehearsal tests'))
         published = steps['Verify published immutable image']
         self.assertEqual(published['env']['EXPECTED_IMAGE_ID'], '${{ steps.candidate.outputs.image_id }}')
-        self.assertIn('smoke_release_compose.py source "$IMAGE_NAME@$IMAGE_DIGEST" previous', published['run'])
+        self.assertIn('smoke_release_compose.py source "$IMAGE_NAME@$IMAGE_DIGEST" deployed', published['run'])
         self.assertIn('$SOURCE_VERSION-cycle-deadline-fix-${SOURCE_SHA:0:12}',
                       steps['Publish the smoke-tested linux/amd64 image']['run'])
         self.assertEqual(steps['Upload verified raw deployment bundle']['with']['name'],

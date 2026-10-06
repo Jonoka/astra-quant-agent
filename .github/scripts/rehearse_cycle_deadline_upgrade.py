@@ -157,6 +157,9 @@ def rehearse(source: Path, previous: Path) -> dict:
             "phase": "candidate-active", "manifest_sha": "synthetic-manifest", "extras": [],
             "snapshot": snapshot, "databases": baseline, "prompt_refreshed": False}
         obj.sources = lambda: helper.gateway_source_compatibility(previous / "astra_gateway/store.py", source / "astra_gateway/store.py")
+        obj.state['deployment_sources'] = {
+            'previous': helper.deployment_source(original),
+            'release': helper.deployment_source(live)}
         obj.image_metadata = Mock(return_value="synthetic-image-not-inspected")
         obj.capacity, obj.stop = Mock(), Mock()
         obj.start = Mock()
@@ -190,7 +193,8 @@ def rehearse(source: Path, previous: Path) -> dict:
         obj.verify = verify_latest
         # Root UID/mode and service acceptance are intentionally outside this
         # portable rehearsal; unchanged production gates are never relaxed.
-        with patch.object(helper, "ROOT", live), patch.object(helper, "env_gate", lambda root: None):
+        with patch.object(helper, "ROOT", live), patch.object(helper, "env_gate", lambda root: None), \
+                patch.object(helper, 'containers', return_value={}):
             obj.rollback()
         assert obj.state["phase"] == "rolled-back"
         obj.start.assert_called_once_with(True)

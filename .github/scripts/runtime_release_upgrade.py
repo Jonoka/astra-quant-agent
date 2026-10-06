@@ -31,15 +31,14 @@ BACKUPS = Path("/opt/r20-quantum-trader-backups")
 PROJECT = "r20-quantum-trader"
 SERVICES = ("backend", "gateway")
 NAMES = tuple("astraquant-" + service for service in SERVICES)
-PREVIOUS = "90f9f3a558bdbea0171b19a42c58e2fae7ed8e9d"
 UPSTREAM = "e0b29fef1818e0ff9c6b210eb73234620e276a02"
 PATCH_ID = "council-completion-v1"
 OKX_PATCH_ID = "okx-public-domains-v1"
 DEADLINE_PATCH_ID = "cycle-deadline-v1"
 CHECKS = ("state_preservation", "backward_read_write", "helper_tests", "published_compose_smoke",
           "council_regression", "patch_retention", "cycle_deadline_regression",
-          "linux_singleton_lock", "cycle_deadline_state_rehearsal")
-OLD_IMAGE = "ghcr.io/jonoka/astra-quant-agent@sha256:8b471e834dbfe633d720dc5d0ad0c4249e922dce91689719c46ca0fb6575b43b"
+          "linux_singleton_lock", "cycle_deadline_state_rehearsal",
+          "shared_deployment_preflight", "deployment_plan_tests", "current_baseline_rehearsal")
 IMAGE_RE = r"ghcr\.io/jonoka/astra-quant-agent@sha256:[0-9a-f]{64}"
 WRITABLE = (".env", "data", "logs", "backups", ".archive", "plugins")
 OVERRIDE = "docker-compose.override.yml"
@@ -117,6 +116,71 @@ def require(condition, gate):
         raise GateError(gate)
 
 
+def validate_deployment_plan(plan):
+    fields = {'schema', 'previous_source', 'previous_image', 'release_source', 'image',
+              'helper_sha256', 'provenance_sha256', 'pool', 'protected_config', 'runtime'}
+    require(isinstance(plan, dict) and set(plan) == fields and
+            type(plan['schema']) is int and plan['schema'] == 1, 'deployment_plan_schema')
+    for key in ('previous_source', 'release_source'):
+        require(isinstance(plan[key], str) and re.fullmatch(r'[0-9a-f]{40}', plan[key]),
+                'deployment_plan_source')
+    for key in ('previous_image', 'image'):
+        require(isinstance(plan[key], str) and re.fullmatch(IMAGE_RE, plan[key]),
+                'deployment_plan_image')
+    require(plan['previous_source'] != plan['release_source'] and
+            plan['previous_image'] != plan['image'] and plan['release_source'] != UPSTREAM,
+            'deployment_plan_target')
+    for key in ('helper_sha256', 'provenance_sha256'):
+        require(isinstance(plan[key], str) and re.fullmatch(r'[0-9a-f]{64}', plan[key]),
+                'deployment_plan_hash')
+    pool = plan['pool']
+    require(isinstance(pool, dict) and set(pool) == {
+        'relative_path', 'names', 'sha256', 'size', 'uid', 'gid', 'mode'}, 'deployment_pool_schema')
+    require(pool['relative_path'] == 'data/instrument_pool.json' and
+            isinstance(pool['names'], list) and pool['names'] and
+            all(isinstance(n, str) and re.fullmatch(r'[A-Z0-9]+', n) for n in pool['names']) and
+            len(set(pool['names'])) == len(pool['names']), 'deployment_pool_names')
+    require(isinstance(pool['sha256'], str) and re.fullmatch(r'[0-9a-f]{64}', pool['sha256']) and
+            type(pool['size']) is int and pool['size'] > 0 and
+            type(pool['uid']) is int and pool['uid'] == 0 and
+            type(pool['gid']) is int and pool['gid'] == 0 and
+            type(pool['mode']) is int and pool['mode'] == 0o600, 'deployment_pool_identity')
+    config = plan['protected_config']
+    require(isinstance(config, dict) and set(config) == set(CONFIG) and
+            config['.env'] is not None and config['data/instrument_pool.json'] == pool['sha256'] and
+            all(v is None or isinstance(v, str) and re.fullmatch(r'[0-9a-f]{64}', v)
+                for v in config.values()), 'deployment_configuration_hashes')
+    require(isinstance(plan['runtime'], dict) and type(plan['runtime'].get('demo')) is bool and
+            type(plan['runtime'].get('schedule_seconds')) is int and
+            type(plan['runtime'].get('minimum_idle_window_seconds')) is int and
+            plan['runtime'] == {'project': PROJECT, 'services': list(SERVICES), 'demo': True,
+                               'schedule_seconds': 900, 'minimum_idle_window_seconds': 480},
+            'deployment_runtime_scope')
+    return plan
+
+
+def read_deployment_plan(operation, external_sha256):
+    require(isinstance(external_sha256, str) and re.fullmatch(r'[0-9a-f]{64}', external_sha256),
+            'deployment_plan_external_pin')
+    path = plain_path(operation / 'deployment-plan.json')
+    require(path.is_file(), 'deployment_plan_missing')
+    raw = path.read_bytes()
+    require(sha(raw) == external_sha256, 'deployment_plan_external_pin')
+
+    def unique_fields(items):
+        value = {}
+        for key, item in items:
+            require(key not in value, 'deployment_plan_duplicate_field')
+            value[key] = item
+        return value
+
+    try:
+        plan = json.loads(raw, object_pairs_hook=unique_fields)
+    except (UnicodeError, ValueError):
+        raise GateError('deployment_plan_schema') from None
+    return validate_deployment_plan(plan)
+
+
 def run(*args, timeout=360):
     try:
         result = subprocess.run([str(a) for a in args], check=True, capture_output=True,
@@ -142,6 +206,20 @@ def plain_path(path):
     for parent in (path, *path.parents):
         require(not parent.is_symlink(), "symlink_path")
     return path
+
+
+def configuration_hash(path):
+    path = plain_path(path)
+    require(not path.exists() or path.is_file(), 'configuration_file_type')
+    if not path.exists():
+        return None
+    before = path.stat()
+    value = digest(path)
+    after = path.stat()
+    require((before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns) ==
+            (after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns),
+            'configuration_read_drift')
+    return value
 
 
 def operation_path(path):
@@ -216,6 +294,23 @@ def tree_manifest(root):
 def files_manifest(root):
     return {name: value["sha256"] for name, value in tree_manifest(root).items()
             if "sha256" in value}
+
+
+def deployment_source(root, extras=()):
+    """Freeze non-writable deployment bytes/metadata, excluding carried state."""
+    excluded = set(WRITABLE) | set(extras) | {'.git'}
+    plain_path(root)
+    info = root.stat()
+    require(stat.S_ISDIR(info.st_mode), 'deployment_source_directory')
+    result = {'.': {'mode': stat.S_IMODE(info.st_mode), 'uid': info.st_uid,
+                    'gid': info.st_gid, 'directory': True}}
+    for child in sorted(root.iterdir()):
+        if child.name in excluded or child.name == '__pycache__':
+            continue
+        for name, value in tree_manifest(child).items():
+            if '__pycache__' not in Path(name).parts:
+                result[child.name if name == '.' else child.name + '/' + name] = value
+    return result
 
 
 def canonical_container(value):
@@ -463,9 +558,14 @@ def gateway_source_compatibility(old, new):
     """Only the independent deadline DDL and migration/query AST may change."""
     old_schema = source_literal(old, "SCHEMA")
     new_schema = source_literal(new, "SCHEMA")
-    require(new_schema == old_schema + DEADLINE_SCHEMA_ADDITION, "gateway_schema_changed")
     prior = source_literal(old, "MIGRATION_COLUMNS")
     require(source_literal(new, "MIGRATION_COLUMNS") == prior, "gateway_migration_changed")
+    # Subsequent deployments already contain the reviewed additive migration.
+    # Only byte-identical gateway code may use this same-schema branch.
+    if old.read_bytes() == new.read_bytes():
+        require(old_schema.endswith(DEADLINE_SCHEMA_ADDITION), 'gateway_schema_changed')
+        return
+    require(new_schema == old_schema + DEADLINE_SCHEMA_ADDITION, "gateway_schema_changed")
     old_tree, new_tree = ast.parse(old.read_bytes()), ast.parse(new.read_bytes())
     def ensure(tree):
         definitions = [node for node in ast.walk(tree) if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
@@ -502,19 +602,89 @@ def read_session(fd):
 
 
 class Upgrade:
-    def __init__(self, operation, session):
+    def __init__(self, operation, session, deployment_plan_sha256):
         self.op = operation_path(operation)
         self.session = session
+        self.deployment_plan_sha256 = deployment_plan_sha256
+        plan = self.deployment_plan()
+        self.previous = plan['previous_source']
+        self.previous_image = plan['previous_image']
         self.manifest = json.loads((self.op / "manifest.json").read_bytes())
         self.manifest_sha = digest(self.op / "manifest.json")
         self.image = self.manifest["image"]
         self.release = self.manifest["release_source"]
-        require(re.fullmatch(IMAGE_RE, self.image) and self.image != OLD_IMAGE, "candidate_digest")
-        require(self.manifest["previous_source"] == PREVIOUS and
-                re.fullmatch(r"[0-9a-f]{40}", self.release) and self.release not in (PREVIOUS, UPSTREAM) and
-                self.manifest["upstream_source"] == UPSTREAM and self.manifest["schema"] == 1,
+        require(re.fullmatch(IMAGE_RE, self.image) and self.image != self.previous_image, "candidate_digest")
+        require(self.manifest["previous_source"] == self.previous and
+                self.manifest['previous_image'] == self.previous_image and
+                self.manifest['deployment_plan_sha256'] == deployment_plan_sha256 and
+                self.release == plan['release_source'] and self.image == plan['image'] and
+                self.manifest["upstream_source"] == UPSTREAM and self.manifest["schema"] == 2,
                 "source_pins")
         self.state = self.read("state.json") if (self.op / "state.json").exists() else {}
+
+    def deployment_plan(self):
+        plan = read_deployment_plan(self.op, self.deployment_plan_sha256)
+        require(digest(Path(__file__)) == plan['helper_sha256'], 'deployment_helper_identity')
+        require(digest(self.op / 'provenance.json') == plan['provenance_sha256'],
+                'deployment_provenance_identity')
+        return plan
+
+    def pool_guard(self):
+        plan = self.deployment_plan()
+        pool = plan['pool']
+        path = plain_path(ROOT / pool['relative_path'])
+        require(path.is_file(), 'pool_config_missing')
+        before = path.stat()
+        raw = path.read_bytes()
+        after = path.stat()
+        require((before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns) ==
+                (after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns) and
+                (after.st_uid, after.st_gid, stat.S_IMODE(after.st_mode), after.st_size) ==
+                (pool['uid'], pool['gid'], pool['mode'], pool['size']) and
+                sha(raw) == pool['sha256'], 'pool_config_drift')
+        for name, expected in plan['protected_config'].items():
+            require(configuration_hash(ROOT / name) == expected,
+                    'approved_configuration_drift')
+        return pool
+
+    def idle_window(self):
+        scope = self.deployment_plan()['runtime']
+        require(scope['schedule_seconds'] - int(time.time()) % scope['schedule_seconds'] >=
+                scope['minimum_idle_window_seconds'], 'insufficient_idle_window')
+        path = plain_path(ROOT / GATEWAY_DATABASE)
+        auxiliary = [Path(str(path) + suffix) for suffix in ('-wal', '-shm')]
+        require(not any(p.exists() for p in auxiliary), 'scheduler_snapshot_unstable')
+        before = path.stat()
+        raw = path.read_bytes()
+        after = path.stat()
+        second = path.read_bytes()
+        final = path.stat()
+        require(raw == second and not any(p.exists() for p in auxiliary) and
+                (before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns) ==
+                (after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns) ==
+                (final.st_ino, final.st_size, final.st_mtime_ns, final.st_ctime_ns),
+                'scheduler_snapshot_unstable')
+        # Read a checkpointed copy in memory; never create live SQLite sidecars.
+        copied = bytearray(raw)
+        require(len(copied) >= 100 and copied[:16] == b'SQLite format 3\x00',
+                'scheduler_snapshot_invalid')
+        copied[18] = copied[19] = 1
+        with closing(sqlite3.connect(':memory:')) as database:
+            database.deserialize(copied)
+            database.execute('PRAGMA query_only=ON')
+            require(database.execute("SELECT COUNT(*) FROM job_runs WHERE status='running'").fetchone()[0] == 0,
+                    'active_scheduled_job')
+        for process in Path('/proc').iterdir():
+            if not process.name.isdigit():
+                continue
+            try:
+                arguments = (process / 'cmdline').read_bytes().split(b'\0')
+            except (FileNotFoundError, PermissionError, ProcessLookupError):
+                continue
+            require(not any(arg.rsplit(b'/', 1)[-1] in (
+                b'ai_factor_trader.py', b'ai_brain_trader.py', b'trading_brain.py',
+                b'self_evolution.py') for arg in arguments), 'active_trader_or_brain')
+        self.pool_guard()
 
     def read(self, name):
         return json.loads((self.op / name).read_bytes())
@@ -557,7 +727,108 @@ class Upgrade:
         self.allowed(source)
         self.allowed(target)
         require(source.exists() and not target.exists(), "rename_destination_exists")
+        if source == ROOT or target == ROOT:
+            self.deployment_guard(renaming=True, restore=source if target == ROOT else None)
         os.rename(source, target)
+
+    def deployment_guard(self, *, renaming=False, restore=None, inventory=None):
+        """Reject obsolete operations before touching a different deployment.
+
+        State/health may be broken during recovery; source, immutable images and
+        operation-owned container IDs may not be replaced by a newer deployment.
+        """
+        phase = self.state.get('phase')
+        previous_phases = {'stopping', 'stopped', 'snapshot-verified', 'candidate-ready',
+                           'recovery-starting'}
+        candidate_phases = {'root-moved', 'candidate-active', 'starting', 'accepted',
+                            'recovery-stopped', 'recovery-ready'}
+        recovery_phases = {'candidate-retained', 'recovery-active', 'recovery-starting'}
+        original = self.op / 'original-deployment'
+        failed = self.op / 'failed-candidate'
+        sources = self.state.get('deployment_sources', {})
+        require(set(sources) == {'previous', 'release'} and all(sources.values()),
+                'deployment_identity_missing')
+        extras = self.state.get('extras', [])
+        if ROOT.exists():
+            if failed.exists():
+                require(original.exists() and phase in recovery_phases, 'deployment_recovery_phase')
+                label = 'previous'
+            elif original.exists():
+                require(phase in candidate_phases, 'deployment_candidate_phase')
+                label = 'release'
+            else:
+                require(phase in previous_phases, 'deployment_previous_phase')
+                label = 'previous'
+            require(deployment_source(ROOT, extras) == sources[label], 'foreign_deployment_source')
+        else:
+            require(original.exists() and phase in {'candidate-ready', 'root-moved',
+                    'recovery-ready', 'candidate-retained'}, 'deployment_missing_root_phase')
+            label = 'previous' if failed.exists() else 'release'
+            if restore is not None:
+                if restore == original:
+                    require(not failed.exists(), 'deployment_restore_source')
+                    expected = 'previous'
+                elif restore == self.op / 'candidate':
+                    require(not failed.exists(), 'deployment_restore_source')
+                    expected = 'release'
+                else:
+                    require(restore == self.op / 'recovery' and failed.exists(), 'deployment_restore_source')
+                    expected = 'previous'
+                require(deployment_source(restore, extras) == sources[expected], 'foreign_restore_source')
+        now = containers() if inventory is None else inventory
+        targets = {n: c for n, c in now.items() if c['project'] == PROJECT or n in NAMES}
+        require(set(targets) <= set(NAMES) and all(c['project'] == PROJECT and
+                c['service'] == n.removeprefix('astraquant-') for n, c in targets.items()),
+                'deployment_container_scope')
+        baseline = self.state.get('baseline', {})
+        candidate_ids = self.state.get('candidate_containers', {})
+        recovery_ids = self.state.get('recovery_containers', {})
+        for name, current in targets.items():
+            if current['ref'] == self.previous_image:
+                require(current['image'] == self.image_metadata(True), 'foreign_deployment_image')
+                owner = recovery_ids.get(name) or baseline.get(name)
+                require(owner and current['id'] == owner['id'], 'foreign_deployment_container')
+                require(label == 'previous' or current['state'] not in {'running', 'restarting', 'paused'},
+                        'previous_container_still_active')
+            else:
+                require(current['ref'] == self.image and
+                        current['image'] == self.image_metadata(False), 'foreign_deployment_image')
+                require(name in candidate_ids and current['id'] == candidate_ids[name]['id'],
+                        'foreign_deployment_container')
+                require(label == 'release' or current['state'] not in {'running', 'restarting', 'paused'},
+                        'candidate_container_still_active')
+        if renaming or not ROOT.exists():
+            require(all(c['state'] not in {'running', 'restarting', 'paused'} for c in targets.values()),
+                    'deployment_rename_running_container')
+        return targets
+
+    def remember_started_containers(self, previous):
+        # Called even when Compose partially fails, preserving the exact IDs it
+        # created for subsequent recovery; never register an unexpected image.
+        label = 'previous' if previous else 'release'
+        require(deployment_source(ROOT, self.state['extras']) ==
+                self.state['deployment_sources'][label], 'foreign_deployment_source')
+        targets = {n: c for n, c in containers().items() if c['project'] == PROJECT or n in NAMES}
+        require(set(targets) <= set(NAMES) and all(c['project'] == PROJECT and
+                c['service'] == n.removeprefix('astraquant-') for n, c in targets.items()),
+                'deployment_container_scope')
+        recorded = {}
+        for name, current in targets.items():
+            expected_ref = self.previous_image if previous else self.image
+            if current['ref'] == expected_ref:
+                require(current['image'] == self.image_metadata(previous), 'foreign_deployment_image')
+                recorded[name] = {'id': current['id']}
+            else:
+                opposite = self.image if previous else self.previous_image
+                require(current['ref'] == opposite and current['state'] not in {'running', 'restarting', 'paused'},
+                        'foreign_deployment_image')
+                owner = (self.state.get('candidate_containers', {}) if previous else
+                         self.state['baseline']).get(name)
+                require(owner and current['id'] == owner['id'] and
+                        current['image'] == self.image_metadata(not previous), 'foreign_deployment_container')
+        key = 'recovery_containers' if previous else 'candidate_containers'
+        self.state[key] = recorded
+        self.save('state.json', self.state)
 
     def compose(self, source, *args):
         self.allowed(source)
@@ -566,12 +837,12 @@ class Upgrade:
                    "-f", source / OVERRIDE, *args)
 
     def image_metadata(self, previous=False):
-        image = OLD_IMAGE if previous else self.image
+        image = self.previous_image if previous else self.image
         metadata = json.loads(run("docker", "image", "inspect", image))[0]
         labels = metadata["Config"]["Labels"]
         require(image in metadata["RepoDigests"] and metadata["Os"] == "linux" and
                 metadata["Architecture"] == "amd64", "image_digest_platform")
-        require(labels["org.opencontainers.image.revision"] == (PREVIOUS if previous else self.release) and
+        require(labels["org.opencontainers.image.revision"] == (self.previous if previous else self.release) and
                 labels["org.opencontainers.image.version"] == "v8.6.1" and
                 labels["org.opencontainers.image.source"] == "https://github.com/" +
                 "Jonoka/astra-quant-agent",
@@ -598,7 +869,8 @@ class Upgrade:
                 require(re.fullmatch(r"[0-9a-f]{64}", value), "source_hash")
             require(files_manifest(self.op / ("source-" + label)) == expected, "raw_source_drift")
         proof = self.manifest["compatibility"]
-        require(proof["previous_source"] == PREVIOUS and proof["release_source"] == self.release and
+        require(proof["previous_source"] == self.previous and
+                proof['previous_image'] == self.previous_image and proof["release_source"] == self.release and
                 proof["upstream_source"] == UPSTREAM and
                 proof["image"] == self.image and proof["rollback_preserves_new_records"] is True,
                 "compatibility_identity")
@@ -629,6 +901,7 @@ class Upgrade:
         return result
 
     def check_drift(self):
+        self.pool_guard()
         require(self.manifest_sha == self.state["manifest_sha"], "manifest_drift")
         self.sources()
         require(self.guard(ROOT) == self.state["guard"], "source_config_drift")
@@ -668,7 +941,7 @@ class Upgrade:
         expected = copy.deepcopy(before)
         for service in SERVICES:
             spec = expected["services"][service]
-            require(spec["image"] == OLD_IMAGE, "compose_previous_image")
+            require(spec["image"] == self.previous_image, "compose_previous_image")
             spec["image"] = self.image
             volumes = spec["volumes"]
             require(len(volumes) == 4 and {v["target"] for v in volumes} == {"/app/" + n for n in (".env", "data", "logs", "backups")},
@@ -684,7 +957,7 @@ class Upgrade:
         image_id = self.image_metadata(previous)
         for service, name in zip(SERVICES, NAMES):
             c = now[name]
-            require(c["service"] == service and c["ref"] == (OLD_IMAGE if previous else self.image) and
+            require(c["service"] == service and c["ref"] == (self.previous_image if previous else self.image) and
                     c["image"] == image_id, "runtime_identity")
             require(c["state"] == "running" and c["health"] == "healthy" and c["restart"] == 0,
                     "runtime_health_restart")
@@ -750,10 +1023,15 @@ print(json.dumps({'workers':workers,'backends':backends,'owner':owner,'held':hel
         return result
 
     def strategy_reader(self, previous=False):
+        frozen_pool = self.pool_guard()
         # Actual application readers only; no job, model, order or evolution call.
         code = r'''import json, hashlib
 from pathlib import Path
 from scripts import risk_constants as risk, instrument_pool as pool, prompt_library as pl
+def refuse_write(*args, **kwargs):
+ raise RuntimeError('read-only strategy preflight refused a pool write')
+pool._write_pool_file = refuse_write
+pool._write_json_atomic = refuse_write
 expected = {'MIN_ENTRY_CONFIDENCE':75.0,'MIN_RISK_REWARD_RATIO':1.6,
  'TIME_STOP_HOURS':4.0,'STOP_COOLDOWN_MINUTES':15,'SCALE_OUT_TRIGGER_ATR':2.2,
  'SCALE_OUT_RATIO':0.4,'MAX_SAME_DIRECTION_POSITIONS':3,'MIN_LEVERAGE':2.0,
@@ -765,7 +1043,8 @@ paths = [Path('/app/data') / n for n in ('instrument_pool.json','prompt_library.
 before = [p.read_bytes() if p.exists() else None for p in paths]
 items = pool.load_instruments()
 assert pool.pool_is_trustworthy()
-assert [i['name'] for i in items] == ['BTC','ETH','SOL','XRP','DOGE','ARB','SUI','LINK','ADA','UNI']
+assert [i['name'] for i in items] == FROZEN_POOL_NAMES
+assert hashlib.sha256(before[0]).hexdigest() == FROZEN_POOL_SHA
 profile = pl.active_profile()
 assert profile['id'] == 'allpattern_swing'
 base = pl.base_template_text('trading_system')
@@ -778,7 +1057,10 @@ print(json.dumps({'risk':expected,'pool':[i['name'] for i in items],
  'profile':profile['id'],'schema_sha256':hashlib.sha256(modules[0]['content'].encode()).hexdigest(),
  'rendered_sha256':hashlib.sha256(rendered.encode()).hexdigest()}))
 '''
+        code = code.replace('FROZEN_POOL_NAMES', repr(frozen_pool['names'])).replace(
+            'FROZEN_POOL_SHA', repr(frozen_pool['sha256']))
         result = json.loads(run("docker", "exec", NAMES[0], "python3", "-c", code))
+        self.pool_guard()
         self.save("previous-strategy-reader.json" if previous else "release-strategy-reader.json", result)
         if not previous and self.state.get("prompt_refreshed"):
             require(digest(ROOT / PROMPT) == digest(self.op / "source-release" / PROMPT), "refreshed_prompt_drift")
@@ -794,7 +1076,12 @@ print(json.dumps({'risk':expected,'pool':[i['name'] for i in items],
 
     def preflight(self):
         require(not self.state and not (self.op / "candidate").exists(), "operation_already_prepared")
+        self.pool_guard()
         self.sources()
+        plan = self.deployment_plan()
+        require(self.manifest['source_files']['previous'][PROMPT] != plan['protected_config'][PROMPT] or
+                self.manifest['source_files']['release'][PROMPT] == plan['protected_config'][PROMPT],
+                'unapproved_official_prompt_refresh')
         self.capacity()
         extras = self.source_runtime()
         env_gate(ROOT)
@@ -808,18 +1095,21 @@ print(json.dumps({'risk':expected,'pool':[i['name'] for i in items],
         guard = self.guard(ROOT)
         self.copy(self.op / "source-release", self.op / "candidate")
         self.copy(ROOT / OVERRIDE, self.op / "candidate" / OVERRIDE)
-        patch_override(self.op / "candidate" / OVERRIDE, OLD_IMAGE, self.image)
+        patch_override(self.op / "candidate" / OVERRIDE, self.previous_image, self.image)
         self.validate_compose(self.op / "candidate")
         self.state = {"manifest_sha": self.manifest_sha, "guard": guard,
                       "candidate": tree_manifest(self.op / "candidate"), "baseline": baseline,
                       "endpoints": endpoints, "admin": administrator, "databases": databases,
-                      "extras": extras}
+                      "extras": extras, 'deployment_sources': {
+                          'previous': deployment_source(ROOT, extras),
+                          'release': deployment_source(self.op / 'candidate', extras)}}
         self.check_drift()
         self.phase("prepared")
 
     def stop(self):
         # ID selection still works if candidate .env/Compose is damaged.
         now = containers()
+        self.deployment_guard(inventory=now)
         targets = {n: c for n, c in now.items() if c["project"] == PROJECT}
         require(set(targets) <= set(NAMES) and all(c["service"] == n.removeprefix("astraquant-")
                 for n, c in targets.items()), "stop_project_scope")
@@ -888,13 +1178,19 @@ print(json.dumps({'risk':expected,'pool':[i['name'] for i in items],
         return counts
 
     def start(self, previous):
+        self.pool_guard()
+        self.deployment_guard()
         self.state["log_marks"] = self.log_marks()
         self.state["started"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         self.phase("recovery-starting" if previous else "starting")
         self.compose(ROOT, "config", "--quiet")
-        self.compose(ROOT, "up", "-d", "--no-build", "--no-deps", "--wait", "--wait-timeout", "240", *SERVICES)
+        try:
+            self.compose(ROOT, "up", "-d", "--no-build", "--no-deps", "--wait", "--wait-timeout", "240", *SERVICES)
+        finally:
+            self.remember_started_containers(previous)
 
     def continuity(self):
+        self.pool_guard()
         env_gate(ROOT)
         require(admin_identity(ROOT) == self.state["admin"], "administrator_identity_drift")
         compatible_databases(self.state["databases"], db_state(ROOT))
@@ -904,10 +1200,12 @@ print(json.dumps({'risk':expected,'pool':[i['name'] for i in items],
 
     def verify(self, previous=False):
         require(self.state and self.manifest_sha == self.state["manifest_sha"], "operation_state_identity")
+        self.deployment_guard()
         self.strategy_reader(previous)
         samples = []
         first_workers = None
         for index in range(7):
+            self.deployment_guard()
             now = self.runtime(previous, self.state["baseline"])
             require(self.endpoints(previous) == self.state["endpoints"], "credential_auth_continuity")
             workers = self.worker_state()
@@ -934,10 +1232,12 @@ print(json.dumps({'risk':expected,'pool':[i['name'] for i in items],
         self.validate_compose(self.op / "candidate")
         self.image_metadata(False)
         self.check_drift()
+        self.idle_window()
         try:
             self.phase("stopping")
             self.stop()
             self.phase("stopped")
+            self.pool_guard()
             require(self.guard(ROOT) == self.state["guard"], "poststop_config_drift")
             self.state["databases"] = db_state(ROOT)
             self.state["admin"] = admin_identity(ROOT)
@@ -966,25 +1266,73 @@ print(json.dumps({'risk':expected,'pool':[i['name'] for i in items],
                 raise GateError("upgrade_failed_recovery_incomplete") from None
             raise GateError("upgrade_failed_previous_runtime_recovered") from None
 
+    def resume_recovery_renames(self):
+        """Resume only journaled, byte-proven recovery rename windows."""
+        original = self.op / 'original-deployment'
+        failed = self.op / 'failed-candidate'
+        recovery = self.op / 'recovery'
+        phase = self.state.get('phase')
+        if recovery.exists() and ROOT.exists() and not failed.exists():
+            require(phase == 'recovery-ready', 'partial_recovery_requires_review')
+            require(self.state.get('recovery_input_manifest') and
+                    tree_manifest(ROOT) == self.state['recovery_input_manifest'],
+                    'recovery_input_drift')
+        elif failed.exists() and recovery.exists() and ROOT.exists():
+            raise GateError('recovery_phase_ambiguous')
+        elif not ((not ROOT.exists() and failed.exists() and recovery.exists()) or
+                  (ROOT.exists() and failed.exists() and not recovery.exists() and
+                   phase == 'candidate-retained')):
+            return
+        require(original.exists() and phase in {'recovery-ready', 'candidate-retained'},
+                'recovery_phase_ambiguous')
+        require(tree_manifest(original) == self.state['snapshot'] and
+                tree_manifest(self.op / 'stopped-snapshot') == self.state['snapshot'],
+                'snapshot_evidence_drift')
+        restored = recovery if recovery.exists() else ROOT
+        require(self.state.get('recovery_manifest') and
+                tree_manifest(restored) == self.state['recovery_manifest'], 'recovery_tree_drift')
+        require(deployment_source(restored, self.state['extras']) ==
+                self.state['deployment_sources']['previous'], 'foreign_restore_source')
+        if failed.exists():
+            require(deployment_source(failed, self.state['extras']) ==
+                    self.state['deployment_sources']['release'], 'foreign_failed_source')
+            if self.state.get('recovery_input_manifest'):
+                require(tree_manifest(failed) == self.state['recovery_input_manifest'],
+                        'recovery_input_drift')
+        # Identity checks alone accept broken health; this pre-start rename
+        # reconciliation additionally requires all owned containers to be stopped.
+        self.deployment_guard(renaming=True)
+        if ROOT.exists() and not failed.exists():
+            self.move(ROOT, failed)
+        if not ROOT.exists():
+            self.phase('candidate-retained')
+            self.move(recovery, ROOT)
+        # Reaching here proves the second rename by the complete frozen recovery
+        # tree, not just by a source marker or presence of a directory.
+        self.phase('recovery-active')
+
     def rollback(self):
         require(self.state and self.state.get("phase") not in ("prepared", "rolled-back"), "rollback_phase")
         require(self.manifest_sha == self.state["manifest_sha"], "manifest_drift")
         self.sources()
         self.image_metadata(True)
+        try:
+            self.deployment_guard()
+        except GateError as exc:
+            self.save('rollback-identity-rejection-' + str(time.time_ns()) + '.json',
+                      {'phase': self.state.get('phase'), 'gate': str(exc)})
+            raise
         original = self.op / "original-deployment"
         failed = self.op / "failed-candidate"
         recovery = self.op / "recovery"
+        self.resume_recovery_renames()
         # If the process died between the two renames, restore the explicitly
         # identified tree. The independent stopped snapshot remains untouched.
         if not ROOT.exists():
-            if recovery.exists() and failed.exists():
-                require(tree_manifest(recovery) == self.state["recovery_manifest"], "recovery_tree_drift")
-                self.move(recovery, ROOT)
-                self.phase("recovery-active")
-            else:
-                require(original.exists() and not failed.exists(), "missing_root_recovery_ambiguous")
-                self.move(original, ROOT)
-                self.phase("stopped")
+            require(original.exists() and not failed.exists(), "missing_root_recovery_ambiguous")
+            require(tree_manifest(original) == self.state['snapshot'], 'original_source_drift')
+            self.move(original, ROOT)
+            self.phase("stopped")
         if original.exists() and not failed.exists():
             require(tree_manifest(self.op / "stopped-snapshot") == self.state["snapshot"], "snapshot_evidence_drift")
             env_gate(ROOT)
@@ -1007,6 +1355,7 @@ print(json.dumps({'risk':expected,'pool':[i['name'] for i in items],
             self.state["admin"] = latest_admin
             self.state["protected_config"] = {n: tree_manifest(recovery / n) if (recovery / n).exists() else None for n in CONFIG}
             self.state["recovery_manifest"] = tree_manifest(recovery)
+            self.state['recovery_input_manifest'] = latest
             self.phase("recovery-ready")
             self.move(ROOT, failed)
             self.phase("candidate-retained")
@@ -1030,6 +1379,8 @@ def main():
     parser.add_argument("--session-fd", type=int, default=None,
                         help="Inherited descriptor containing an existing session token; never a token argument")
     parser.add_argument("--previous", action="store_true", help="Verify recovered prior v8.6.1 fork")
+    parser.add_argument('--deployment-plan-sha256', required=True,
+                        help='External SHA256 of the approved operation deployment plan')
     args = parser.parse_args()
     os.umask(0o077)
     try:
@@ -1044,7 +1395,7 @@ def main():
         signal.signal(signal.SIGTERM, interrupted)
         signal.signal(signal.SIGINT, interrupted)
         with upgrade_lock(BACKUPS / ".upgrade.lock"):
-            upgrade = Upgrade(args.operation, session)
+            upgrade = Upgrade(args.operation, session, args.deployment_plan_sha256)
             if args.mode == "verify":
                 upgrade.verify(args.previous)
             else:

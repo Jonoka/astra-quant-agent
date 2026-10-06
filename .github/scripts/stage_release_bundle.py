@@ -8,8 +8,9 @@ import re
 import stat
 import tarfile
 
-from runtime_release_upgrade import (PREVIOUS, UPSTREAM, CHECKS, PATCH_ID, IMAGE_RE,
-                                    digest, plain_path as plain, operation_path, require)
+from runtime_release_upgrade import (UPSTREAM, CHECKS, PATCH_ID, IMAGE_RE,
+                                    digest, plain_path as plain, operation_path, require,
+                                    read_deployment_plan)
 
 LINK = 'frontend/public/images'
 REQUIRED_RELEASE_CHECKS = frozenset({
@@ -17,6 +18,7 @@ REQUIRED_RELEASE_CHECKS = frozenset({
     'published_compose_smoke', 'council_regression', 'patch_retention',
     'cycle_deadline_regression', 'linux_singleton_lock',
     'cycle_deadline_state_rehearsal',
+    'shared_deployment_preflight', 'deployment_plan_tests', 'current_baseline_rehearsal',
 })
 
 
@@ -81,9 +83,11 @@ def extract(archive, destination, pin):
 
 def source_identity(evidence):
     release = evidence['SOURCE_SHA']
-    require(re.fullmatch(r'[0-9a-f]{40}', release) and release not in (PREVIOUS, UPSTREAM) and
+    previous = evidence['PREVIOUS_SHA']
+    require(re.fullmatch(r'[0-9a-f]{40}', release) and
+            re.fullmatch(r'[0-9a-f]{40}', previous) and release not in (previous, UPSTREAM) and
             evidence.get('GITHUB_SHA') == release and
-            evidence['PREVIOUS_SHA'] == PREVIOUS and evidence['UPSTREAM_SHA'] == UPSTREAM and
+            evidence['UPSTREAM_SHA'] == UPSTREAM and
             evidence['SOURCE_REPOSITORY'] == 'Jonoka/astra-quant-agent' and
             evidence['UPSTREAM_REPOSITORY'] == '0xethanq/astra-quant-agent' and
             evidence['SOURCE_VERSION'] == 'v8.6.1' and evidence['platform'] == 'linux/amd64',
@@ -98,6 +102,7 @@ def main():
     parser.add_argument('--provenance-sha256', required=True)
     parser.add_argument('--run-url', required=True)
     parser.add_argument('--checks-json', type=Path, required=True)
+    parser.add_argument('--deployment-plan-sha256', required=True)
     args = parser.parse_args()
     os.umask(0o077)
     require(os.geteuid() == 0, 'root_required')
@@ -106,14 +111,22 @@ def main():
     require(provenance.parent == op and digest(provenance) == args.provenance_sha256, 'provenance_hash')
     evidence = json.loads(provenance.read_bytes())
     release = source_identity(evidence)
+    plan = read_deployment_plan(op, args.deployment_plan_sha256)
     image = evidence['IMAGE_NAME'] + '@' + evidence['IMAGE_DIGEST']
     require(re.fullmatch(IMAGE_RE, image), 'image_identity')
+    previous = evidence['PREVIOUS_SHA']
+    require(plan['previous_source'] == previous and
+            plan['previous_image'] == evidence.get('PREVIOUS_IMAGE') and
+            plan['release_source'] == release and plan['image'] == image and
+            plan['provenance_sha256'] == args.provenance_sha256 and
+            plan['helper_sha256'] == digest(op / 'runtime_release_upgrade.py'),
+            'deployment_plan_provenance')
     require(args.run_url == 'https://github.com/Jonoka/astra-quant-agent/actions/runs/' +
             str(evidence['GITHUB_RUN_ID']), 'hosted_run_identity')
     checks = json.loads(plain(args.checks_json).read_bytes())
     require_checks(checks)
     required = {'source-previous.tar', 'source-release.tar', 'runtime_release_upgrade.py',
-                'stage_release_bundle.py', 'Dockerfile.release'}
+                'stage_release_bundle.py', 'prepare_deployment_plan.py', 'Dockerfile.release'}
     require(required <= set(evidence['sha256']), 'artifact_manifest_incomplete')
     for name, expected in evidence['sha256'].items():
         require(Path(name).name == name and re.fullmatch(r'[0-9a-f]{64}', expected), 'artifact_name_hash')
@@ -121,8 +134,8 @@ def main():
         require(path.is_file() and digest(path) == expected, 'artifact_hash')
         require(path.stat().st_uid == 0 and not path.stat().st_mode & 0o077, 'artifact_permissions')
     sources = {label: extract(op / ('source-' + label + '.tar'), op / ('source-' + label), pin)
-               for label, pin in (('previous', PREVIOUS), ('release', release))}
-    for helper in ('runtime_release_upgrade.py', 'stage_release_bundle.py'):
+               for label, pin in (('previous', previous), ('release', release))}
+    for helper in ('runtime_release_upgrade.py', 'stage_release_bundle.py', 'prepare_deployment_plan.py'):
         require(digest(op / helper) == digest(op / 'source-release/.github/scripts' / helper),
                 'helper_source_drift')
     official = (op / 'source-release/Dockerfile').read_bytes()
@@ -131,11 +144,14 @@ def main():
     recipe = official.replace(anchor, anchor + b'COPY docs/images/dashboard_preview.png ./public/images/dashboard_preview.png\n', 1)
     require((op / 'Dockerfile.release').read_bytes() == recipe and
             digest(op / 'Dockerfile.release') == evidence['BUILD_RECIPE_SHA256'], 'reviewed_recipe_drift')
-    compatibility = {'previous_source': PREVIOUS, 'release_source': release, 'upstream_source': UPSTREAM,
+    compatibility = {'previous_source': previous, 'previous_image': plan['previous_image'],
+                     'release_source': release, 'upstream_source': UPSTREAM,
                      'image': image, 'hosted_run': args.run_url, 'rollback_preserves_new_records': True,
                      'checks': checks, 'reviewed_formats': ['sqlite', 'encrypted_credentials', 'settings',
                                                           'prompts', 'trading_records']}
-    save(op / 'manifest.json', {'schema': 1, 'previous_source': PREVIOUS, 'release_source': release,
+    save(op / 'manifest.json', {'schema': 2, 'previous_source': previous,
+         'previous_image': plan['previous_image'], 'deployment_plan_sha256': args.deployment_plan_sha256,
+         'release_source': release,
          'upstream_source': UPSTREAM, 'image': image, 'source_files': sources, 'compatibility': compatibility})
     print('PASS: source bundle and independently attested hosted checks staged')
 

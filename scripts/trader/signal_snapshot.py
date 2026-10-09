@@ -19,6 +19,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 
 #: 快照键 ← 因子库快照 `factor_library_snapshot.json` 的取数表（2026-10 修复）。
@@ -131,6 +132,14 @@ def build_signal_snapshot(f: dict, *, data_dir: str) -> dict:
     `macd_hist` 是 **1H** 口径，`f["rsi"]` 同样是 15M RSI 而非 `rsi_1h`；
     跨时间框架回填等于伪造证据（宿主宪章明令禁止），取不到宁可保持 None。
     """
+    def _alpha(value):
+        # Only finite JSON numbers are scores; bool is not numeric evidence.
+        return (value if type(value) in (int, float)
+                and (not isinstance(value, float) or math.isfinite(value)) else None)
+
+    alpha = _alpha(f.get("composite_alpha_score"))
+    if alpha is None:
+        alpha = _alpha(f.get("alpha_score"))
     micro = f.get("microstructure") or {}
     money = f.get("smart_money_derivatives") or {}
     trend = f.get("trend_momentum") or {}
@@ -173,7 +182,7 @@ def build_signal_snapshot(f: dict, *, data_dir: str) -> dict:
         "adx": trend.get("adx") or f.get("adx") or f.get("adx_1h"),
         "rsi": trend.get("rsi") or f.get("rsi") or f.get("rsi_14"),
         "funding_rate": micro.get("funding_rate") or f.get("funding_rate"),
-        "composite_alpha_score": f.get("composite_alpha_score") or f.get("alpha_score"),
+        "composite_alpha_score": alpha,
         "smart_money_net": money.get("net_flow") or money.get("taker_net") or money.get("smart_money_flow_usd"),
     }
 
@@ -194,13 +203,16 @@ def build_signal_snapshot(f: dict, *, data_dir: str) -> dict:
                 if isinstance(entries, dict):
                     entries = list(entries.values())
                 libf = next(
-                    (x for x in entries if isinstance(x, dict) and x.get("instId") == f.get("instId")),
+                    (x for x in entries if isinstance(x, dict) and f.get("instId") is not None
+                     and x.get("instId") == f.get("instId")),
                     None,
                 )
                 if libf:
                     for _key, _sources in _TIER_LIBRARY_SOURCES:
                         if snap.get(_key) is None:
-                            snap[_key] = _lib_pick(libf, _sources)
+                            picked = _lib_pick(libf, _sources)
+                            snap[_key] = (_alpha(picked) if _key == "composite_alpha_score"
+                                          else picked)
         except Exception:
             pass
     return snap

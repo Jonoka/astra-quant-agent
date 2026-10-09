@@ -29,6 +29,8 @@ SUITES = {
     "tests.extraction.test_brain_decisions_extraction": 8,
 }
 
+ALPHA_SUITES = {"tests.llm.test_alpha_transport_contract": 12}
+
 
 def require_complete_result(result, minimum):
     if (not result.wasSuccessful() or result.testsRun < minimum
@@ -56,6 +58,11 @@ def copy_source(source, destination):
 
 
 def main():
+    if sys.argv[1:] not in ([], ["--alpha"]):
+        raise RuntimeError("Expected no arguments or --alpha")
+    alpha = sys.argv[1:] == ["--alpha"]
+    suites = ALPHA_SUITES if alpha else SUITES
+    label = "ALPHA" if alpha else "TAKER"
     if not sys.platform.startswith("linux"):
         raise RuntimeError("The regression gate requires Linux")
     source = Path(__file__).resolve().parents[2]
@@ -82,20 +89,20 @@ def main():
         requests.sessions.Session.request = deny_network
         try:
             suite = unittest.TestSuite()
-            for module, minimum in SUITES.items():
+            for module, minimum in suites.items():
                 loaded = unittest.defaultTestLoader.loadTestsFromName(module)
                 if loaded.countTestCases() < minimum:
                     raise RuntimeError(f"Incomplete discovery: {module} requires {minimum} tests")
                 suite.addTests(loaded)
             result = unittest.TextTestRunner(verbosity=2).run(suite)
-            print(f"TAKER_CI_RESULT sha={expected_sha} modules={len(SUITES)} "
+            print(f"{label}_CI_RESULT sha={expected_sha} modules={len(suites)} "
                   f"tests={result.testsRun} failures={len(result.failures)} "
                   f"errors={len(result.errors)} skips={len(result.skipped)}", flush=True)
-            require_complete_result(result, sum(SUITES.values()))
+            require_complete_result(result, sum(suites.values()))
             if summary:
                 with Path(summary).open("a", encoding="utf-8") as output:
-                    output.write(f"Offline taker regressions: **{result.testsRun} passed**, "
-                                 f"{len(SUITES)} modules, zero skips.\n\nTested PR head: `{expected_sha}`\n")
+                    output.write(f"Offline {label.lower()} regressions: **{result.testsRun} passed**, "
+                                 f"{len(suites)} modules, zero skips.\n\nTested PR head: `{expected_sha}`\n")
         finally:
             os.chdir(original_cwd)
     return 0

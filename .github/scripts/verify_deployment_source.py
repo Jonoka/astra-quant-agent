@@ -1,4 +1,4 @@
-"""Reject builds outside the reviewed council, OKX and cycle-deadline delta."""
+"""Reject builds outside the reviewed council, OKX, deadline and alpha delta."""
 from __future__ import annotations
 
 import ast
@@ -64,6 +64,9 @@ APPLICATION_PATCH = {
     'scripts/backtest_engine.py',
     'scripts/brain/dispatch.py',
     'scripts/brain/packages.py',
+    'scripts/brain/prompt.py',
+    'scripts/trader/signal_snapshot.py',
+    'tests/llm/test_alpha_transport_contract.py',
     'scripts/factor_library.py',
     'scripts/factors/okx_quant_factors.py',
     'scripts/factors/smart_money.py',
@@ -96,14 +99,24 @@ APPLICATION_PATCH = {
     'tests/venues/test_okx_public_domains.py',
 }
 
-# Exact blobs from independently reviewed PR3 head 8b6a4bf. Extending the path
-# set must not authorize arbitrary changes inside the repaired application files.
+# Exact PR3 blobs, except packages.py's explicitly approved PR5 alpha transport
+# delta (head ad4b7bd7a771107a60a175b12fe6fd20349150b0). The four other taker
+# pins remain unchanged. Extending paths never authorizes arbitrary file edits.
 TAKER_PATCH_SHA256 = {
     'scripts/okx_taker.py': 'bd8540601ab614d9d42f054b01e588778b1afd28af90d27a90974a6eee42b2e0',
-    'scripts/brain/packages.py': '4a1646100bb5985b863dca72691979949a9ef2638081bed95747ec14ed10cb18',
+    'scripts/brain/packages.py': '4f6e3751752d200e93c4d33506a9fd84767fe3f878cbcb744515979a8611c8d2',
     'scripts/factors/smart_money.py': '78ef086483931433f6b7c1a28d8cd624972c0bf4748028da128cf9933ae446f9',
     'scripts/factor_library.py': '7c16adb40962b23b2dd7b65a4c75dd3001ab10f5d70104afe5066bbbf45b6ae1',
     'scripts/factors/okx_quant_factors.py': 'dbedeccd639e74ac52388f1f2d77d8ddd4e21c3f90190a78e4c26b9bbfa7f770',
+}
+
+# Fixed, independently reviewed PR5 application bytes, approved for this limited
+# release-contract update on 2026-10-09. Never derive approval pins from a build.
+ALPHA_PATCH_SHA256 = {
+    'scripts/brain/packages.py': '4f6e3751752d200e93c4d33506a9fd84767fe3f878cbcb744515979a8611c8d2',
+    'scripts/brain/prompt.py': 'b9db0dc842c3c8aa2112f445e216e46d9c69274ca6a20e3dfb20217232838e32',
+    'scripts/trader/signal_snapshot.py': 'd67333373bf0d3e87d6b0ac9d12d666b7c65e23ff3ef26c22e2bbbce5a1f76ec',
+    'tests/llm/test_alpha_transport_contract.py': '9ab014e4dd29dcd06443b73af267511d967ebba68e20425e9a7fc1e0240dcf04',
 }
 
 # Independently reviewed names include all 62 original cycle-deadline regressions.
@@ -222,6 +235,11 @@ def verify(source: Path, upstream: str, revision: str) -> None:
         assert path.is_file(), f"Required reviewed taker source missing: {relative}"
         assert hashlib.sha256(path.read_bytes()).hexdigest() == expected, (
             f"Reviewed taker source changed: {relative}")
+    for relative, expected in ALPHA_PATCH_SHA256.items():
+        path = source / relative
+        assert path.is_file(), f"Required reviewed alpha source missing: {relative}"
+        assert hashlib.sha256(path.read_bytes()).hexdigest() == expected, (
+            f"Reviewed alpha source changed: {relative}")
     suite_path = source / "tests/ops/test_brain_dispatch.py"
     tree = ast.parse(suite_path.read_text(encoding="utf-8"))
     suites = [node for node in tree.body if isinstance(node, ast.ClassDef)

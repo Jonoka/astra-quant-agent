@@ -13,14 +13,14 @@ from verify_deployment_source import PREVIOUS_SHA, verify
 from stage_release_bundle import extract
 
 SUITES = {
-    'test_verify_deployment_source.py': 12,
+    'test_verify_deployment_source.py': 15,
     'test_runtime_release_upgrade.py': 37,
     'test_deployment_plan.py': 29,
     'test_deployment_identity.py': 19,
     'test_recovery_journal.py': 20,
     'test_linux_singleton_lock.py': 7,
     'test_rehearse_cycle_deadline_upgrade.py': 4,
-    'test_taker_regression_gate.py': 5,
+    'test_taker_regression_gate.py': 7,
 }
 
 
@@ -65,6 +65,8 @@ require_complete_result(result,minimum)
             subprocess.run(command, check=True, env=env, timeout=180, cwd=source)
         subprocess.run([sys.executable, str(source / '.github/scripts/run_taker_regressions.py')],
                        check=True, env=env, timeout=360, cwd=source)
+        subprocess.run([sys.executable, str(source / '.github/scripts/run_taker_regressions.py'), '--alpha'],
+                       check=True, env=env, timeout=120, cwd=source)
     verify(source, UPSTREAM, revision)
     print('DEPLOYMENT_PREFLIGHT_PASS source=' + revision, flush=True)
 

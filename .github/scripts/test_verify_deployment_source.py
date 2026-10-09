@@ -68,6 +68,7 @@ class DeploymentSourceGuardTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             source = Path(tmp)
             for relative in (*guard.DEADLINE_REGRESSIONS, *guard.TAKER_PATCH_SHA256,
+                             *guard.ALPHA_PATCH_SHA256,
                              'tests/ops/test_brain_dispatch.py'):
                 target = source / relative
                 target.parent.mkdir(parents=True, exist_ok=True)
@@ -120,6 +121,48 @@ class DeploymentSourceGuardTests(unittest.TestCase):
                 self._verify(guard.APPLICATION_PATCH - {path})
         with self.assertRaisesRegex(AssertionError, 'unreviewed application changes'):
             self._verify(guard.APPLICATION_PATCH | {'.trellis/tasks/unreviewed/task.json'})
+
+    def test_alpha_contract_has_exact_reviewed_paths_and_fixed_pins(self):
+        self.assertEqual(guard.ALPHA_PATCH_SHA256, {
+            'scripts/brain/packages.py': '4f6e3751752d200e93c4d33506a9fd84767fe3f878cbcb744515979a8611c8d2',
+            'scripts/brain/prompt.py': 'b9db0dc842c3c8aa2112f445e216e46d9c69274ca6a20e3dfb20217232838e32',
+            'scripts/trader/signal_snapshot.py': 'd67333373bf0d3e87d6b0ac9d12d666b7c65e23ff3ef26c22e2bbbce5a1f76ec',
+            'tests/llm/test_alpha_transport_contract.py': '9ab014e4dd29dcd06443b73af267511d967ebba68e20425e9a7fc1e0240dcf04',
+        })
+        self.assertEqual(guard.TAKER_PATCH_SHA256['scripts/brain/packages.py'],
+                         guard.ALPHA_PATCH_SHA256['scripts/brain/packages.py'])
+
+    def test_reviewed_alpha_files_cannot_disappear_or_change(self):
+        root = Path(__file__).resolve().parents[2]
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp)
+            for relative in (*guard.TAKER_PATCH_SHA256, *guard.ALPHA_PATCH_SHA256):
+                target = source / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(root / relative, target)
+            for relative in guard.ALPHA_PATCH_SHA256:
+                target = source / relative
+                original = target.read_bytes()
+                target.write_bytes(original + b'\n# unreviewed alpha mutation\n')
+                with self.subTest(changed=relative), self.assertRaisesRegex(
+                        AssertionError, 'Reviewed (taker|alpha) source changed'):
+                    self._verify(source=source)
+                target.unlink()
+                with self.subTest(missing=relative), self.assertRaisesRegex(
+                        AssertionError, 'Required reviewed (taker|alpha) source missing'):
+                    self._verify(source=source)
+                target.write_bytes(original)
+
+    def test_alpha_path_extension_still_rejects_missing_and_extra_application_files(self):
+        for relative in guard.ALPHA_PATCH_SHA256:
+            self.assertIn(relative, guard.APPLICATION_PATCH)
+            with self.subTest(missing_path=relative), self.assertRaisesRegex(
+                    AssertionError, 'Missing retained patch'):
+                self._verify(guard.APPLICATION_PATCH - {relative})
+        for extra in ('scripts/unreviewed_alpha.py', 'tests/llm/test_unreviewed_alpha.py'):
+            with self.subTest(extra=extra), self.assertRaisesRegex(
+                    AssertionError, 'unreviewed application changes'):
+                self._verify(guard.APPLICATION_PATCH | {extra})
 
     def test_staging_requires_all_nine_independent_checks(self):
         import stage_release_bundle as staging

@@ -40,6 +40,7 @@
 正因如此，本模块**不 import 门面的任何东西**，只在调用期接收依赖。
 """
 import json
+import math
 import os
 import time
 import urllib.request
@@ -97,10 +98,36 @@ def load_quant_factor_tiers(inst_id: str, *, path: str = None) -> Dict[str, Any]
     for item in instruments:
         if not isinstance(item, dict):
             continue
-        if str(item.get("instId")) != str(inst_id):
+        if item.get("instId") is None or str(item.get("instId")) != str(inst_id):
             continue
-        return {tier: item[tier] for tier in QUANT_FACTOR_TIERS
-                if isinstance(item.get(tier), dict)}
+        result = {tier: item[tier] for tier in QUANT_FACTOR_TIERS
+                  if isinstance(item.get(tier), dict)}
+        # Alpha is a scalar on this same instrument entry, not a tier dict.
+        # A numeric zero is transportable; it does not establish evidence quality.
+        alpha = item.get("composite_alpha_score")
+        if (type(alpha) in (int, float)
+                and (not isinstance(alpha, float) or math.isfinite(alpha))):
+            result["composite_alpha_score"] = alpha
+        if result:
+            read_timestamp = time.time()
+            timestamp = snap.get("timestamp")
+            try:
+                timestamp_valid = (type(timestamp) in (int, float)
+                                   and math.isfinite(timestamp) and timestamp > 0)
+            except (OverflowError, ValueError):
+                timestamp_valid = False
+            if not timestamp_valid:
+                timestamp = None
+            result["snapshot_source"] = {
+                "instId": item["instId"],
+                "snapshot_timestamp": timestamp,
+                "read_timestamp": read_timestamp,
+                "age_seconds_at_read": (read_timestamp - timestamp
+                                        if timestamp is not None else None),
+                "freshness_status": "NOT_ASSESSED",
+                "upstream_evidence_quality": "NOT_REPORTED",
+            }
+        return result
     return {}
 
 

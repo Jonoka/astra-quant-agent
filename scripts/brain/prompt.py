@@ -150,6 +150,22 @@ def construct_full_market_prompt(packages: List[Dict[str, Any]], pos_summary: st
         #    抽取后隔离 exec —— 故**不得**新增模块级 helper，取值一律内联。
         # ------------------------------------------------------------------
         qf_tiers = p.get("quant_factors") if isinstance(p.get("quant_factors"), dict) else {}
+        # Keep this validation local: isolated renderer tests execute this function.
+        import math
+        alpha = qf_tiers.get("composite_alpha_score")
+        alpha_show = (alpha if type(alpha) in (int, float)
+                      and (not isinstance(alpha, float) or math.isfinite(alpha)) else "--")
+        alpha_source = qf_tiers.get("snapshot_source")
+        alpha_source = alpha_source if isinstance(alpha_source, dict) else {}
+        alpha_line = (
+            f"- 综合 Alpha: composite_alpha_score={alpha_show} "
+            f"| source_instId={alpha_source.get('instId', '--')} "
+            f"| snapshot_timestamp={alpha_source.get('snapshot_timestamp') if alpha_source.get('snapshot_timestamp') is not None else '--'} "
+            f"| read_timestamp={alpha_source.get('read_timestamp', '--')} "
+            f"| age_seconds_at_read={alpha_source.get('age_seconds_at_read') if alpha_source.get('age_seconds_at_read') is not None else '--'} "
+            "| freshness_status=NOT_ASSESSED | upstream_evidence_quality=NOT_REPORTED "
+            "（0 仅保留上游数值，不证明信号有效；缺失不补 0）"
+        )
         tm = qf_tiers.get("trend_momentum") if isinstance(qf_tiers.get("trend_momentum"), dict) else {}
         mf = qf_tiers.get("volume_money_flow") if isinstance(qf_tiers.get("volume_money_flow"), dict) else {}
         ms = qf_tiers.get("microstructure") if isinstance(qf_tiers.get("microstructure"), dict) else {}
@@ -217,7 +233,10 @@ def construct_full_market_prompt(packages: List[Dict[str, Any]], pos_summary: st
                + ("" if not op.get("max_pain_reason") else f"（{op.get('max_pain_reason')}）")
                if str(_t(op, 'available', False)) in ("True", "true") else " | 最大痛点(MaxPain)=--（该标的无期权市场）")
         )
-        if qf_tiers:
+        if any(isinstance(qf_tiers.get(tier), dict) for tier in (
+                "trend_momentum", "volatility_channel", "volume_money_flow",
+                "microstructure", "smart_money_derivatives", "volume_profile",
+                "options_structure")):
             _tier_lines = [tier_line_t0, tier_line_t05, tier_line_t1,
                            tier_line_t3, tier_line_t4, tier_line_t15]
             tier_block = "\n".join(_tier_lines)
@@ -257,6 +276,7 @@ def construct_full_market_prompt(packages: List[Dict[str, Any]], pos_summary: st
 【{p['name']} ({p['instId']})】| 数据质量: {quality} | 现价: {p['price']} | 24H涨跌: {p['chg24h']}% | 盘口买/卖: {p['bidPx']}/{p['askPx']}
 - 🏛️ 三重滤网宏观结构: 4H宏观大势={(p.get('macro_4h') or '--')} | 1H波段结构={(p.get('structure_1h') or '--')} | 标的体制={regime_desc}
 {tier_block}
+{alpha_line}
 - 💰 T2 期限与资金成本: 季度基差年化={_t(smd, 'basis_annualized_pct')}% | 杠杆借贷利率={_t(smd, 'loan_rate_usdt')}%
 - 👑 顶级聪明钱 (SmartMoney Top100 加权流): {("加权做多占比=" + str(sm.get('weighted_long_pct')) + "% | 24H净流入=" + str(sm.get('net_flow_usdt', '--')) + " | 多头均价=" + str(sm.get('avg_long_entry', '--')) + " | 空头均价=" + str(sm.get('avg_short_entry', '--')) + " | " + str(sm.get('top_win_rate', ''))) if sm.get('available') else "该项（Top100 加权多空比/净流）无公开 V5 等价接口 ⇒ 本行不构成证据；**持仓方向的替代证据见 T0 的「精英账户比 / 精英持仓比 / 精英背离」**（OKX 官方 top-trader 端点，真实可得）。禁止臆测填充"}"""
         market_lines.append(info)

@@ -162,7 +162,7 @@ MAINTENANCE_CASE_MINIMUMS = {
     'tests/maintenance/test_entrypoints.py': 16,
     'tests/maintenance/test_deployment.py': 34,
     'tests/maintenance/test_http_verification.py': 7,
-    'tests/maintenance/test_supervisor_startup.py': 8,
+    'tests/maintenance/test_supervisor_startup.py': 21,
 }
 
 # Independently reviewed names include all 62 original cycle-deadline regressions.

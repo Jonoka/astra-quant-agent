@@ -143,6 +143,8 @@ def _run_locked() -> None:
     os.environ["ASTRA_MAINTENANCE_ROLE"] = "gateway"
     maintenance = get_runtime("gateway")
     maintenance.startup()
+    verification = maintenance.begin_startup_verification()
+    paused_startup = bool(maintenance.enabled and os.environ.get("ASTRA_MAINTENANCE_STARTUP_ACTIVITY"))
     # 审计风暴修复：抢到锁者自我登记为权威 PID（唯一确知「我持锁」的实体）。
     # supervisor 旧实现对注定秒退的子进程盲写 PID 文件 → 文件长期指向死 pid，
     # 活体持锁者反而不可见，每 10s 重生一次（logs/astra_gateway.log 948 条）。
@@ -150,14 +152,11 @@ def _run_locked() -> None:
         PID_FILE.write_text(str(os.getpid()), encoding="utf-8")
         os.chmod(PID_FILE, 0o600)
     except OSError:
-        pass
+        if paused_startup:
+            raise
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
-    verification = maintenance.begin_startup_verification()
-    try:
-        store = GatewayStore(DB_PATH)
-    finally:
-        maintenance.store.finish(verification, maintenance.identity)
+    store = GatewayStore(DB_PATH)
     scheduler = GatewayScheduler(store, maintenance=maintenance)
     try:
         with maintenance.activity("gateway-startup"):
@@ -173,12 +172,17 @@ def _run_locked() -> None:
     except AdmissionClosed:
         pass
     except Exception as _init_exc:
+        if paused_startup:
+            raise
         log(f"标的池初始化检查异常: {_init_exc}")
     log("gateway worker started with scheduler ownership")
     # 抢到锁后**立刻**写一次心跳：否则看护进程可能在重启瞬间读到上一代留下的旧时间戳，
     # 误判"刚起来的这个 worker 已经卡死"而把它杀掉（互相打架的经典形状）。
-    write_heartbeat()
+    heartbeat_ok = write_heartbeat()
+    if paused_startup and not heartbeat_ok:
+        raise RuntimeError("paused gateway startup heartbeat failed")
     _next_prune_at = time.time() + PRUNE_INTERVAL_SECONDS
+    maintenance.complete_startup_verification(verification)
     try:
         _delivery_loop(store, scheduler, maintenance, _next_prune_at)
     finally:

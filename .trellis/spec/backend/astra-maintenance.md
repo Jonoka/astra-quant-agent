@@ -40,6 +40,36 @@ before the launch scope settles. Duplicate/live/crashed/old/stale/expired launch
 stay refused; no kill or age-based pruning. Windows controlled child tests do not
 prove the real Bash/proc/cgroup/namespace/lock chain.
 
+### Startup completion: absence is not evidence
+
+Registration and completion are distinct. A registered actor with zero child
+activity may not yet have imported Uvicorn/app or begun verification. The durable
+launch permit covers that entire gap. After genuine successful initialization,
+the exact child atomically changes its one startup-verification row into
+startup-complete, retaining owner and parent permit; no new DB schema is added.
+The exact watchdog validates original operation/generation/source/image and live
+identities and atomically consumes both rows. Generic finish cannot erase either
+proof, no completed scope grants ordinary child work, duplicate/stale/other-child
+proofs fail, and failures/disconnect/expiry retain unresolved rows and the fence.
+Fast completion before any parent poll is valid only via this durable record.
+
+Backend publishes completion after successful lifespan initialization, not merely
+module import. Gateway publishes after store/scheduler/PID/heartbeat initialization,
+never from failure finally. Legacy/normal non-maintenance finishing is unchanged.
+Deterministic controlled-child regressions must force the pre-verification parent
+poll, pre-poll fast completion, pre-verification crash, initialization failure,
+wrong/replayed/stale/expired/disconnected proof, and closed business admissions.
+Scheduling barrier files in tests are not readiness proofs. Extracted production
+initializer functions use fake dependencies and do not establish full FastAPI/
+Uvicorn/AnyIO/Linux/Bash/container or field acceptance.
+
+Break-loop capture: this was a cross-layer contract/implicit-assumption/test-gap
+failure. The first startup repair connected launch but inferred readiness from
+zero work, so adjacent register/verify test calls hid the production import gap.
+Prevention is the atomic durable completion protocol plus forced scheduling,
+not more sleep, polling observations or optimistic ready events. Scope remains
+backend/gateway startup; no new ticket, template tree or production path is added.
+
 GET /api/v1/maintenance/status is implemented directly by the production ASGI
 middleware and reads a stable DELETE-journal SQLite snapshot in memory. It emits
 only version/status/protocol/phase/fenced, not credentials/account/order/actor data;

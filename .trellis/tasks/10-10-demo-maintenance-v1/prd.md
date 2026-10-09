@@ -66,3 +66,14 @@ historical evidence and report unavailable full FastAPI/Linux/runtime acceptance
 
 No implementation result authorizes first legacy transition, live use, external
 supervisor signals/restart changes, real risk checks, publication or deployment.
+
+## Authorized remaining startup handshake repair
+
+Replace zero-activity readiness inference with durable completion bound to the
+exact startup permit, external operation/generation/source/image and watchdog/
+child identities. Production backend and gateway must publish success only after
+their real initialization succeeds. Unstarted/failed/dead/disconnected/expired
+verification retains work and stays fenced. Preserve the two closed repairs and
+all 143+17+2 coverage; add deterministic real controlled-child interleavings,
+quick completion before poll, failures and wrong/replayed/stale proofs. No new
+runtime, dependency, reviewer, network or deployment authorization is granted.

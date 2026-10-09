@@ -35,7 +35,7 @@ SUITES = {
     'test_entrypoints.py': 16,
     'test_deployment.py': 34,
     'test_http_verification.py': 7,
-    'test_supervisor_startup.py': 8,
+    'test_supervisor_startup.py': 21,
 }
 
 
@@ -108,7 +108,7 @@ def isolated(sandbox):
                         and inside(command[4]) and command[7] in {'admit', 'request', 'order', 'order-crash', 'crash'})
         app_child = (executable and len(command) == 7 and command[1:3] == ['-c', approved_app]
                      and Path(command[3]).resolve() == ROOT and inside(command[4]) and inside(command[5])
-                     and command[6] in {'hold', 'crash'})
+                     and command[6] in {'hold', 'crash', 'register-block', 'fast', 'registered-crash', 'verify-fail', 'verify-block'})
         if not (sqlite_child or app_child):
             raise AssertionError('offline unapproved subprocess refused')
         child_env = {key: value for key, value in os.environ.items() if key in safe_keys}

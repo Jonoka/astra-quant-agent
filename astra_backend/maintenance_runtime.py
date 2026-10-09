@@ -118,6 +118,7 @@ class LegacyRuntime:
         return uuid.uuid4().hex
     def finish(self, activity, identity=None): pass
     def finish_activity(self, activity): pass
+    def complete_startup_verification(self, activity): pass
     def wait_settled(self, heartbeat=None): pass
     def register_threads(self, threads): pass
     def activity(self, *args, **kwargs):
@@ -217,6 +218,22 @@ class Runtime:
             permit = None if bound else os.environ.get("ASTRA_MAINTENANCE_STARTUP_ACTIVITY")
             return self.store.admit_verification(self.identity, parent_id=permit)
         return self.admit("startup-verification")
+
+    def complete_startup_verification(self, activity):
+        """Called by the actual successful initializer, never its failure finally."""
+        row = next((item for item in self.store.status()["activities"] if item["activity_id"] == activity), None)
+        if row is None:
+            raise MaintenanceError("startup activity missing or completion replayed")
+        parent = next((item for item in self.store.status()["activities"] if item["activity_id"] == row["parent_id"]), None)
+        if row["parent_id"] and parent is None:
+            raise MaintenanceError("startup parent evidence disappeared; retain unresolved activity")
+        if parent is None or not parent["kind"].startswith("paused-startup:"):
+            return self.finish_activity(activity)  # Ordinary/bound startup semantics.
+        try:
+            binding = Binding.from_dict(json.loads(os.environ["ASTRA_MAINTENANCE_STARTUP_BINDING"]))
+        except (KeyError, TypeError, ValueError) as exc:
+            raise AdmissionClosed("startup completion requires its original external binding") from exc
+        self.store.complete_startup_verification(binding, self.identity, activity)
 
     def fenced(self) -> bool:
         if not self.store.path.exists():
@@ -518,9 +535,7 @@ def start_paused_component(runtime, *, logfile=None, sleep=time.sleep):
                          else child.instance_id == process_instance(process.pid))
                 if not exact or (child.source, child.image) != (runtime.identity.source, runtime.identity.image):
                     raise UnknownChild("paused child identity differs from the spawned process")
-                active = any(json.loads(row["owner"]) == child.as_dict() for row in state["activities"])
-                if not active:
-                    runtime.store.finish(activity, runtime.identity)
+                if runtime.store.consume_startup_completion(binding, runtime.identity, activity, child):
                     return process.pid
             sleep(.05)
     except BaseException:

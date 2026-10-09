@@ -28,3 +28,12 @@ new isolated suites without installs; pin a local commit, then capture pre/post
 HEAD/tree/raw hashes for final per-suite rerun. Append new evidence rather than
 overwrite original 1a7 results. Update complete base-to-new-HEAD diff and manifests.
 Do not start writers/reviewers or production/CI actions; coordinator owns re-review.
+
+Remaining handshake: first force the registered-but-unverified parent poll with
+a real controlled child and a scheduling barrier (not a readiness oracle).
+Add atomic durable child completion/parent consumption and actual backend/gateway
+success call sites; test fast-before-poll, pre-verification crash, verification
+failure, precise proof mismatch/replay/deadline/disconnect and normal finishing.
+Keep original 143+17+2 plus new cases, commit only scoped local source, bind final
+per-suite runs to that new HEAD/tree/raw blob/protection hashes, preserve both
+034d014 and 1a7 evidence, and stop for coordinator-owned independent re-review.

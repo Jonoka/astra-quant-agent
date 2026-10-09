@@ -397,7 +397,7 @@ class MaintenanceStore:
                 parent = db.execute("SELECT * FROM maintenance_activities WHERE activity_id=?", (parent_id,)).fetchone()
                 if parent is None or parent["owner"] != owner or state["phase"] not in ("NORMAL", "DRAINING", "CANCELLED", "HOLD"):
                     raise AdmissionClosed("child must belong to admitted unsettled parent")
-                if parent["kind"] == "startup-verification":
+                if parent["kind"] in ("startup-verification", "startup-complete"):
                     raise AdmissionClosed("startup verification grants no ordinary child admission")
                 if state["phase"] != "NORMAL" and kind in ("supervisory-action", "normal-deadline-termination"):
                     raise AdmissionClosed("a parent scope cannot authorize stop/kill under a fence")
@@ -416,6 +416,13 @@ class MaintenanceStore:
                 raise MaintenanceError("unknown activity cannot be silently pruned")
             if activity["owner"] != _json(identity.as_dict()):
                 raise MaintenanceError("activity owner mismatch")
+            parent = (db.execute("SELECT kind FROM maintenance_activities WHERE activity_id=?", (activity["parent_id"],)).fetchone()
+                      if activity["parent_id"] else None)
+            if activity["kind"] == "startup-verification" and activity["parent_id"] and parent is None:
+                raise MaintenanceError("startup parent evidence is missing; retain unresolved activity")
+            if (activity["kind"].startswith("paused-startup:") or activity["kind"] == "startup-complete"
+                    or (activity["kind"] == "startup-verification" and parent and parent["kind"].startswith("paused-startup:"))):
+                raise MaintenanceError("paused startup requires explicit durable completion/consumption")
             if db.execute("SELECT 1 FROM maintenance_activities WHERE parent_id=?", (activity_id,)).fetchone():
                 raise MaintenanceError("child activity has not settled")
             if db.execute("SELECT 1 FROM maintenance_orders WHERE activity_id=? AND status NOT IN ('ACKNOWLEDGED','REJECTED')", (activity_id,)).fetchone():
@@ -449,7 +456,7 @@ class MaintenanceStore:
             kind = "paused-startup:" + child_role
             if db.execute("SELECT 1 FROM maintenance_activities WHERE kind=?", (kind,)).fetchone():
                 raise AdmissionClosed("an unresolved paused launch already exists")
-            if db.execute("SELECT 1 FROM maintenance_activities WHERE kind NOT LIKE 'paused-startup:%' AND kind!='startup-verification'").fetchone():
+            if db.execute("SELECT 1 FROM maintenance_activities WHERE kind NOT LIKE 'paused-startup:%' AND kind NOT IN ('startup-verification','startup-complete')").fetchone():
                 raise AdmissionClosed("unresolved business work prevents paused launch")
             if db.execute("SELECT 1 FROM maintenance_orders WHERE status NOT IN ('ACKNOWLEDGED','REJECTED')").fetchone():
                 raise AdmissionClosed("unresolved order prevents paused launch")
@@ -528,6 +535,8 @@ class MaintenanceStore:
                 if not (own_verification or launch):
                     raise AdmissionClosed("startup permit owner/role/provenance mismatch")
                 self._live(db, owner)
+                if launch and db.execute("SELECT 1 FROM maintenance_activities WHERE parent_id=?", (parent_id,)).fetchone():
+                    raise AdmissionClosed("paused startup permit already has its one verification")
             elif not bound:
                 raise AdmissionClosed("unbound startup requires its approved watchdog permit")
             db.execute("INSERT INTO maintenance_activities VALUES (?,?,?,?,?)", (
@@ -535,6 +544,71 @@ class MaintenanceStore:
             ))
             db.execute("DELETE FROM maintenance_acks WHERE role=?", (identity.role,))
         return activity_id
+
+    def _startup_completion_context(self, db, state, now, binding, identity, verification):
+        self._bound(state, binding)
+        self._live(db, identity)
+        if (not state["switched"] or state["rebound"] or state["phase"] not in ("SWITCHING", "HOLD")
+                or now >= state["deadline"] or identity.role not in ("backend", "gateway")):
+            raise AdmissionClosed("startup completion requires the unexpired replacement binding")
+        if verification["owner"] != _json(identity.as_dict()) or not verification["parent_id"]:
+            raise MaintenanceError("startup completion child/permit mismatch")
+        permit = db.execute("SELECT * FROM maintenance_activities WHERE activity_id=?", (verification["parent_id"],)).fetchone()
+        if permit is None or permit["kind"] != "paused-startup:" + identity.role:
+            raise MaintenanceError("startup completion permit is missing or incompatible")
+        owner = Identity.from_dict(json.loads(permit["owner"]))
+        self._live(db, owner)
+        old_ids = {item.instance_id for item in binding.instances.values()}
+        if (owner.role != "watchdog-" + identity.role or owner.instance_id in old_ids or identity.instance_id in old_ids
+                or (owner.source, owner.image) != (identity.source, identity.image)
+                or (identity.source, identity.image) not in {
+                    (binding.previous_source, binding.previous_image), (binding.target_source, binding.target_image)}):
+            raise MaintenanceError("startup completion identity/provenance mismatch")
+        return permit
+
+    def complete_startup_verification(self, binding: Binding, identity: Identity, activity_id: str) -> None:
+        """Child success is durable; an empty work list is never a ready proof.
+
+        Keep the same activity/owner/permit row and atomically change its kind.
+        It continues to block drain/rebind until the exact parent consumes it.
+        Failure, duplicate completion, wrong binding and unsettled children never
+        delete or manufacture this record. No existing DB schema is changed.
+        """
+        with self._transaction() as (db, state, now):
+            activity = db.execute("SELECT * FROM maintenance_activities WHERE activity_id=?", (activity_id,)).fetchone()
+            if activity is None or activity["kind"] != "startup-verification":
+                raise MaintenanceError("startup verification missing or completion replayed")
+            self._startup_completion_context(db, state, now, binding, identity, activity)
+            if db.execute("SELECT 1 FROM maintenance_activities WHERE parent_id=?", (activity_id,)).fetchone():
+                raise MaintenanceError("startup verification children have not settled")
+            if db.execute("SELECT 1 FROM maintenance_orders WHERE status NOT IN ('ACKNOWLEDGED','REJECTED')").fetchone():
+                raise MaintenanceError("startup completion has unresolved orders")
+            db.execute("UPDATE maintenance_activities SET kind='startup-complete' WHERE activity_id=?", (activity_id,))
+
+    def consume_startup_completion(self, binding: Binding, watchdog: Identity, permit_id: str, child: Identity) -> bool:
+        """Parent release and exact child completion consumption commit together."""
+        with self._transaction() as (db, state, now):
+            self._bound(state, binding)
+            self._live(db, watchdog)
+            self._live(db, child)
+            permit = db.execute("SELECT * FROM maintenance_activities WHERE activity_id=?", (permit_id,)).fetchone()
+            if (permit is None or permit["owner"] != _json(watchdog.as_dict())
+                    or permit["kind"] != "paused-startup:" + child.role):
+                raise MaintenanceError("startup permit parent mismatch or consumption replayed")
+            rows = db.execute("SELECT * FROM maintenance_activities WHERE parent_id=?", (permit_id,)).fetchall()
+            if not rows:
+                # Crucial registered-but-not-yet-verifying window: retain permit.
+                return False
+            if len(rows) != 1 or rows[0]["owner"] != _json(child.as_dict()):
+                raise MaintenanceError("startup completion belongs to a different child")
+            self._startup_completion_context(db, state, now, binding, child, rows[0])
+            if rows[0]["kind"] != "startup-complete":
+                return False
+            if db.execute("SELECT 1 FROM maintenance_activities WHERE owner=? AND activity_id!=?",
+                          (_json(child.as_dict()), rows[0]["activity_id"])).fetchone():
+                return False
+            db.execute("DELETE FROM maintenance_activities WHERE activity_id IN (?,?)", (rows[0]["activity_id"], permit_id))
+            return True
 
     def acknowledge(self, binding: Binding, identity: Identity) -> None:
         with self._transaction() as (db, state, now):

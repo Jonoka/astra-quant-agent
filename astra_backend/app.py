@@ -18,10 +18,12 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(SCRIPTS_DIR))
 
 from astra_backend.version import __version__, APP_NAME
-from astra_backend.maintenance_runtime import get_runtime, install_anyio_thread_tracking, MaintenanceMiddleware
+from astra_backend.maintenance_runtime import (get_runtime, install_anyio_thread_tracking,
+                                               MaintenanceMiddleware, AdmissionClosed)
 MAINTENANCE = get_runtime("backend")
 MAINTENANCE.startup()
 _STARTUP_VERIFICATION = MAINTENANCE.begin_startup_verification()
+_PAUSED_STARTUP = bool(MAINTENANCE.enabled and os.environ.get("ASTRA_MAINTENANCE_STARTUP_ACTIVITY"))
 install_anyio_thread_tracking()
 from astra_backend.config import refresh_settings, settings
 from astra_backend.settings_store import EnvValueError, update_env
@@ -145,15 +147,22 @@ async def lifespan(_: FastAPI):
             from scripts.instrument_pool import POOL_FILE, save_instruments, DEFAULT_INSTRUMENTS
             if not POOL_FILE.exists():
                 save_instruments(DEFAULT_INSTRUMENTS)
+    except AdmissionClosed:
+        pass  # Fenced business initialization is deliberately not admitted.
     except Exception:
-        pass
+        if _PAUSED_STARTUP:
+            raise
     if os.environ.get("ASTRA_STANDALONE_GATEWAY", "").lower() not in ("1", "true", "yes"):
         start_gateway_supervisor()
     try:
         from astra_backend.dashboard_cache import start_dashboard_background_worker
         start_dashboard_background_worker()
     except Exception:
-        pass
+        if _PAUSED_STARTUP:
+            raise
+    # Module imports, routers, assets and successful lifespan initialization
+    # are complete. Keep this durable proof until the exact watchdog consumes it.
+    MAINTENANCE.complete_startup_verification(_STARTUP_VERIFICATION)
     yield
     try:
         from astra_backend.dashboard_cache import stop_dashboard_background_worker
@@ -311,9 +320,6 @@ app.include_router(dashboard_router)
 from astra_backend.web_shell import mount_static_assets  # noqa: E402
 
 mount_static_assets(app)
-
-MAINTENANCE.store.finish(_STARTUP_VERIFICATION, MAINTENANCE.identity)
-
 
 if __name__ == "__main__":
     from astra_backend.maintenance_runtime import run_backend

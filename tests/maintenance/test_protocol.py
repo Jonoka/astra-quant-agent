@@ -473,8 +473,12 @@ class ProtocolTests(ProtocolFixture):
         scope = self.store.admit_verification(instances["backend"], parent_id=permit)
         with self.assertRaises(m.MaintenanceError):
             self.store.rebind(self.binding, instances, self.stopped())
-        self.store.finish(scope, instances["backend"])
-        self.store.finish(permit, watchdog)
+        with self.assertRaises(m.MaintenanceError):
+            self.store.finish(scope, instances["backend"])
+        self.store.complete_startup_verification(self.binding, instances["backend"], scope)
+        with self.assertRaises(m.MaintenanceError):
+            self.store.rebind(self.binding, instances, self.stopped())
+        self.assertTrue(self.store.consume_startup_completion(self.binding, watchdog, permit, instances["backend"]))
         self.store.rebind(self.binding, instances, self.stopped())
 
     def test_startup_verification_refuses_virgin_normal_expired_or_unapproved(self):

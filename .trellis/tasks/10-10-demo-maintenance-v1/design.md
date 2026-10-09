@@ -109,6 +109,16 @@ Normal mode rechecks its real idle window after drain and directly before each
 supervision mutation and shutdown request. Any refusal remains fenced with no
 automatic reopening; maintenance mode still revalidates binding/deadline/risk.
 
+The launch permit must remain durable before registration and throughout actual
+initialization. Successful child verification atomically becomes a completion
+record in the existing maintenance activity table, still owned by that precise
+child and parented by that permit. Parent consumption checks the original full
+binding and exact live identities, then atomically removes completion and permit;
+zero activity never means ready. Normal non-maintenance finishing remains intact.
+No schema/table or signal/automatic-retry bridge is added. Backend completion is
+after successful lifespan startup; gateway completion follows store/scheduler and
+required paused initialization, not a finally block. Failed work stays tracked.
+
 Standalone focused runner installs network, real dotenv/credential and data-write
 guards before imports, uses explicit temporary roots, and avoids tests/__init__.py
 which loads dotenv. Linux flock tests remain mandatory CI/pending on Windows.

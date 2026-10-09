@@ -11,6 +11,11 @@ cd "$ROOT_DIR"
 # 1. 确保必要运行时目录存在
 mkdir -p "$ROOT_DIR/data" "$ROOT_DIR/logs" "$ROOT_DIR/backups"
 
+# Read the persisted fence before importing app modules or initializing writable
+# trading defaults. A restart never removes or resumes an existing operation.
+MAINTENANCE_FENCED=0
+python3 "$ROOT_DIR/scripts/maintenance_control.py" is-normal || MAINTENANCE_FENCED=1
+
 # 2. 如果缺少 .env，从 env.example 自动生成一份最小兜底（提醒用户尽快配置）
 #
 # ⚠️ 2026-09：`.env` 被挂成**目录**时改为**拒绝启动**（此前只打一行 warning 就继续）。
@@ -31,7 +36,7 @@ if [ -d "$ROOT_DIR/.env" ]; then
     echo "     docker compose up -d --force-recreate" >&2
     echo "   （或直接用一键脚本 ./deploy/docker-start.sh，它会自动纠正这一情况）" >&2
     exit 1
-elif [ ! -f "$ROOT_DIR/.env" ] && [ -f "$ROOT_DIR/env.example" ]; then
+elif [ "$MAINTENANCE_FENCED" = "0" ] && [ ! -f "$ROOT_DIR/.env" ] && [ -f "$ROOT_DIR/env.example" ]; then
     echo "⚠️ [Entrypoint] .env not found. Generating default .env from env.example..."
     cp "$ROOT_DIR/env.example" "$ROOT_DIR/.env"
     chmod 600 "$ROOT_DIR/.env"
@@ -60,7 +65,7 @@ if [ -f "$ROOT_DIR/scripts/migrate_r20_to_astra.py" ]; then
 fi
 
 # 3. 初始化默认标的池（如果不存在，避免冷启动阻断）
-if [ ! -f "$ROOT_DIR/data/instrument_pool.json" ]; then
+if [ "$MAINTENANCE_FENCED" = "0" ] && [ ! -f "$ROOT_DIR/data/instrument_pool.json" ]; then
     echo "📋 [Entrypoint] Initializing default instrument pool in data/..."
     python3 -c "from scripts.instrument_pool import save_instruments, DEFAULT_INSTRUMENTS; save_instruments(DEFAULT_INSTRUMENTS)" 2>/dev/null || true
 fi
@@ -78,7 +83,7 @@ case "$MODE" in
             exec bash "$ROOT_DIR/scripts/astra_watchdog.sh"
         fi
         echo "✨ [ASTRA] Starting Web Engine & Control Plane on 0.0.0.0:8080..."
-        exec python3 -m uvicorn astra_backend.app:app --host 0.0.0.0 --port 8080
+        exec python3 -m astra_backend.maintenance_runtime uvicorn astra_backend.app:app --host 0.0.0.0 --port 8080
         ;;
     gateway|worker)
         # 同理：网关的死法更隐蔽 —— 后端照常绿着、看板能开，调度却已停。
@@ -91,16 +96,27 @@ case "$MODE" in
         exec python3 -m astra_gateway.worker
         ;;
     all)
+        if [ "$(python3 "$ROOT_DIR/scripts/maintenance_control.py" mode)" != "legacy" ]; then
+            echo "Maintenance requires separate backend/gateway watchdog role instances; all mode refused." >&2
+            exit 75
+        fi
+        export ASTRA_MAINTENANCE_LEGACY_PROCESS=1
         echo "✨ [ASTRA] Starting All-in-One Mode (Web + Gateway Worker)..."
-        python3 -m uvicorn astra_backend.app:app --host 0.0.0.0 --port 8080 &
+        python3 -m astra_backend.maintenance_runtime uvicorn astra_backend.app:app --host 0.0.0.0 --port 8080 &
         BACKEND_PID=$!
         python3 -m astra_gateway.worker &
         GATEWAY_PID=$!
 
-        trap 'echo "🛑 Stopping services..."; kill -TERM $BACKEND_PID $GATEWAY_PID 2>/dev/null' TERM INT
+        orderly_all_stop() {
+            if python3 "$ROOT_DIR/scripts/maintenance_control.py" is-normal; then
+                kill -TERM "$BACKEND_PID" "$GATEWAY_PID" 2>/dev/null || true
+            fi
+            wait "$BACKEND_PID" "$GATEWAY_PID"
+        }
+        trap orderly_all_stop TERM INT
         wait -n $BACKEND_PID $GATEWAY_PID
         EXIT_CODE=$?
-        kill -TERM $BACKEND_PID $GATEWAY_PID 2>/dev/null || true
+        orderly_all_stop
         exit $EXIT_CODE
         ;;
     *)

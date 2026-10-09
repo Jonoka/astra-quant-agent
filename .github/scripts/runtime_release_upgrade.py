@@ -38,7 +38,8 @@ DEADLINE_PATCH_ID = "cycle-deadline-v1"
 CHECKS = ("state_preservation", "backward_read_write", "helper_tests", "published_compose_smoke",
           "council_regression", "patch_retention", "cycle_deadline_regression",
           "linux_singleton_lock", "cycle_deadline_state_rehearsal",
-          "shared_deployment_preflight", "deployment_plan_tests", "current_baseline_rehearsal")
+          "shared_deployment_preflight", "deployment_plan_tests", "current_baseline_rehearsal",
+          "demo_maintenance_regression")
 IMAGE_RE = r"ghcr\.io/jonoka/astra-quant-agent@sha256:[0-9a-f]{64}"
 WRITABLE = (".env", "data", "logs", "backups", ".archive", "plugins")
 OVERRIDE = "docker-compose.override.yml"
@@ -119,8 +120,10 @@ def require(condition, gate):
 def validate_deployment_plan(plan):
     fields = {'schema', 'previous_source', 'previous_image', 'release_source', 'image',
               'helper_sha256', 'provenance_sha256', 'pool', 'protected_config', 'runtime'}
-    require(isinstance(plan, dict) and set(plan) == fields and
-            type(plan['schema']) is int and plan['schema'] == 1, 'deployment_plan_schema')
+    require(isinstance(plan, dict) and type(plan.get('schema')) is int and
+            plan['schema'] in (1, 2) and
+            set(plan) == fields | ({'maintenance'} if plan['schema'] == 2 else set()),
+            'deployment_plan_schema')
     for key in ('previous_source', 'release_source'):
         require(isinstance(plan[key], str) and re.fullmatch(r'[0-9a-f]{40}', plan[key]),
                 'deployment_plan_source')
@@ -156,6 +159,9 @@ def validate_deployment_plan(plan):
             plan['runtime'] == {'project': PROJECT, 'services': list(SERVICES), 'demo': True,
                                'schedule_seconds': 900, 'minimum_idle_window_seconds': 480},
             'deployment_runtime_scope')
+    if plan['schema'] == 2:
+        from maintenance_deployment import validate_scope
+        validate_scope(plan['maintenance'], plan, require)
     return plan
 
 
@@ -188,6 +194,16 @@ def run(*args, timeout=360):
         return result.stdout + result.stderr if args[:2] == ("docker", "logs") else result.stdout
     except (subprocess.SubprocessError, OSError):
         raise GateError("command_failed") from None
+
+
+def run_input(args, data, timeout=60):
+    """Internal non-secret binding stdin, never credentials in arguments."""
+    try:
+        result = subprocess.run([str(a) for a in args], input=data, check=True,
+                                capture_output=True, timeout=timeout)
+        return result.stdout
+    except (subprocess.SubprocessError, OSError):
+        raise GateError('maintenance_inspection_failed') from None
 
 
 def sha(data):
@@ -629,6 +645,33 @@ class Upgrade:
                 'deployment_provenance_identity')
         return plan
 
+    @property
+    def root_maintenance(self):
+        return ROOT
+
+    require_maintenance = staticmethod(require)
+    digest_maintenance = staticmethod(digest)
+
+    def command_maintenance(self, *args):
+        return run(*args)
+
+    def input_command_maintenance(self, args, data):
+        return run_input(args, data)
+
+    def assert_maintenance_ownership(self):
+        self.deployment_guard(inventory=containers())
+
+    def maintenance(self):
+        plan = self.deployment_plan()
+        if plan['schema'] == 1:
+            return None
+        if not hasattr(self, '_maintenance'):
+            from maintenance_deployment import MaintenanceCoordinator, load_protocol
+            module = load_protocol(self.op / 'maintenance_protocol.py',
+                                   plan['maintenance']['target_protocol_sha256'], digest, require)
+            self._maintenance = MaintenanceCoordinator(self, module)
+        return self._maintenance
+
     def pool_guard(self):
         plan = self.deployment_plan()
         pool = plan['pool']
@@ -740,9 +783,10 @@ class Upgrade:
         phase = self.state.get('phase')
         previous_phases = {'stopping', 'stopped', 'snapshot-verified', 'candidate-ready',
                            'recovery-starting'}
-        candidate_phases = {'root-moved', 'candidate-active', 'starting', 'accepted',
+        candidate_phases = {'root-moved', 'candidate-active', 'starting', 'accepted', 'accepted-paused',
                             'recovery-stopped', 'recovery-ready'}
-        recovery_phases = {'candidate-retained', 'recovery-active', 'recovery-starting'}
+        recovery_phases = {'candidate-retained', 'recovery-active', 'recovery-starting',
+                           'rolled-back-paused', 'rolled-back'}
         original = self.op / 'original-deployment'
         failed = self.op / 'failed-candidate'
         sources = self.state.get('deployment_sources', {})
@@ -832,9 +876,13 @@ class Upgrade:
 
     def compose(self, source, *args):
         self.allowed(source)
-        return run("docker", "compose", "-p", PROJECT, "--project-directory", ROOT,
+        command = ["docker", "compose", "-p", PROJECT, "--project-directory", ROOT,
                    "--env-file", ROOT / ".env", "-f", source / "docker-compose.yml",
-                   "-f", source / OVERRIDE, *args)
+                   "-f", source / OVERRIDE]
+        # Only startup consumes this operational overlay, never .env/policy.
+        if args and args[0] == 'up' and self.deployment_plan()['schema'] == 2:
+            command += ['-f', self.op / 'maintenance-startup.yml']
+        return run(*command, *args)
 
     def image_metadata(self, previous=False):
         image = self.previous_image if previous else self.image
@@ -1090,6 +1138,12 @@ print(json.dumps({'risk':expected,'pool':[i['name'] for i in items],
         self.worker_state()
         self.strategy_reader(previous=True)
         self.image_metadata(False)  # Must already have been pulled by digest.
+        maintenance = self.maintenance()
+        if maintenance is not None:
+            maintenance.check_versions()
+            maintenance.check_instances(maintenance.initial)
+            require(maintenance.store.status()['phase'] == 'NORMAL',
+                    'maintenance_existing_hold_or_uninitialized')
         databases = db_state(ROOT)
         administrator = admin_identity(ROOT)
         guard = self.guard(ROOT)
@@ -1113,7 +1167,10 @@ print(json.dumps({'risk':expected,'pool':[i['name'] for i in items],
         targets = {n: c for n, c in now.items() if c["project"] == PROJECT}
         require(set(targets) <= set(NAMES) and all(c["service"] == n.removeprefix("astraquant-")
                 for n, c in targets.items()), "stop_project_scope")
-        if targets:
+        if self.deployment_plan()['schema'] == 2:
+            require(all(c['state'] == 'exited' for c in targets.values()),
+                    'maintenance_orderly_stop_not_completed')
+        elif targets:
             run("docker", "stop", "-t", "60", *(c["id"] for c in targets.values()))
         after = containers()
         require(all(after[n]["state"] == "exited" and after[n]["id"] == c["id"]
@@ -1184,10 +1241,17 @@ print(json.dumps({'risk':expected,'pool':[i['name'] for i in items],
         self.state["started"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         self.phase("recovery-starting" if previous else "starting")
         self.compose(ROOT, "config", "--quiet")
+        maintenance = self.maintenance()
+        if maintenance is not None:
+            maintenance.check_versions()
+            self.save('maintenance-startup.yml', {'services': {
+                service: {'environment': maintenance.startup_environment(previous)} for service in SERVICES}})
         try:
             self.compose(ROOT, "up", "-d", "--no-build", "--no-deps", "--wait", "--wait-timeout", "240", *SERVICES)
         finally:
             self.remember_started_containers(previous)
+        if maintenance is not None:
+            maintenance.rebind_started(previous)
 
     def continuity(self):
         self.pool_guard()
@@ -1222,6 +1286,7 @@ print(json.dumps({'risk':expected,'pool':[i['name'] for i in items],
                 time.sleep(15)
 
     def execute(self):
+        require(self.deployment_plan()['schema'] == 2, 'legacy_execute_requires_new_protocol_plan')
         require(self.state.get("phase") == "prepared", "preflight_required")
         # Every fallible pre-stop gate stays outside the recovery block; drift
         # must not restart or otherwise disturb a healthy previous deployment.
@@ -1232,7 +1297,15 @@ print(json.dumps({'risk':expected,'pool':[i['name'] for i in items],
         self.validate_compose(self.op / "candidate")
         self.image_metadata(False)
         self.check_drift()
-        self.idle_window()
+        maintenance = self.maintenance()
+        if maintenance is None:
+            self.idle_window()
+        else:
+            if self.deployment_plan()['maintenance']['mode'] == 'normal':
+                self.idle_window()
+            # Failed drains stay fenced; do not enter normal stop/rollback.
+            maintenance.request_pause()
+            maintenance.orderly_stop()
         try:
             self.phase("stopping")
             self.stop()
@@ -1256,7 +1329,7 @@ print(json.dumps({'risk':expected,'pool':[i['name'] for i in items],
             self.phase("candidate-active")
             self.start(False)
             self.verify()
-            self.phase("accepted")
+            self.phase("accepted-paused" if maintenance is not None else "accepted")
         except BaseException as exc:
             self.save("failure.json", {"phase": self.state.get("phase"), "type": type(exc).__name__,
                       "gate": str(exc) if isinstance(exc, GateError) else "runtime_failure"})
@@ -1312,6 +1385,9 @@ print(json.dumps({'risk':expected,'pool':[i['name'] for i in items],
         self.phase('recovery-active')
 
     def rollback(self):
+        require(self.deployment_plan()['schema'] == 2, 'legacy_rollback_requires_new_protocol_plan')
+        from maintenance_deployment import check_protocol_versions
+        check_protocol_versions(self)
         require(self.state and self.state.get("phase") not in ("prepared", "rolled-back"), "rollback_phase")
         require(self.manifest_sha == self.state["manifest_sha"], "manifest_drift")
         self.sources()
@@ -1337,6 +1413,9 @@ print(json.dumps({'risk':expected,'pool':[i['name'] for i in items],
             require(tree_manifest(self.op / "stopped-snapshot") == self.state["snapshot"], "snapshot_evidence_drift")
             env_gate(ROOT)
             self.capacity()
+            maintenance = self.maintenance()
+            if maintenance is not None:
+                maintenance.orderly_stop(recovery=True)
             self.stop()
             self.phase("recovery-stopped")
             latest_db = db_state(ROOT)
@@ -1369,12 +1448,22 @@ print(json.dumps({'risk':expected,'pool':[i['name'] for i in items],
             self.state["protected_config"] = {n: tree_manifest(ROOT / n) if (ROOT / n).exists() else None for n in CONFIG}
         self.start(True)
         self.verify(previous=True)
-        self.phase("rolled-back")
+        self.phase("rolled-back-paused" if self.maintenance() is not None else "rolled-back")
+
+    def resume(self):
+        maintenance = self.maintenance()
+        require(maintenance is not None and self.state.get('phase') in
+                ('accepted-paused', 'rolled-back-paused'), 'explicit_maintenance_resume_required')
+        previous = self.state['phase'] == 'rolled-back-paused'
+        self.deployment_guard()
+        self.verify(previous)
+        maintenance.explicit_resume()
+        self.phase('rolled-back' if previous else 'accepted')
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("mode", choices=("preflight", "execute", "rollback", "verify"))
+    parser.add_argument("mode", choices=("preflight", "execute", "rollback", "verify", "resume"))
     parser.add_argument("operation", type=Path)
     parser.add_argument("--session-fd", type=int, default=None,
                         help="Inherited descriptor containing an existing session token; never a token argument")

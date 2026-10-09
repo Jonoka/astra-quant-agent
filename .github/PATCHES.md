@@ -1,5 +1,22 @@
 # Retained Deployment Corrections
 
+## demo-maintenance-v1 (local, not published or deployed)
+
+Explicit protocol-aware DEMO maintenance replaces only the ordinary time window
+with a real same-generation pause/identity/risk barrier. Normal >=480 and prior
+source/config/auth/state gates remain. Candidates and recovery start paused;
+resume is a separate final action. Existing jobs finish without a maintenance
+kill escalation; latest writable state/deletions remain recoverable. Unknown
+orders, actors, threads and unowned resident writers refuse the barrier. Legacy
+bootstrap/rollback and expired recovery are not silently bridged.
+
+Required focused suites are run by run_maintenance_tests.py without tests package
+initialization, real dotenv/data or external networking. Linux flock and isolated
+Compose/state rehearsal remain mandatory independent gates. Shared controller
+and protocol bytes are packaged from exact source, with new image labels/checks.
+The existing PR5 bundle/helper/pin are untouched. This local implementation does
+not authorize push, CI dispatch, image/provenance publication or deployment.
+
 The deployment branch is `codex/deploy`; `main` follows upstream without local
 application fixes. Development changes use separate `codex/*` branches before
 integration into the deployment line.

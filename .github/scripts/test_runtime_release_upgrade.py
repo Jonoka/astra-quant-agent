@@ -40,6 +40,12 @@ class RuntimeUpgradeTests(unittest.TestCase):
         obj.pool_guard = Mock()
         obj.deployment_guard = Mock()
         obj.remember_started_containers = Mock()
+        # Lifecycle fixtures retain their original source/config/state gates.
+        # The real SQLite/ACK/drain contract is exercised in test_deployment.py.
+        obj.deployment_plan = Mock(return_value={'schema': 2, 'maintenance': {'mode': 'normal'}})
+        coordinator = Mock()
+        coordinator.startup_environment.return_value = {'ASTRA_MAINTENANCE_ENABLED': '1'}
+        obj.maintenance = Mock(return_value=coordinator)
         return obj
 
     def schema_fixture(self, *, additive=False):

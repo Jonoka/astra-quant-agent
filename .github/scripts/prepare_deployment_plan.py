@@ -20,7 +20,8 @@ from runtime_release_upgrade import (
 from stage_release_bundle import source_identity, save
 
 
-def capture(operation, expected_source, expected_image, approved_names):
+def capture(operation, expected_source, expected_image, approved_names, *, mode='normal',
+            account_uid_sha256=None, budget_seconds=1200, drain_seconds=600):
     provenance = plain_path(operation / 'provenance.json')
     evidence = json.loads(provenance.read_bytes())
     release = source_identity(evidence)
@@ -44,6 +45,12 @@ def capture(operation, expected_source, expected_image, approved_names):
             'protected_config': config,
             'runtime': {'project': PROJECT, 'services': list(SERVICES), 'demo': True,
                         'schedule_seconds': 900, 'minimum_idle_window_seconds': 480}}
+    require(mode in ('normal', 'maintenance'), 'approved_deployment_mode')
+    if mode == 'maintenance' or account_uid_sha256 is not None:
+        from maintenance_deployment import capture_scope
+        plan['schema'] = 2
+        plan['maintenance'] = capture_scope(operation, plan, run, require,
+            uid_sha256=account_uid_sha256, budget=budget_seconds, drain=drain_seconds, mode=mode)
     validate_deployment_plan(plan)
     # Inspect each current container independently. A tag cannot become rollback
     # authority; exact immutable reference and source/version labels must agree.
@@ -99,12 +106,20 @@ def main():
     parser.add_argument('--expected-previous-source', required=True)
     parser.add_argument('--expected-previous-image', required=True)
     parser.add_argument('--approved-assets', nargs='+', required=True)
+    parser.add_argument('--mode', choices=('normal', 'maintenance'), default='normal')
+    parser.add_argument('--account-uid-sha256', help='Independently approved DEMO identity hash, not a credential')
+    parser.add_argument('--maintenance-budget-seconds', type=int, default=1200)
+    parser.add_argument('--maintenance-drain-seconds', type=int, default=600)
     args = parser.parse_args()
     os.umask(0o077)
     require(os.geteuid() == 0, 'root_required')
+    require(args.account_uid_sha256 is not None, 'new_executable_plan_requires_protocol_and_demo_identity')
     operation = operation_path(args.operation)
     plan = capture(operation, args.expected_previous_source,
-                   args.expected_previous_image, args.approved_assets)
+                   args.expected_previous_image, args.approved_assets, mode=args.mode,
+                   account_uid_sha256=args.account_uid_sha256,
+                   budget_seconds=args.maintenance_budget_seconds,
+                   drain_seconds=args.maintenance_drain_seconds)
     path = operation / 'deployment-plan.json'
     save(path, plan)
     print('DEPLOYMENT_PLAN_SHA256=' + digest(path))

@@ -44,7 +44,7 @@ class DeploymentSourceGuardTests(unittest.TestCase):
 
     def test_missing_patch_and_unrelated_application_delta_are_rejected(self):
         for changes in (guard.APPLICATION_PATCH - {"scripts/okx_public.py"},
-                        guard.APPLICATION_PATCH | {"scripts/okx_rest.py"}):
+                        guard.APPLICATION_PATCH | {"scripts/unreviewed_transport.py"}):
             with self.subTest(changes=changes), self.assertRaisesRegex(
                     AssertionError, "Missing retained patch or unreviewed application changes"):
                 self._verify(changes)
@@ -69,6 +69,7 @@ class DeploymentSourceGuardTests(unittest.TestCase):
             source = Path(tmp)
             for relative in (*guard.DEADLINE_REGRESSIONS, *guard.TAKER_PATCH_SHA256,
                              *guard.ALPHA_PATCH_SHA256,
+                             *guard.MAINTENANCE_CASE_MINIMUMS, 'astra_backend/maintenance.py',
                              'tests/ops/test_brain_dispatch.py'):
                 target = source / relative
                 target.parent.mkdir(parents=True, exist_ok=True)
@@ -225,7 +226,36 @@ class DeploymentSourceGuardTests(unittest.TestCase):
         self.assertIn('$SOURCE_VERSION-cycle-deadline-fix-${SOURCE_SHA:0:12}',
                       steps['Publish the smoke-tested linux/amd64 image']['run'])
         self.assertEqual(steps['Upload verified raw deployment bundle']['with']['name'],
-                         'astraquant-v8.6.1-cycle-deadline-deployment')
+                         'astraquant-v8.6.1-maintenance-deployment')
+
+    def test_maintenance_missing_paths_and_unrelated_changes_remain_rejected(self):
+        for path in ('astra_backend/maintenance.py', 'tests/maintenance/test_deployment.py'):
+            with self.assertRaisesRegex(AssertionError, 'Missing retained patch'):
+                self._verify(guard.APPLICATION_PATCH - {path})
+        with self.assertRaisesRegex(AssertionError, 'unreviewed application changes'):
+            self._verify(guard.APPLICATION_PATCH | {'scripts/unreviewed_maintenance.py'})
+
+    def test_protocol_and_positive_maintenance_discovery_are_required(self):
+        root = Path(__file__).resolve().parents[2]
+        with tempfile.TemporaryDirectory() as temporary:
+            source = Path(temporary)
+            for relative in (*guard.DEADLINE_REGRESSIONS, *guard.TAKER_PATCH_SHA256,
+                             *guard.ALPHA_PATCH_SHA256, *guard.MAINTENANCE_CASE_MINIMUMS,
+                             'astra_backend/maintenance.py', 'tests/ops/test_brain_dispatch.py'):
+                destination = source / relative
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(root / relative, destination)
+            self._verify(source=source)
+            path = source / 'astra_backend/maintenance.py'
+            raw = path.read_text()
+            path.write_text(raw.replace('PROTOCOL_VERSION = 1', 'PROTOCOL_VERSION = 9', 1))
+            with self.assertRaisesRegex(AssertionError, 'Maintenance protocol'):
+                self._verify(source=source)
+            path.write_text(raw)
+            path = source / 'tests/maintenance/test_deployment.py'
+            path.write_text('class EmptyAcceptance: pass\n')
+            with self.assertRaisesRegex(AssertionError, 'Maintenance regression missing'):
+                self._verify(source=source)
 
     def test_singleton_acceptance_imports_from_shallow_mount_with_explicit_source_root(self):
         root = Path(__file__).resolve().parents[2]

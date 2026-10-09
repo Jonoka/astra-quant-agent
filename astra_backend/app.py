@@ -18,6 +18,11 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(SCRIPTS_DIR))
 
 from astra_backend.version import __version__, APP_NAME
+from astra_backend.maintenance_runtime import get_runtime, install_anyio_thread_tracking, MaintenanceMiddleware
+MAINTENANCE = get_runtime("backend")
+MAINTENANCE.startup()
+_STARTUP_VERIFICATION = MAINTENANCE.begin_startup_verification()
+install_anyio_thread_tracking()
 from astra_backend.config import refresh_settings, settings
 from astra_backend.settings_store import EnvValueError, update_env
 from astra_gateway.secrets import save_secrets
@@ -134,11 +139,12 @@ def require_superadmin(x_astra_session: Any = None) -> dict[str, Any]:
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     refresh_settings()
-    admin_auth.initialize_from_legacy(settings.admin_token or settings.setup_token)
     try:
-        from scripts.instrument_pool import POOL_FILE, save_instruments, DEFAULT_INSTRUMENTS
-        if not POOL_FILE.exists():
-            save_instruments(DEFAULT_INSTRUMENTS)
+        with MAINTENANCE.activity("backend-startup"):
+            admin_auth.initialize_from_legacy(settings.admin_token or settings.setup_token)
+            from scripts.instrument_pool import POOL_FILE, save_instruments, DEFAULT_INSTRUMENTS
+            if not POOL_FILE.exists():
+                save_instruments(DEFAULT_INSTRUMENTS)
     except Exception:
         pass
     if os.environ.get("ASTRA_STANDALONE_GATEWAY", "").lower() not in ("1", "true", "yes"):
@@ -156,6 +162,7 @@ async def lifespan(_: FastAPI):
         pass
     if os.environ.get("ASTRA_STANDALONE_GATEWAY", "").lower() not in ("1", "true", "yes"):
         stop_gateway_supervisor()
+    MAINTENANCE.wait_settled()
 
 
 app = FastAPI(
@@ -187,6 +194,10 @@ async def admin_session_context(request: Request, call_next):
         return response
     finally:
         REQUEST_SESSION.reset(token)
+
+
+# Pure ASGI scope includes streaming/background completion, unlike call_next.
+app.add_middleware(MaintenanceMiddleware, runtime=MAINTENANCE)
 
 
 def _memory_service_call(name: str, *args, **kwargs):
@@ -301,7 +312,9 @@ from astra_backend.web_shell import mount_static_assets  # noqa: E402
 
 mount_static_assets(app)
 
+MAINTENANCE.store.finish(_STARTUP_VERIFICATION, MAINTENANCE.identity)
+
 
 if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host=settings.host, port=settings.port)
+    from astra_backend.maintenance_runtime import run_backend
+    run_backend(app, settings.host, settings.port)

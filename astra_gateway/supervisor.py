@@ -7,6 +7,7 @@ import sys
 import threading
 import time
 from pathlib import Path
+from astra_backend.maintenance_runtime import AdmissionClosed, get_runtime
 
 ROOT = Path(__file__).resolve().parents[1]
 from astra_gateway.pidfile import PID_FILE  # noqa: E402  (唯一定义处：pidfile.py)
@@ -96,6 +97,16 @@ def _find_live_worker_pid() -> int:
 
 
 def ensure_worker() -> int:
+    maintenance = get_runtime("backend")
+    try:
+        with maintenance.activity("supervisory-action"):
+            return _ensure_worker_admitted()
+    except AdmissionClosed:
+        maintenance.poll()
+        return 0
+
+
+def _ensure_worker_admitted() -> int:
     global _owned_pid
     pid = current_pid()
     if pid: return pid
@@ -130,18 +141,27 @@ def _run() -> None:
 def start_supervisor() -> None:
     global _thread
     if _thread and _thread.is_alive(): return
-    _stop.clear(); ensure_worker(); _thread=threading.Thread(target=_run,name="astra-gateway-supervisor",daemon=True); _thread.start()
+    _stop.clear(); ensure_worker(); _thread=threading.Thread(target=_run,name="astra-gateway-supervisor",daemon=True)
+    get_runtime("backend").register_threads([_thread])
+    _thread.start()
 
 
 def stop_supervisor() -> None:
     global _owned_pid
     _stop.set()
+    if _thread is not None and _thread is not threading.current_thread():
+        _thread.join()
     pid=_owned_pid
     if pid and _is_gateway_worker(pid):
-        try: os.kill(pid,signal.SIGTERM)
-        except OSError: pass
-        deadline=time.time()+8
-        while _alive(pid) and time.time()<deadline: time.sleep(.1)
+        try:
+            with get_runtime("backend").activity("supervisory-action"):
+                try: os.kill(pid,signal.SIGTERM)
+                except OSError: pass
+                while _alive(pid): time.sleep(.1)
+        except AdmissionClosed:
+            # An external stop must wait for the protocol controller; it cannot
+            # signal a child or pretend that the child has already settled.
+            while _alive(pid): time.sleep(.1)
     if pid and not _alive(pid):
         try: PID_FILE.unlink(missing_ok=True)
         except OSError: pass

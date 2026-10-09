@@ -12,6 +12,7 @@ from __future__ import annotations
 import subprocess
 import sys
 from typing import Any, Optional
+from astra_backend.maintenance_runtime import run_process
 
 
 def run_script(script: Any, *, timeout: int = 20, label: Optional[str] = None,
@@ -24,7 +25,7 @@ def run_script(script: Any, *, timeout: int = 20, label: Optional[str] = None,
     可能已还原 `ASTRA_DATA_DIR` ⇒ 子进程带着干净环境**写生产**（实测 03:22 窗口）。
     调用方在**线程创建前**同步抓 `dict(os.environ)` 快照经此传入。
     """
-    cp = subprocess.run([sys.executable, str(script)],
+    cp = run_process([sys.executable, str(script)],
                         capture_output=True, text=True, timeout=timeout, env=env)
     if cp.returncode != 0:
         err = (cp.stderr or cp.stdout or "").strip().replace("\n", " / ")[:200]

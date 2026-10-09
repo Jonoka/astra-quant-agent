@@ -1,0 +1,17 @@
+{
+  "git_base": "948df24e458853cf9c6966c2d8641c18e6dc0917",
+  "protected_sha256": {
+    "data/prompt_library.json": "c032575fc4f3af3fc32fcb9ec410770468eecdc83a7e5f7fd6810096a3cf7573",
+    "scripts/risk_constants.py": "0138e5ed66e1af19602680d82e073a9c2bf4b143e10c167fd2603bf869c70546",
+    "astra_backend/risk_config.py": "2524338b87977a88b8540e293d7123b0c81c05690541d4344af3e683b3976366",
+    "scripts/brain/packages.py": "4f6e3751752d200e93c4d33506a9fd84767fe3f878cbcb744515979a8611c8d2",
+    "scripts/brain/prompt.py": "b9db0dc842c3c8aa2112f445e216e46d9c69274ca6a20e3dfb20217232838e32",
+    "tests/ops/test_brain_packages.py": "16ca18ecd36e167154fbe69f5c26e44934ac523ae1abdfce4c19497e14e2f7dd",
+    "tests/extraction/test_brain_package_extraction.py": "01ec5ee6339fdc592a2ccffeddc78b2b2f5a51c8c9bf60737b05611275818846",
+    "scripts/instrument_pool.py": "2274b120a739f281a36d4a11d4b40c5575cad74a31e34addd6568ab8eb6111bf",
+    "docker-compose.yml": "2b243a75df9f6601307960e825ef2726d5604f26bb2beeba6e28f07da4cef595",
+    "Dockerfile": "896e74a76afbf2c490cc0e86bd1dd0ea1f9318fad0ff4c191ff816c4bcdbe49c"
+  },
+  "preserved_external_bundle": "D:/CodexHome/visualizations/2026/09/22/01a0c818-950f-70a0-86b9-f6e0afb4ef6f/astra-pr5-deployment-20261009-run37929727201",
+  "preserved_external_plan_pin": "210844bff5151bc393830e20f68a0016583d6e41425a1c6ab7d490e57ef4a26f"
+}

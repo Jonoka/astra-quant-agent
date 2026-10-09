@@ -75,8 +75,8 @@ class RecoveryJournalTests(unittest.TestCase):
             self.crash(base, where)
             calls = base.docker.call_count
             base.obj.rollback()
-            self.assertEqual(base.obj.state['phase'], 'rolled-back')
-            self.assertEqual(json.loads((base.op / 'state.json').read_bytes())['phase'], 'rolled-back')
+            self.assertEqual(base.obj.state['phase'], 'rolled-back-paused')
+            self.assertEqual(json.loads((base.op / 'state.json').read_bytes())['phase'], 'rolled-back-paused')
             self.assertEqual((base.live / 'source-marker').read_bytes(), b'previous')
             self.assertEqual((base.live / 'data/records.json').read_bytes(), b'latest')
             self.assertFalse((base.live / 'data/deleted.json').exists())

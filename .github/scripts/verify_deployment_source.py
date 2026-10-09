@@ -14,6 +14,38 @@ PREVIOUS_SHA = "90f9f3a558bdbea0171b19a42c58e2fae7ed8e9d"
 # source guard is deliberately exact so an unrelated application edit cannot
 # enter a release image through a workflow-only review.
 APPLICATION_PATCH = {
+    '.trellis/tasks/10-10-demo-maintenance-v1/prd.md',
+    '.trellis/tasks/10-10-demo-maintenance-v1/design.md',
+    '.trellis/tasks/10-10-demo-maintenance-v1/implement.md',
+    '.trellis/tasks/10-10-demo-maintenance-v1/task.json',
+    '.trellis/tasks/10-10-demo-maintenance-v1/implement.jsonl',
+    '.trellis/tasks/10-10-demo-maintenance-v1/check.jsonl',
+    '.trellis/tasks/10-10-demo-maintenance-v1/baseline.json',
+    '.trellis/spec/backend/astra-maintenance.md',
+    'astra_backend/__init__.py',
+    'astra_backend/maintenance.py',
+    'astra_backend/maintenance_runtime.py',
+    'astra_backend/app.py',
+    'astra_backend/dashboard_cache.py',
+    'astra_backend/qq_bind.py',
+    'astra_backend/routers/gateway/backups.py',
+    'astra_backend/routers/gateway/gateway_ops.py',
+    'astra_backend/scheduler.py',
+    'astra_backend/spawn.py',
+    'astra_gateway/cache_warmer.py',
+    'astra_gateway/supervisor.py',
+    'astra_gateway/worker.py',
+    'deploy/docker-entrypoint.sh',
+    'scripts/astra_watchdog.sh',
+    'scripts/maintenance_control.py',
+    'scripts/okx_rest.py',
+    'scripts/trader/order_submit.py',
+    'tests/maintenance/test_protocol.py',
+    'tests/maintenance/test_journal.py',
+    'tests/maintenance/test_concurrency.py',
+    'tests/maintenance/test_runtime.py',
+    'tests/maintenance/test_entrypoints.py',
+    'tests/maintenance/test_deployment.py',
     '.trellis/tasks/10-06-reusable-deployment-contract/prd.md',
     '.trellis/tasks/10-06-reusable-deployment-contract/design.md',
     '.trellis/tasks/10-06-reusable-deployment-contract/task.json',
@@ -117,6 +149,16 @@ ALPHA_PATCH_SHA256 = {
     'scripts/brain/prompt.py': 'b9db0dc842c3c8aa2112f445e216e46d9c69274ca6a20e3dfb20217232838e32',
     'scripts/trader/signal_snapshot.py': 'd67333373bf0d3e87d6b0ac9d12d666b7c65e23ff3ef26c22e2bbbce5a1f76ec',
     'tests/llm/test_alpha_transport_contract.py': '9ab014e4dd29dcd06443b73af267511d967ebba68e20425e9a7fc1e0240dcf04',
+}
+
+# Independent discovery contract; not derived from the candidate runner.
+MAINTENANCE_CASE_MINIMUMS = {
+    'tests/maintenance/test_protocol.py': 33,
+    'tests/maintenance/test_journal.py': 10,
+    'tests/maintenance/test_concurrency.py': 5,
+    'tests/maintenance/test_runtime.py': 30,
+    'tests/maintenance/test_entrypoints.py': 16,
+    'tests/maintenance/test_deployment.py': 31,
 }
 
 # Independently reviewed names include all 62 original cycle-deadline regressions.
@@ -240,6 +282,16 @@ def verify(source: Path, upstream: str, revision: str) -> None:
         assert path.is_file(), f"Required reviewed alpha source missing: {relative}"
         assert hashlib.sha256(path.read_bytes()).hexdigest() == expected, (
             f"Reviewed alpha source changed: {relative}")
+    maintenance = ast.parse((source / 'astra_backend/maintenance.py').read_text(encoding='utf-8'))
+    versions = [n.value.value for n in maintenance.body if isinstance(n, ast.Assign)
+                and any(isinstance(t, ast.Name) and t.id == 'PROTOCOL_VERSION' for t in n.targets)
+                and isinstance(n.value, ast.Constant)]
+    assert versions == [1], 'Maintenance protocol missing or unreviewed version'
+    for relative, minimum in MAINTENANCE_CASE_MINIMUMS.items():
+        tree = ast.parse((source / relative).read_text(encoding='utf-8'))
+        cases = {n.name for c in tree.body if isinstance(c, ast.ClassDef)
+                 for n in c.body if isinstance(n, ast.FunctionDef) and n.name.startswith('test_')}
+        assert len(cases) >= minimum, f'Maintenance regression missing: {relative}'
     suite_path = source / "tests/ops/test_brain_dispatch.py"
     tree = ast.parse(suite_path.read_text(encoding="utf-8"))
     suites = [node for node in tree.body if isinstance(node, ast.ClassDef)

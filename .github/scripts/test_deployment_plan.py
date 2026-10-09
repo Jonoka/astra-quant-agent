@@ -52,7 +52,7 @@ class DeploymentPlanTests(unittest.TestCase):
         self.obj.state = {'manifest_sha': 'fixture', 'extras': [], 'prompt_refreshed': False}
         (self.live / 'source-marker').write_bytes(b'previous-source')
         config = {n: M.digest(self.live / n) if (self.live / n).is_file() else None for n in M.CONFIG}
-        self.plan = {'schema': 1, 'previous_source': self.obj.previous,
+        self.plan = {'schema': 2, 'previous_source': self.obj.previous,
             'previous_image': self.obj.previous_image, 'release_source': self.obj.release,
             'image': self.obj.image, 'helper_sha256': M.digest(Path(M.__file__)),
             'provenance_sha256': M.digest(self.op / 'provenance.json'),
@@ -62,6 +62,20 @@ class DeploymentPlanTests(unittest.TestCase):
                      'uid': 0, 'gid': 0, 'mode': 0o600},
             'runtime': {'project': M.PROJECT, 'services': list(M.SERVICES), 'demo': True,
                         'schedule_seconds': 900, 'minimum_idle_window_seconds': 480}}
+        self.plan['maintenance'] = {'protocol': 1, 'mode': 'normal',
+            'budget_seconds': 1200, 'drain_seconds': 600, 'generation': 2,
+            'instances': {role: {'role': role, 'instance_id': 'boot:22:' + str(i + 10) + ':1234',
+                'source': self.obj.previous, 'image': self.obj.previous_image, 'protocol': 1}
+                for i, role in enumerate(('backend', 'gateway', 'watchdog-backend', 'watchdog-gateway'))},
+            'previous_protocol_sha256': 'd' * 64, 'target_protocol_sha256': 'd' * 64,
+            'account_uid_sha256': 'e' * 64, 'store_relative_path': 'data/maintenance_state.sqlite'}
+        # Keep real approved-plan/native-pool/idle/source/config gates. The
+        # separate controller suite runs the actual protocol and SQLite reducer.
+        self.coordinator = Mock()
+        self.obj.maintenance = Mock(return_value=self.coordinator)
+        version_patch = patch('maintenance_deployment.check_protocol_versions')
+        version_patch.start()
+        self.addCleanup(version_patch.stop)
         self.repin()
         root_patch = patch.object(M, 'ROOT', self.live)
         root_patch.start()
@@ -185,6 +199,12 @@ class DeploymentPlanTests(unittest.TestCase):
             self.obj.pool_guard()
 
     def test_invalid_identity_scope_and_duplicate_assets_are_rejected(self):
+        # Schema1 remains parseable as a read-only contract, not executable
+        # authorization (the controller acceptance checks execute/rollback).
+        readonly = copy.deepcopy(self.plan)
+        readonly['schema'] = 1
+        del readonly['maintenance']
+        self.assertEqual(M.validate_deployment_plan(readonly), readonly)
         for field, wrong in (('previous_source', 'tag'), ('previous_image', 'latest'),
                              ('release_source', M.UPSTREAM), ('schema', True)):
             bad = copy.deepcopy(self.plan)
@@ -307,16 +327,22 @@ class DeploymentPlanTests(unittest.TestCase):
             self.assertEqual(args[:3], ('docker', 'exec', M.NAMES[0]))
             return json.dumps(native).encode()
         with patch.object(preparing, 'ROOT', self.live), patch.object(preparing, 'env_gate'), \
-                patch.object(preparing, 'run', side_effect=command):
-            plan = preparing.capture(self.op, self.obj.previous, self.obj.previous_image, NAMES)
+                patch.object(preparing, 'run', side_effect=command), \
+                patch('maintenance_deployment.capture_scope', return_value=self.plan['maintenance']):
+            plan = preparing.capture(self.op, self.obj.previous, self.obj.previous_image, NAMES,
+                                     account_uid_sha256='e' * 64)
+            self.assertEqual(plan['schema'], 2)
+            self.assertEqual(plan['maintenance']['mode'], 'normal')
             self.assertEqual(plan['pool']['sha256'], M.digest(self.pool))
             native['names'] = list(reversed(NAMES))
             with self.assertRaisesRegex(M.GateError, 'approved_native_pool'):
-                preparing.capture(self.op, self.obj.previous, self.obj.previous_image, NAMES)
+                preparing.capture(self.op, self.obj.previous, self.obj.previous_image, NAMES,
+                                  account_uid_sha256='e' * 64)
             native['names'] = NAMES
             metadata['Config']['Labels']['org.opencontainers.image.revision'] = 'd' * 40
             with self.assertRaisesRegex(M.GateError, 'current_source_image_identity'):
-                preparing.capture(self.op, self.obj.previous, self.obj.previous_image, NAMES)
+                preparing.capture(self.op, self.obj.previous, self.obj.previous_image, NAMES,
+                                  account_uid_sha256='e' * 64)
 
     def test_idle_failure_does_not_enter_stop_or_recovery(self):
         self.prepare()

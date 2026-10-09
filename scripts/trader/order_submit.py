@@ -444,9 +444,17 @@ def submit_protected_limit_order(inst_id: str, side: str, pos_side: str, size: f
             inst_id, side, f"{size:g}",
             pos_side=pos_side, td_mode="cross", ord_type=ord_type,
             px=entry_px, attach_tp=effective_tp, attach_sl=effective_sl,
+            **({"logical_intent": str(venue_ctx["intent_id"])} if isinstance(venue_ctx, dict)
+               and venue_ctx.get("intent_id") else {}),
         )
     except Exception as exc:
-        release_signal_reservation(_reservation, "下单异常")
+        # A network exception can follow broker acceptance. Keep the existing
+        # reservation and durable send journal pending explicit reconciliation.
+        from astra_backend.maintenance_runtime import (
+            get_runtime, AdmissionClosed, OrderNotSent, BrokerRejected)
+        if (isinstance(exc, (ValueError, AdmissionClosed, OrderNotSent, BrokerRejected, okx_rest.OKXNotConfigured))
+                or not get_runtime().enabled):
+            release_signal_reservation(_reservation, "下单未发送或交易所明确拒绝")
         return False, str(exc)
     order_id = None
     for row in rows:
@@ -454,9 +462,10 @@ def submit_protected_limit_order(inst_id: str, side: str, pos_side: str, size: f
         if order_id:
             break
     if not order_id:
-        release_signal_reservation(_reservation, "交易所未返回可核验订单号")
+        from astra_backend.maintenance_runtime import get_runtime
+        if not get_runtime().enabled:
+            release_signal_reservation(_reservation, "交易所未返回可核验订单号")
         return False, "exchange accepted response without a verifiable order id"
     record_open_intent(inst_id, side)
     confirm_signal_reservation(_reservation)
     return True, str(order_id)
-

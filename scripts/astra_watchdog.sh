@@ -41,11 +41,34 @@ flock -n 9 || { echo "watchdog already running"; exit 0; }
 
 log() { echo "[$(TZ=Asia/Shanghai date '+%F %T +08:00')] $*" >> "$LOG"; }
 
+ROLE="watchdog-$MODE"
+maintenance() {
+    "$PY" "$ROOT/scripts/maintenance_control.py" "$@" --role "$ROLE" --pid "$$"
+}
+
+if [ "$(maintenance mode)" = "legacy" ]; then
+    # Remember this shell's startup mode across fresh Python CLI invocations.
+    # A future enable/store appearance requires a fresh supervised generation.
+    export ASTRA_MAINTENANCE_LEGACY_PROCESS=1
+fi
+
+# Registration survives shell death. An unknown interrupted action blocks ACK;
+# it is never deleted by age, PID guessing, or the legacy shared pause file.
+supervised_action() {
+    local activity rc
+    activity="$(maintenance begin-action)" || return 75
+    "$@"; rc=$?
+    # A failed/unverifiable restart cannot assert that all child activity ended.
+    [ "$rc" -eq 0 ] || return "$rc"
+    maintenance finish-action --activity "$activity" || return 75
+    return "$rc"
+}
+
 find_backend_pid() {
     local p cmd
     for p in $(ls /proc 2>/dev/null | grep -E '^[0-9]+$'); do
         cmd=$(tr '\0' ' ' < "/proc/$p/cmdline" 2>/dev/null)
-        case "$cmd" in *"m uvicorn astra_backend.app:app"*) echo "$p"; return;; esac
+        case "$cmd" in *"uvicorn astra_backend.app:app"*) echo "$p"; return;; esac
     done
 }
 
@@ -67,7 +90,7 @@ kill_stale() {  # 杀掉卡死但不再应答的旧后端与孤儿 worker
 restart_backend() {
     kill_stale "$(find_backend_pid)"
     cd "$ROOT" || return 1
-    setsid "$PY" -m uvicorn astra_backend.app:app --host 0.0.0.0 --port 8080 \
+    setsid "$PY" -m astra_backend.maintenance_runtime uvicorn astra_backend.app:app --host 0.0.0.0 --port 8080 \
         < /dev/null >> "$ROOT/logs/astra_backend.log" 2>&1 &
     sleep 5
     local np; np="$(find_backend_pid)"
@@ -76,6 +99,7 @@ restart_backend() {
         log "✅ 后端已拉起 PID=$np"
     else
         log "❌ 拉起失败，30 秒后重试"
+        return 75
     fi
 }
 
@@ -123,6 +147,7 @@ restart_gateway() {
         log "✅ 网关 worker 已拉起 PID=$np"
     else
         log "❌ 网关 worker 拉起失败，30 秒后重试"
+        return 75
     fi
 }
 
@@ -134,6 +159,20 @@ restart_gateway() {
 # 但同一台机器上同时跑着后端与一个网关模式看门狗时，停掉后者会**顺手杀掉共享的后端**
 # —— 这正是我本地验证时造成的真事故（后端被杀、约一分钟才被生产看门狗拉起）。
 shutdown() {
+    # TERM/KILL cannot cross an active fence. Remain alive until an explicitly
+    # resumed controller permits supervision, retaining this watchdog's flock.
+    while ! maintenance poll; do
+        if maintenance should-exit; then
+            if [ "$MODE" = "gateway" ]; then
+                [ -z "$(find_worker_pid)" ] && exit 0
+            elif [ -z "$(find_backend_pid)" ] && [ -z "$(find_worker_pid)" ]; then
+                exit 0
+            fi
+        fi
+        sleep 5
+    done
+    local action
+    action="$(maintenance begin-action)" || return
     log "收到停止信号，正在终止受管进程…"
     local pid
     if [ "$MODE" = "gateway" ]; then
@@ -143,7 +182,10 @@ shutdown() {
         pid="$(find_backend_pid)"; [ -n "$pid" ] && kill "$pid" 2>/dev/null
         pid="$(find_worker_pid)";  [ -n "$pid" ] && kill "$pid" 2>/dev/null
     fi
-    sleep 1
+    # Keep the action registered through actual child exit, not a guessed delay.
+    while [ -n "$(find_backend_pid)" ] && [ "$MODE" != "gateway" ]; do sleep 1; done
+    while [ -n "$(find_worker_pid)" ]; do sleep 1; done
+    maintenance finish-action --activity "$action" || return
     exit 0
 }
 trap shutdown TERM INT
@@ -151,7 +193,17 @@ trap shutdown TERM INT
 log "看门狗启动 (模式=$MODE, PY=$PY, 探测间隔 30s, 连续 2 次失败触发拉起)"
 FAILS=0
 while true; do
-    if [ -f "$PAUSE" ]; then
+    if maintenance should-exit; then
+        # No signals: bound workers/backend exit themselves after STOPPING.
+        if [ "$MODE" = "gateway" ]; then
+            [ -z "$(find_worker_pid)" ] && exit 0
+        elif [ -z "$(find_backend_pid)" ] && [ -z "$(find_worker_pid)" ]; then
+            exit 0
+        fi
+    fi
+    if ! maintenance poll; then
+        FAILS=0
+    elif [ -f "$PAUSE" ]; then
         FAILS=0
     elif [ "$MODE" = "gateway" ]; then
         gateway_health; rc=$?
@@ -161,7 +213,7 @@ while true; do
             FAILS=$((FAILS + 1))
             log "网关健康探测失败 ($FAILS/2)：$GATEWAY_REASON"
             if [ "$FAILS" -ge 2 ]; then
-                restart_gateway
+                supervised_action restart_gateway
                 FAILS=0
             fi
         fi
@@ -171,7 +223,7 @@ while true; do
         FAILS=$((FAILS + 1))
         log "健康探测失败 ($FAILS/2)"
         if [ "$FAILS" -ge 2 ]; then
-            restart_backend
+            supervised_action restart_backend
             FAILS=0
         fi
     fi

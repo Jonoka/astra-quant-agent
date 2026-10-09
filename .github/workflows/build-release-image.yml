@@ -234,7 +234,9 @@ jobs:
 
       - name: Derive pinned release recipe with official landing asset
         id: recipe
-        run: python ci/.github/scripts/prepare_release_dockerfile.py source ci/Dockerfile.release >> "$GITHUB_OUTPUT"
+        run: |
+          python ci/.github/scripts/prepare_release_dockerfile.py source ci/Dockerfile.release >> "$GITHUB_OUTPUT"
+          python -c "import hashlib; from pathlib import Path; print('maintenance_sha256=' + hashlib.sha256(Path('source/astra_backend/maintenance.py').read_bytes()).hexdigest())" >> "$GITHUB_OUTPUT"
 
       - name: Build candidate from corrected fork and reviewed release recipe
         uses: docker/build-push-action@v6
@@ -253,6 +255,8 @@ jobs:
             io.jonoka.astra.council-completion-patch=council-completion-v1
             io.jonoka.astra.okx-public-domains-patch=okx-public-domains-v1
             io.jonoka.astra.cycle-deadline-patch=cycle-deadline-v1
+            io.jonoka.astra.maintenance-protocol=1
+            io.jonoka.astra.maintenance-source-sha256=${{ steps.recipe.outputs.maintenance_sha256 }}
             io.jonoka.astra.build-recipe-sha256=${{ steps.recipe.outputs.sha256 }}
           provenance: false
           sbom: false
@@ -322,6 +326,8 @@ jobs:
           cp ci/.github/scripts/runtime_release_upgrade.py release-artifacts/
           cp ci/.github/scripts/stage_release_bundle.py release-artifacts/
           cp ci/.github/scripts/prepare_deployment_plan.py release-artifacts/
+          cp ci/.github/scripts/maintenance_deployment.py release-artifacts/
+          cp ci/astra_backend/maintenance.py release-artifacts/maintenance_protocol.py
           cp ci/Dockerfile.release release-artifacts/
           python - <<'PY'
           import hashlib, json, os
@@ -336,6 +342,6 @@ jobs:
       - name: Upload verified raw deployment bundle
         uses: actions/upload-artifact@v4
         with:
-          name: astraquant-v8.6.1-cycle-deadline-deployment
+          name: astraquant-v8.6.1-maintenance-deployment
           path: release-artifacts/
           if-no-files-found: error

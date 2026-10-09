@@ -1,0 +1,2 @@
+{"file":".trellis/spec/backend/astra-release-contract.md","reason":"Preservation and source gates"}
+{"file":".trellis/spec/backend/astra-cycle-deadlines.md","reason":"Ordinary scheduling must not regress"}

@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import platform
 import subprocess
+from astra_backend.maintenance_runtime import run_process
 import time
 from urllib.parse import parse_qs, urlparse
 from typing import Any
@@ -148,7 +149,7 @@ def _effective_broker_tag() -> str:
 
 def git(command: list[str]) -> str:
     try:
-        result = subprocess.run(["git", *command], cwd=ROOT, text=True, capture_output=True, timeout=30)
+        result = run_process(["git", *command], cwd=ROOT, text=True, capture_output=True, timeout=30)
     except subprocess.TimeoutExpired as exc:
         raise RuntimeError(f"git command timed out after {exc.timeout}s") from exc
     if result.returncode:
@@ -713,7 +714,7 @@ def update_application(
     updated = status_before["local"] != status_after.get("local")
     if updated:
         try:
-            subprocess.run(["npm", "run", "build"], cwd=str(ROOT / "frontend"), timeout=60, check=False)
+            run_process(["npm", "run", "build"], cwd=str(ROOT / "frontend"), timeout=60, check=False)
         except Exception:
             pass
     rec_audit = app_attr("audit_record", audit_record)

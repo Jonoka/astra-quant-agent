@@ -212,6 +212,7 @@ CACHE_DATA = load_persisted_dashboard_cache()
 LAST_CACHE_TIME = 0
 CACHE_LOCK = None
 SYNC_EXECUTOR = ThreadPoolExecutor(max_workers=6, thread_name_prefix="dashboard_sync")
+from astra_backend.maintenance_runtime import AdmissionClosed, get_runtime, guarded
 _BG_WORKER_THREAD = None
 _BG_WORKER_RUNNING = False
 
@@ -221,6 +222,7 @@ def _dashboard_background_worker_loop():
     time.sleep(0.5)
     while _BG_WORKER_RUNNING:
         try:
+            get_runtime("backend").poll()
             update_cache_cycle()
         except Exception:
             pass
@@ -236,11 +238,15 @@ def start_dashboard_background_worker():
             daemon=True,
             name="dashboard_cache_worker"
         )
+        get_runtime("backend").register_threads([_BG_WORKER_THREAD])
         _BG_WORKER_THREAD.start()
 
 def stop_dashboard_background_worker():
     global _BG_WORKER_RUNNING
     _BG_WORKER_RUNNING = False
+    if _BG_WORKER_THREAD is not None and _BG_WORKER_THREAD is not threading.current_thread():
+        _BG_WORKER_THREAD.join()
+    SYNC_EXECUTOR.shutdown(wait=True, cancel_futures=False)
 
 def get_cache_lock():
     global CACHE_LOCK
@@ -259,6 +265,7 @@ def _load_cross_venue_data() -> dict:
     return _core__load_cross_venue_data(DATA_DIR, AI_DECISIONS_FILE)
 
 
+@guarded("dashboard-cache", child=True)
 def update_cache_cycle():
     global CACHE_DATA, LAST_CACHE_TIME
     tz_beijing = datetime.timezone(datetime.timedelta(hours=8))
@@ -498,11 +505,24 @@ async def refresh_cache_if_needed(ttl_seconds: float = 3.0):
         if time.time() - LAST_CACHE_TIME <= ttl_seconds and CACHE_DATA:
             return CACHE_DATA
         loop = asyncio.get_running_loop()
-        await loop.run_in_executor(SYNC_EXECUTOR, update_cache_cycle)
+        runtime = get_runtime("backend")
+        try:
+            activity = runtime.admit("dashboard-cache-queued")
+        except AdmissionClosed:
+            return CACHE_DATA
+        # Shield prevents request cancellation from releasing queued work.
+        try:
+            future = loop.run_in_executor(
+                SYNC_EXECUTOR, runtime.run_admitted, activity, update_cache_cycle)
+            runtime.register_threads(SYNC_EXECUTOR._threads)
+        except BaseException:
+            runtime.store.finish(activity, runtime.identity)
+            raise
+        await asyncio.shield(future)
         return CACHE_DATA
 
 # Auto-start background worker to keep in-memory cache pre-warmed
-start_dashboard_background_worker()
+# Lifespan owns startup. Importing this library must never start broker work.
 
 
 
@@ -556,4 +576,3 @@ async def get_overview():
         data,
         headers={"Cache-Control": "public, max-age=1, s-maxage=3, stale-while-revalidate=5"},
     )
-

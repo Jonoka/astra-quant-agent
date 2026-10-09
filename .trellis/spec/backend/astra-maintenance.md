@@ -32,6 +32,22 @@ Health/auth/persistence/singleton validation happens with admission still closed
 Explicit resume is the final opening action, after all fallible supervision
 restoration, exact instance/source/image checks and fresh risk proof.
 
+Paused replacement launch is a separate durable supervisory scope, not ordinary
+restart admission. The startup overlay binds the exact operation/generation;
+only a new approved watchdog with proven old actors offline can launch its absent
+app. The actual app must register itself and finish its accounted startup child
+before the launch scope settles. Duplicate/live/crashed/old/stale/expired launches
+stay refused; no kill or age-based pruning. Windows controlled child tests do not
+prove the real Bash/proc/cgroup/namespace/lock chain.
+
+GET /api/v1/maintenance/status is implemented directly by the production ASGI
+middleware and reads a stable DELETE-journal SQLite snapshot in memory. It emits
+only version/status/protocol/phase/fenced, not credentials/account/order/actor data;
+it neither polls nor writes expiry state. Other fenced business GET/write paths
+remain closed. Deployment verification probes this contract, not broad /status.
+In-memory HTTPX+real asyncio scheduling with selector I/O prohibited proves this
+pure route only, not full FastAPI/auth/AnyIO lifecycle or network transport.
+
 ## Risk and orders
 
 Only verified DEMO and six explicitly zero counts (positions, pending, algo,
@@ -51,6 +67,9 @@ upgraded into fabricated pre-send evidence. Normal disabled behavior is preserve
 Schema1 remains read-only parse compatibility, not executable authorization; new
 execute/rollback reject it before stop/rename. Executable schema2 normal mode
 retains real 900-second scheduling and >=480 remaining plus the pause barrier.
+The real normal window is rechecked after drain, before each supervision mutation
+and immediately before the natural exit request. Failure cancels publication and
+keeps admission closed; ordinary runtime/risk/identity proofs are rechecked too.
 Maintenance mode replaces only the time window; every source/config/auth/
 ownership/state gate remains. Schema2 is an explicit bounded
 maintenance extension with protocol/identity/account hashes and exact instances.

@@ -21,7 +21,7 @@ sys.path.insert(0, str(ROOT))
 from astra_backend.maintenance import AdmissionClosed, Binding, Identity, MaintenanceStore, RiskProof
 from astra_backend.maintenance_runtime import (Runtime, process_instance, store_path,
                                                protocol_observed, startup_store, persist_enable_latch,
-                                               unsupported_producers)
+                                               unsupported_producers, start_paused_component)
 
 
 def metadata(role, pid):
@@ -93,7 +93,7 @@ class ReadOnlyEvidenceStore:
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("action", choices=("metadata", "status", "poll", "is-normal", "mode", "should-exit",
-                                          "begin-action", "finish-action", "risk"))
+                                          "begin-action", "finish-action", "start-paused", "risk"))
     parser.add_argument("--database", default=str(store_path()))
     parser.add_argument("--role", choices=("backend", "gateway", "watchdog-backend", "watchdog-gateway"))
     parser.add_argument("--pid", type=int, default=os.getpid())
@@ -145,7 +145,7 @@ def main(argv=None):
         if args.action == "metadata":
             print(json.dumps(metadata(args.role, args.pid), sort_keys=True))
             return 0
-        if args.action in {"poll", "begin-action", "finish-action", "should-exit"} and args.role not in {
+        if args.action in {"poll", "begin-action", "finish-action", "should-exit", "start-paused"} and args.role not in {
             "watchdog-backend", "watchdog-gateway"}:
             raise ValueError("application ACKs must come from their own runtime; CLI only controls watchdog roles")
         store = startup_store(Path(args.database))
@@ -163,6 +163,9 @@ def main(argv=None):
             return 0 if runtime.shutdown_requested() else 75
         if args.action == "poll":
             return 75 if runtime.poll() else 0
+        if args.action == "start-paused":
+            print(start_paused_component(runtime))
+            return 0
         if args.action == "begin-action":
             print(runtime.admit("supervisory-action"))
         elif args.action == "finish-action":

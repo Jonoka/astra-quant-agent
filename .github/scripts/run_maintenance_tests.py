@@ -1,7 +1,7 @@
 """Focused offline acceptance: temp data, no real dotenv/credentials or network.
 
 Do not discover the repository's tests package: its initializer loads dotenv.
-Only the reviewed SQLite concurrency child is allowed to create a real process.
+Only reviewed SQLite and controlled paused-application children may create a process.
 Linux flock/container acceptance is a distinct, never inferred requirement.
 """
 from __future__ import annotations
@@ -33,7 +33,9 @@ SUITES = {
     'test_concurrency.py': 5,
     'test_runtime.py': 30,
     'test_entrypoints.py': 16,
-    'test_deployment.py': 31,
+    'test_deployment.py': 34,
+    'test_http_verification.py': 7,
+    'test_supervisor_startup.py': 8,
 }
 
 
@@ -62,6 +64,11 @@ def isolated(sandbox):
                    if isinstance(n, ast.Assign) and any(
                        isinstance(t, ast.Name) and t.id == 'CHILD' for t in n.targets)]
     approved_child = ast.literal_eval(assignments[0].value)
+    supervisor_source = ROOT / 'tests/maintenance/test_supervisor_startup.py'
+    supervisor_assignments = [n for n in ast.parse(supervisor_source.read_text()).body
+                              if isinstance(n, ast.Assign) and any(
+                                  isinstance(t, ast.Name) and t.id == 'APP_CHILD' for t in n.targets)]
+    approved_app = ast.literal_eval(supervisor_assignments[0].value)
 
     def inside(path):
         return Path(path).resolve().is_relative_to(sandbox)
@@ -95,14 +102,25 @@ def isolated(sandbox):
         raise AssertionError('offline network refused')
 
     def popen(command, *args, **kwargs):
-        if (not isinstance(command, (list, tuple)) or len(command) != 8
-                or Path(command[0]).resolve() != Path(sys.executable).resolve()
-                or command[1:3] != ['-c', approved_child]
-                or Path(command[3]).resolve() != ROOT / 'astra_backend/maintenance.py'
-                or not inside(command[4])
-                or command[7] not in {'admit', 'request', 'order', 'order-crash', 'crash'}):
+        executable = isinstance(command, (list, tuple)) and len(command) > 3 and Path(command[0]).resolve() == Path(sys.executable).resolve()
+        sqlite_child = (executable and len(command) == 8 and command[1:3] == ['-c', approved_child]
+                        and Path(command[3]).resolve() == ROOT / 'astra_backend/maintenance.py'
+                        and inside(command[4]) and command[7] in {'admit', 'request', 'order', 'order-crash', 'crash'})
+        app_child = (executable and len(command) == 7 and command[1:3] == ['-c', approved_app]
+                     and Path(command[3]).resolve() == ROOT and inside(command[4]) and inside(command[5])
+                     and command[6] in {'hold', 'crash'})
+        if not (sqlite_child or app_child):
             raise AssertionError('offline unapproved subprocess refused')
         child_env = {key: value for key, value in os.environ.items() if key in safe_keys}
+        if app_child:
+            supplied = kwargs.get('env') or {}
+            if (supplied.get('ASTRA_MAINTENANCE_ROLE') not in {'backend', 'gateway'}
+                    or not inside(supplied.get('ASTRA_MAINTENANCE_DB', ROOT))):
+                raise AssertionError('offline app child context outside sandbox')
+            for key in ('ASTRA_MAINTENANCE_ENABLED', 'ASTRA_MAINTENANCE_DB', 'ASTRA_MAINTENANCE_ROLE',
+                        'ASTRA_SOURCE_COMMIT', 'ASTRA_IMAGE_REF', 'ASTRA_MAINTENANCE_STARTUP_ACTIVITY',
+                        'ASTRA_MAINTENANCE_STARTUP_BINDING'):
+                child_env[key] = supplied[key]
         child_env['PYTHONDONTWRITEBYTECODE'] = '1'
         kwargs['env'] = child_env
         return real_popen(command, *args, **kwargs)

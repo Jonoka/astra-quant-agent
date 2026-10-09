@@ -20,3 +20,11 @@
 Stage milestones: core protocol first; runtime/controller integration next;
 final report only after actual focused tests and scope review. Partial progress
 is not production readiness or complete authorization.
+
+Fixed-review repair: first reproduce the three static findings using focused
+regressions; implement the bound paused-startup and read-only ASGI contract;
+recheck normal time/proof immediately before stop boundaries. Run original and
+new isolated suites without installs; pin a local commit, then capture pre/post
+HEAD/tree/raw hashes for final per-suite rerun. Append new evidence rather than
+overwrite original 1a7 results. Update complete base-to-new-HEAD diff and manifests.
+Do not start writers/reviewers or production/CI actions; coordinator owns re-review.

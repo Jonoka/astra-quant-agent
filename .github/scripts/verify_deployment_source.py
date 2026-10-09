@@ -46,6 +46,8 @@ APPLICATION_PATCH = {
     'tests/maintenance/test_runtime.py',
     'tests/maintenance/test_entrypoints.py',
     'tests/maintenance/test_deployment.py',
+    'tests/maintenance/test_http_verification.py',
+    'tests/maintenance/test_supervisor_startup.py',
     '.trellis/tasks/10-06-reusable-deployment-contract/prd.md',
     '.trellis/tasks/10-06-reusable-deployment-contract/design.md',
     '.trellis/tasks/10-06-reusable-deployment-contract/task.json',
@@ -158,7 +160,9 @@ MAINTENANCE_CASE_MINIMUMS = {
     'tests/maintenance/test_concurrency.py': 5,
     'tests/maintenance/test_runtime.py': 30,
     'tests/maintenance/test_entrypoints.py': 16,
-    'tests/maintenance/test_deployment.py': 31,
+    'tests/maintenance/test_deployment.py': 34,
+    'tests/maintenance/test_http_verification.py': 7,
+    'tests/maintenance/test_supervisor_startup.py': 8,
 }
 
 # Independently reviewed names include all 62 original cycle-deadline regressions.

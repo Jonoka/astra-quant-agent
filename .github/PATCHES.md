@@ -98,3 +98,7 @@ regression passes against that implementation. Retiring this patch or changing
 the application allowlist is an explicit reviewed change; do not silently drop
 the guard during a version bump. All builds and substantive tests run on hosted
 Actions; production only pulls images and performs named no-build cutovers.
+<!-- Local maintenance review repair: controller-pinned one-shot paused child
+startup, pure ASGI maintenance status, and post-drain normal >=480 rechecks.
+Retained acceptance adds controlled real Python children and in-memory HTTPX;
+it is not Linux/shell/container/production validation or deployment authority. -->

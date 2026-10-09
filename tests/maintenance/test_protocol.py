@@ -462,12 +462,19 @@ class ProtocolTests(ProtocolFixture):
         self.store.pause(self.binding, self.proof())
         self.switch()
         instances = self.candidate()
-        for identity in instances.values():
-            self.store.startup(identity)
-        scope = self.store.admit_verification(instances["backend"])
+        watchdog = instances["watchdog-backend"]
+        self.store.startup(watchdog)
+        permit = self.store.begin_paused_startup(self.binding, watchdog)
+        for role, identity in instances.items():
+            if role != "watchdog-backend":
+                self.store.startup(identity)
+        with self.assertRaises(m.AdmissionClosed):
+            self.store.admit_verification(instances["backend"])
+        scope = self.store.admit_verification(instances["backend"], parent_id=permit)
         with self.assertRaises(m.MaintenanceError):
             self.store.rebind(self.binding, instances, self.stopped())
         self.store.finish(scope, instances["backend"])
+        self.store.finish(permit, watchdog)
         self.store.rebind(self.binding, instances, self.stopped())
 
     def test_startup_verification_refuses_virgin_normal_expired_or_unapproved(self):

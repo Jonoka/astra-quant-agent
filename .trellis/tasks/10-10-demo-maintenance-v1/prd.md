@@ -53,5 +53,16 @@ gates, not inferred from Windows tests. CI code is updated but not dispatched.
 
 ## Approval retained for later
 
+## Authorized local review repairs
+
+Continue the same isolated branch with sequential main-agent repairs only:
+controller-bound paused candidate/recovery startup, a side-effect-free production
+ASGI maintenance-status contract used by verification, and a fresh normal >=480
+window check after drain and before supervision changes/natural shutdown. Retain
+all prior coverage and add controlled real subprocess and in-memory HTTP/ASGI
+acceptance. No new dependencies, network, containers, publication or deployment.
+Local code commits are authorized solely to pin the repaired candidate. Preserve
+historical evidence and report unavailable full FastAPI/Linux/runtime acceptance.
+
 No implementation result authorizes first legacy transition, live use, external
 supervisor signals/restart changes, real risk checks, publication or deployment.

@@ -90,6 +90,25 @@ enters stop/rollback. Tests must show no order/task replay on late resume.
 
 ## Offline-only boundaries
 
+## Fixed-review repair design
+
+Fenced supervision may launch only through a durable one-shot paused-startup
+activity bound to the exact current operation/generation, new watchdog identity,
+approved source/image and completed old-instance exit evidence. App startup
+verification is its accounted child; business admission remains closed. Unknown,
+duplicate, expired, old or crashed actors cannot use the permit to restart.
+
+A production ASGI-only status route reads a stable in-memory copy of the separate
+maintenance SQLite store, exposes only version/protocol/phase/fenced, and neither
+initializes nor expires persisted state. Deployment verification uses this route
+instead of broad status while paused. Local HTTPX ASGI transport needs no network
+listener or FastAPI installation; full FastAPI/auth and AnyIO lifecycle remain
+separate acceptance, not mocked into a pass.
+
+Normal mode rechecks its real idle window after drain and directly before each
+supervision mutation and shutdown request. Any refusal remains fenced with no
+automatic reopening; maintenance mode still revalidates binding/deadline/risk.
+
 Standalone focused runner installs network, real dotenv/credential and data-write
 guards before imports, uses explicit temporary roots, and avoids tests/__init__.py
 which loads dotenv. Linux flock tests remain mandatory CI/pending on Windows.

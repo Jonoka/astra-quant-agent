@@ -203,6 +203,13 @@ while true; do
     fi
     if ! maintenance poll; then
         FAILS=0
+        # Never revive an old/exiting actor. The Python supervisor requires the
+        # exact controller startup binding and a durable one-shot child permit.
+        if [ "$MODE" = "gateway" ]; then
+            [ -n "$(find_worker_pid)" ] || maintenance start-paused
+        else
+            [ -n "$(find_backend_pid)" ] || maintenance start-paused
+        fi
     elif [ -f "$PAUSE" ]; then
         FAILS=0
     elif [ "$MODE" = "gateway" ]; then

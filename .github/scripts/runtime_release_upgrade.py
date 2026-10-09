@@ -430,6 +430,15 @@ def request(base, path, token=None, expected=200):
         return json.loads(body) if "application/json" in response.headers.get("Content-Type", "") else body
 
 
+def verify_maintenance_status(base, module):
+    """Same production ASGI contract while paused; never broad app GET admission."""
+    status = request(base, module.MAINTENANCE_STATUS_PATH)
+    require(status.get('status') == 'ok' and
+            status.get('maintenance', {}).get('protocol') == module.PROTOCOL_VERSION,
+            'maintenance_status_protocol')
+    return status
+
+
 def env_gate(root):
     path = root / ".env"
     require(path.is_file() and stat.S_IMODE(path.stat().st_mode) == 0o600 and
@@ -1029,8 +1038,12 @@ class Upgrade:
         local = "http://127.0.0.1:8080"
         h = request(local, "/api/v1/health")
         require(h["version"] == version and h["status"] == "ok", "local_health")
+        maintenance = self.maintenance()
+        status_path = maintenance.module.MAINTENANCE_STATUS_PATH if maintenance is not None else "/api/v1/status"
         for base in (local, "https://trader.jo2api.com"):
-            require(request(base, "/api/v1/status")["version"] == version and
+            status = (verify_maintenance_status(base, maintenance.module) if maintenance is not None
+                      else request(base, status_path))
+            require(status["version"] == version and
                     request(base, "/api/v1/health")["version"] == version, "endpoint_version")
             request(base, "/api/v1/admin/auth/me", expected=401)
             require(request(base, "/api/v1/admin/auth/status")["initialized"] is True, "auth_initialized")

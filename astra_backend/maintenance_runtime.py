@@ -14,12 +14,14 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import sys
 import sqlite3
 import threading
 import time
 import uuid
 
-from astra_backend.maintenance import AdmissionClosed, Binding, Identity, MaintenanceError, MaintenanceStore
+from astra_backend.maintenance import (AdmissionClosed, Binding, Identity, MaintenanceError,
+                                      MaintenanceStore, MAINTENANCE_STATUS_PATH)
 
 PROTOCOL_VERSION = 1
 ROOT = Path(__file__).resolve().parents[1]
@@ -210,7 +212,10 @@ class Runtime:
 
     def begin_startup_verification(self):
         if self.fenced():
-            return self.store.admit_verification(self.identity)
+            state = self.store.status()
+            bound = state.get("binding") and Binding.from_dict(state["binding"]).instances.get(self.identity.role) == self.identity
+            permit = None if bound else os.environ.get("ASTRA_MAINTENANCE_STARTUP_ACTIVITY")
+            return self.store.admit_verification(self.identity, parent_id=permit)
         return self.admit("startup-verification")
 
     def fenced(self) -> bool:
@@ -372,7 +377,7 @@ def install_anyio_thread_tracking():
         parent_row = next(row for row in runtime.store.status()["activities"]
                           if row["activity_id"] == parent)
         if parent_row["kind"] == "startup-verification":
-            activity = runtime.store.admit_verification(runtime.identity)
+            activity = runtime.store.admit_verification(runtime.identity, parent_id=parent)
         else:
             activity = runtime.admit("asgi-thread", parent=parent)
         @wraps(function)
@@ -395,6 +400,27 @@ class MaintenanceMiddleware:
         if scope["type"] != "http":
             return await self.app(scope, receive, send)
         path, method = scope.get("path", ""), scope.get("method", "GET")
+        if method == "GET" and path == MAINTENANCE_STATUS_PATH:
+            # This is the production ASGI route, not a bypass to broad app GETs.
+            # No admission, polling, lazy app import, auth/config or expiry write.
+            try:
+                from astra_backend.version import get_version
+                if self.runtime.enabled:
+                    summary = self.runtime.store.readonly_summary(self.runtime.identity)
+                elif protocol_observed(self.runtime.path):
+                    raise AdmissionClosed("legacy instance cannot report protocol readiness")
+                else:
+                    summary = {"protocol": 0, "phase": "LEGACY", "fenced": False}
+                body = json.dumps({"version": get_version(), "status": "ok", "maintenance": summary},
+                                  sort_keys=True).encode()
+                status = 200
+            except (ValueError, OSError, sqlite3.Error):
+                body, status = b'{"detail":"maintenance state unavailable"}', 503
+            await send({"type": "http.response.start", "status": status,
+                        "headers": [(b"content-type", b"application/json"),
+                                    (b"content-length", str(len(body)).encode())]})
+            await send({"type": "http.response.body", "body": body})
+            return
         activity = None
         if path not in {"/api/v1/health", "/api/docs", "/api/redoc", "/openapi.json"}:
             try:
@@ -449,6 +475,57 @@ def unsupported_producers():
         except OSError:
             verified = False
     return {"verified": verified, "counts": counts}
+
+
+def start_paused_component(runtime, *, logfile=None, sleep=time.sleep):
+    """Launch a controller-approved new app with every business admission shut.
+
+    The durable launch scope remains on crashes, deadline/identity loss or an
+    unverified child. There are no signals, retries or fabricated role ACKs.
+    Windows process identity is explicitly offline; the host controller still
+    requires independent Linux namespace/start/cgroup evidence before acceptance.
+    """
+    role = {"watchdog-backend": "backend", "watchdog-gateway": "gateway"}.get(runtime.identity.role)
+    if role is None or not runtime.enabled:
+        raise AdmissionClosed("paused startup requires a protocol watchdog")
+    try:
+        binding = Binding.from_dict(json.loads(os.environ["ASTRA_MAINTENANCE_STARTUP_BINDING"]))
+    except (KeyError, ValueError, TypeError) as exc:
+        raise AdmissionClosed("externally pinned startup binding required") from exc
+    activity = runtime.store.begin_paused_startup(binding, runtime.identity)
+    environment = dict(os.environ)
+    environment.pop("ASTRA_MAINTENANCE_OWNER", None)
+    environment.pop("ASTRA_MAINTENANCE_PARENT_ACTIVITY", None)
+    environment.update(ASTRA_MAINTENANCE_ROLE=role, ASTRA_MAINTENANCE_STARTUP_ACTIVITY=activity,
+                       ASTRA_MAINTENANCE_DB=str(runtime.store.path))
+    command = ([sys.executable, "-m", "astra_gateway.worker"] if role == "gateway" else
+               [sys.executable, "-m", "astra_backend.maintenance_runtime", "uvicorn",
+                "astra_backend.app:app", "--host", "0.0.0.0", "--port", "8080"])
+    logfile = Path(logfile) if logfile is not None else ROOT / "logs" / ("astra_" + role + ".log")
+    try:
+        with logfile.open("ab") as output:
+            process = subprocess.Popen(command, env=environment, stdin=subprocess.DEVNULL,
+                                       stdout=output, stderr=subprocess.STDOUT, start_new_session=True)
+        while True:
+            state = runtime.store.status()
+            if state["binding"] != binding.as_dict() or runtime.store.clock() >= state["deadline"] or process.poll() is not None:
+                raise UnknownChild("paused child startup could not be verified")
+            candidates = [Identity.from_dict(json.loads(row["identity"])) for row in state["actors"]
+                          if row["online"] and json.loads(row["identity"])["role"] == role]
+            if len(candidates) == 1:
+                child = candidates[0]
+                exact = (child.instance_id.startswith(f"windows-offline:{process.pid}:") if os.name == "nt"
+                         else child.instance_id == process_instance(process.pid))
+                if not exact or (child.source, child.image) != (runtime.identity.source, runtime.identity.image):
+                    raise UnknownChild("paused child identity differs from the spawned process")
+                active = any(json.loads(row["owner"]) == child.as_dict() for row in state["activities"])
+                if not active:
+                    runtime.store.finish(activity, runtime.identity)
+                    return process.pid
+            sleep(.05)
+    except BaseException:
+        runtime.store.hold("paused startup unresolved; explicit recovery required")
+        raise
 
 
 def start_thread(kind, function, *args, name=None, daemon=True):

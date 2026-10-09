@@ -398,6 +398,63 @@ class DeploymentTests(unittest.TestCase):
         value.stop.assert_not_called(); value.rollback.assert_not_called()
         self.assertEqual(value.pool_guard.call_count, 1)
 
+    def test_normal_successful_drain_600_to_400_refuses_before_supervision_or_stop(self):
+        value = self.execution_fixture()
+        self.now = 300.0
+        self.plan['maintenance'].update(budget_seconds=600, drain_seconds=300)
+        writer = self.store.admit(self.identities['backend'], 'http:GET')
+        self.upgrade.idle_window = value.idle_window
+        def drain(seconds):
+            self.now += 200
+            self.store.finish(writer, self.identities['backend'])
+            self.ack(self.coordinator.initial)
+        self.coordinator.sleep = drain
+        original_iterdir = Path.iterdir
+        def processes(path):
+            return iter(()) if path == Path('/proc') else original_iterdir(path)
+        with patch.object(u, 'ROOT', self.live), patch.object(u.time, 'time', side_effect=lambda: self.now), \
+                patch.object(Path, 'iterdir', processes):
+            with self.assertRaisesRegex(u.GateError, 'insufficient_idle_window'): value.execute()
+        self.assertEqual(self.now, 500)
+        self.assertTrue(self.upgrade.running)
+        self.assertFalse(self.store.status()['shutdown_requested'])
+        self.assertFalse(any(call[:2] == ('docker', 'update') for call in self.upgrade.calls))
+        value.stop.assert_not_called(); value.rollback.assert_not_called()
+        self.no_open()
+
+    def test_fresh_normal_window_is_checked_before_each_supervision_change(self):
+        self.paused()
+        self.plan['maintenance']['mode'] = 'normal'
+        windows = []
+        def window():
+            windows.append(True)
+            if len(windows) == 2: raise u.GateError('insufficient_idle_window')
+        self.upgrade.idle_window = window
+        with self.assertRaisesRegex(u.GateError, 'insufficient_idle_window'): self.coordinator.orderly_stop()
+        self.assertEqual(len(windows), 2)
+        self.assertFalse(any(call[:2] == ('docker', 'update') for call in self.upgrade.calls))
+        self.assertTrue(self.upgrade.running)
+        self.assertFalse(self.store.status()['shutdown_requested'])
+        self.no_open()
+
+    def test_normal_fresh_window_allows_orderly_stop_with_complete_barrier(self):
+        value = self.execution_fixture()
+        self.now = 300.0
+        self.plan['maintenance'].update(budget_seconds=600, drain_seconds=300)
+        self.upgrade.idle_window = value.idle_window
+        self.upgrade.finish_on_sleep = True
+        original_iterdir = Path.iterdir
+        def processes(path):
+            return iter(()) if path == Path('/proc') else original_iterdir(path)
+        with patch.object(u, 'ROOT', self.live), patch.object(u.time, 'time', side_effect=lambda: self.now), \
+                patch.object(Path, 'iterdir', processes):
+            self.coordinator.request_pause()
+            self.coordinator.orderly_stop()
+        self.assertEqual(self.store.status()['phase'], 'SWITCHING')
+        self.assertTrue(self.store.status()['fenced'])
+        self.assertGreaterEqual(900 - int(self.now) % 900, 480)
+        self.assertFalse(any('kill' in str(call) for call in self.upgrade.calls))
+
     def started(self, previous=False):
         source = self.previous_source if previous else self.target_source
         image = self.previous_image if previous else self.target_image

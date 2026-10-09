@@ -6,7 +6,7 @@ or broker truth. Uncertain activities and orders are deliberately never reaped.
 """
 from __future__ import annotations
 
-from contextlib import contextmanager
+from contextlib import contextmanager, closing
 from dataclasses import asdict, dataclass, replace
 import hashlib
 import json
@@ -20,6 +20,7 @@ from types import MappingProxyType
 import uuid
 
 PROTOCOL_VERSION = 1
+MAINTENANCE_STATUS_PATH = "/api/v1/maintenance/status"
 REQUIRED_ROLES = ("backend", "gateway", "watchdog-backend", "watchdog-gateway")
 MAX_BUDGET_SECONDS = 1200
 PROOF_MAX_AGE_SECONDS = 30
@@ -421,7 +422,75 @@ class MaintenanceStore:
                 raise MaintenanceError("uncertain order send cannot be finished")
             db.execute("DELETE FROM maintenance_activities WHERE activity_id=?", (activity_id,))
 
-    def admit_verification(self, identity: Identity) -> str:
+    def begin_paused_startup(self, binding: Binding, identity: Identity) -> str:
+        """Admit one new application launch, never an ordinary fenced restart."""
+        child_role = {"watchdog-backend": "backend", "watchdog-gateway": "gateway"}.get(identity.role)
+        if child_role is None:
+            raise AdmissionClosed("only a new watchdog may launch its paused component")
+        activity = uuid.uuid4().hex
+        with self._transaction() as (db, state, now):
+            self._bound(state, binding)
+            self._live(db, identity)
+            old_ids = {item.instance_id for item in binding.instances.values()}
+            if (not state["switched"] or state["rebound"] or state["phase"] not in ("SWITCHING", "HOLD")
+                    or now >= state["deadline"] or identity.instance_id in old_ids):
+                raise AdmissionClosed("paused startup requires an unexpired approved replacement")
+            actors = [Identity.from_dict(json.loads(row["identity"])) for row in
+                      db.execute("SELECT * FROM maintenance_actors WHERE online=1")]
+            if any(actor.instance_id in old_ids or (actor.source, actor.image) != (identity.source, identity.image)
+                   for actor in actors):
+                raise AdmissionClosed("old or mixed-provenance actors cannot launch a replacement")
+            if sum(actor.role == identity.role for actor in actors) != 1 or any(actor.role == child_role for actor in actors):
+                raise AdmissionClosed("an existing or unknown child cannot be replaced")
+            if (identity.source, identity.image) not in {
+                (binding.previous_source, binding.previous_image), (binding.target_source, binding.target_image)
+            }:
+                raise AdmissionClosed("paused startup provenance is not approved")
+            kind = "paused-startup:" + child_role
+            if db.execute("SELECT 1 FROM maintenance_activities WHERE kind=?", (kind,)).fetchone():
+                raise AdmissionClosed("an unresolved paused launch already exists")
+            if db.execute("SELECT 1 FROM maintenance_activities WHERE kind NOT LIKE 'paused-startup:%' AND kind!='startup-verification'").fetchone():
+                raise AdmissionClosed("unresolved business work prevents paused launch")
+            if db.execute("SELECT 1 FROM maintenance_orders WHERE status NOT IN ('ACKNOWLEDGED','REJECTED')").fetchone():
+                raise AdmissionClosed("unresolved order prevents paused launch")
+            db.execute("INSERT INTO maintenance_activities VALUES (?,?,?,?,?)", (
+                activity, _json(identity.as_dict()), kind, None, now))
+        return activity
+
+    def readonly_summary(self, identity: Identity) -> dict:
+        """Read stable DELETE-journal bytes in memory; never create sidecars or expire state."""
+        if any(Path(str(self.path) + suffix).exists() for suffix in ("-wal", "-shm", "-journal")):
+            raise MaintenanceError("maintenance snapshot is busy or unsupported")
+        before = self.path.stat()
+        raw = self.path.read_bytes()
+        after = self.path.stat()
+        if ((before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns) !=
+                (after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns)
+                or raw != self.path.read_bytes() or len(raw) < 100
+                or raw[:16] != b"SQLite format 3\x00" or raw[18:20] != b"\x01\x01"
+                or any(Path(str(self.path) + suffix).exists() for suffix in ("-wal", "-shm", "-journal"))):
+            raise MaintenanceError("maintenance snapshot changed while reading")
+        with closing(sqlite3.connect(":memory:")) as db:
+            db.deserialize(raw)
+            db.execute("PRAGMA query_only=ON")
+            if db.execute("SELECT version FROM maintenance_meta").fetchall() != [(PROTOCOL_VERSION,)]:
+                raise MaintenanceError("unsupported maintenance snapshot")
+            row = db.execute("SELECT phase,binding,deadline FROM maintenance_state WHERE id=1").fetchone()
+            actor = db.execute("SELECT identity,online FROM maintenance_actors WHERE instance_id=?", (identity.instance_id,)).fetchone()
+            if row is None or actor != (_json(identity.as_dict()), 1):
+                raise MaintenanceError("maintenance status instance is not registered")
+            phase, encoded, deadline = row
+            if phase not in ("NORMAL", "DRAINING", "PAUSED", "STOPPING", "SWITCHING", "VERIFYING", "RESUMING", "CANCELLED", "HOLD"):
+                raise MaintenanceError("invalid maintenance snapshot phase")
+            if encoded is not None:
+                Binding.from_dict(json.loads(encoded))
+                if phase != "NORMAL" and self.clock() >= _number(deadline, "snapshot deadline"):
+                    phase = "HOLD"  # Observation only; no durable expiry mutation.
+            elif phase != "HOLD":
+                raise MaintenanceError("unbound maintenance snapshot")
+        return {"protocol": PROTOCOL_VERSION, "phase": phase, "fenced": phase != "NORMAL"}
+
+    def admit_verification(self, identity: Identity, parent_id: str | None = None) -> str:
         """Track controller-approved cold startup DDL/import verification.
 
         This narrowly named scope grants no trading, scheduler, cache, broker or
@@ -444,8 +513,25 @@ class MaintenanceStore:
                 (binding.previous_source, binding.previous_image), (binding.target_source, binding.target_image)
             }:
                 raise MaintenanceError("startup verification provenance is not approved")
+            bound = binding.instances.get(identity.role) == identity
+            if parent_id is not None:
+                parent = db.execute("SELECT * FROM maintenance_activities WHERE activity_id=?", (parent_id,)).fetchone()
+                if parent is None:
+                    raise AdmissionClosed("startup permit is missing or already settled")
+                owner = Identity.from_dict(json.loads(parent["owner"]))
+                own_verification = parent["kind"] == "startup-verification" and owner == identity
+                launch = (parent["kind"] == "paused-startup:" + identity.role
+                          and owner.role == "watchdog-" + identity.role
+                          and (owner.source, owner.image) == (identity.source, identity.image)
+                          and owner.instance_id not in {item.instance_id for item in binding.instances.values()}
+                          and state["switched"] and not state["rebound"])
+                if not (own_verification or launch):
+                    raise AdmissionClosed("startup permit owner/role/provenance mismatch")
+                self._live(db, owner)
+            elif not bound:
+                raise AdmissionClosed("unbound startup requires its approved watchdog permit")
             db.execute("INSERT INTO maintenance_activities VALUES (?,?,?,?,?)", (
-                activity_id, _json(identity.as_dict()), "startup-verification", None, now,
+                activity_id, _json(identity.as_dict()), "startup-verification", parent_id, now,
             ))
             db.execute("DELETE FROM maintenance_acks WHERE role=?", (identity.role,))
         return activity_id

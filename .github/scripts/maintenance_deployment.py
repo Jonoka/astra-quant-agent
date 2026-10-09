@@ -266,6 +266,20 @@ except (OSError,IndexError): print(json.dumps({'exact_start':False,'role_matches
         binding = self.binding()
         self.upgrade.assert_maintenance_ownership()
         self.check_instances(binding)
+        def boundary():
+            # Re-prove the actual binding, drain and DEMO state before each
+            # supervisory mutation and the actual natural shutdown request.
+            try:
+                if not recovery:
+                    self.store.pause(binding, self.proof(binding))
+                else:
+                    self.module.validate_risk_proof(self.proof(binding), binding, self.clock())
+                if not recovery and self.scope['mode'] == 'normal':
+                    self.upgrade.idle_window()
+            except BaseException:
+                self.store.cancel(binding, 'pre-shutdown boundary refused; explicit resume required')
+                raise
+        boundary()
         if recovery:
             self.store.begin_recovery(binding)
         policies = self.upgrade.state.setdefault('maintenance_restart_policies', {})
@@ -285,8 +299,10 @@ except (OSError,IndexError): print(json.dumps({'exact_start':False,'role_matches
                 targets[key] = c['Id']
                 self.upgrade.phase(self.upgrade.state['phase'])
             self.require(targets[key] == c['Id'], 'maintenance_stop_target_drift')
+            boundary()
             self.upgrade.command_maintenance('docker', 'update', '--restart=no', c['Id'])
         if not recovery:
+            boundary()
             self.store.begin_shutdown(binding)
         deadline = self.upgrade.state['maintenance_deadline']
         while self.clock() < deadline:
@@ -311,7 +327,8 @@ except (OSError,IndexError): print(json.dumps({'exact_start':False,'role_matches
         return {'ASTRA_MAINTENANCE_ENABLED': '1',
                 'ASTRA_MAINTENANCE_DB': '/app/' + DATABASE,
                 'ASTRA_SOURCE_COMMIT': self.plan['previous_source'] if previous else self.plan['release_source'],
-                'ASTRA_IMAGE_REF': self.plan['previous_image'] if previous else self.plan['image']}
+                'ASTRA_IMAGE_REF': self.plan['previous_image'] if previous else self.plan['image'],
+                'ASTRA_MAINTENANCE_STARTUP_BINDING': json.dumps(self.binding().as_dict(), sort_keys=True)}
 
     def rebind_started(self, previous=False):
         binding = self.binding()

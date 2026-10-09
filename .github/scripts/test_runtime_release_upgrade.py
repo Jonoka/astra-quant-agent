@@ -10,6 +10,7 @@ from pathlib import Path
 import tempfile
 import unittest
 from unittest.mock import Mock, patch
+from types import SimpleNamespace
 
 SPEC = importlib.util.spec_from_file_location("runtime_upgrade", Path(__file__).with_name("runtime_release_upgrade.py"))
 upgrade = importlib.util.module_from_spec(SPEC)
@@ -44,6 +45,7 @@ class RuntimeUpgradeTests(unittest.TestCase):
         # The real SQLite/ACK/drain contract is exercised in test_deployment.py.
         obj.deployment_plan = Mock(return_value={'schema': 2, 'maintenance': {'mode': 'normal'}})
         coordinator = Mock()
+        coordinator.module = SimpleNamespace(MAINTENANCE_STATUS_PATH='/api/v1/maintenance/status', PROTOCOL_VERSION=1)
         coordinator.startup_environment.return_value = {'ASTRA_MAINTENANCE_ENABLED': '1'}
         obj.maintenance = Mock(return_value=coordinator)
         return obj
@@ -501,7 +503,7 @@ class RuntimeUpgradeTests(unittest.TestCase):
             if path.endswith("/health"):
                 return {"version": "8.6.1", "status": "ok", "credentials": {"okx_configured": True}}
             if path.endswith("/status") and "/admin/" not in path:
-                return {"version": "8.6.1"}
+                return {"version": "8.6.1", "status": "ok", "maintenance": {"protocol": 1}}
             if path.endswith("/auth/status"):
                 return {"initialized": True}
             self.assertEqual(expected, 401)
@@ -527,7 +529,7 @@ class RuntimeUpgradeTests(unittest.TestCase):
                 return {"version": "8.6.1", "status": "ok", "credentials": {}}
             if path.endswith("/auth/status"):
                 return {"initialized": True}
-            return {"version": "8.6.1"}
+            return {"version": "8.6.1", "status": "ok", "maintenance": {"protocol": 1}}
         with patch.object(upgrade, "request", side_effect=response):
             result = obj.endpoints(False)
         self.assertEqual(result["authenticated_session_probe"], "passed")

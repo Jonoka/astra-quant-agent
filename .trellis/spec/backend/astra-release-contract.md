@@ -4,10 +4,24 @@ The deployment fork is `Jonoka/astra-quant-agent`, deploy branch `codex/deploy`.
 Each release builds its actual `github.sha`; upstream `main` remains unchanged.
 PR3's reviewed taker repair extends the exact application path set. Its five
 application files must match SHA-256 blobs from independently reviewed head
-`8b6a4bf1948b6e19e175b881e36eb4d3bf78e504`; missing or changed files are rejected.
+`8b6a4bf1948b6e19e175b881e36eb4d3bf78e504`, except the expressly approved
+`packages.py` alpha advancement below; missing or changed files are rejected.
 Formal release also requires the same offline 411-test taker gate and its five
 self-tests before building, retaining all prior ancestry, migration, deadline,
 Linux lock, Compose and immutable publication gates.
+
+The owner explicitly approved the limited PR5 alpha source-contract update on
+2026-10-09, after independent review of application head
+`ad4b7bd7a771107a60a175b12fe6fd20349150b0`. Only three application paths are
+added to the exact allowlist; `packages.py` was already present. Its taker hash
+is advanced to the reviewed alpha bytes, while the other four taker hashes stay
+unchanged. `ALPHA_PATCH_SHA256` fixes all four alpha files, including the new
+contract test, to those reviewed bytes. Build candidates never derive their own
+approval hashes. Missing files, changed bytes and extra application paths still
+fail closed. The original 411-test gate and five self-tests remain; two additional
+gate self-tests and a separate mandatory 12-test offline alpha run are added to
+shared preflight. This source-contract approval does not authorize merging,
+release-image publication or production deployment.
 The live baseline must be supplied as full `previous_source` and immutable
 `previous_image` workflow inputs, then independently reconciled with actual
 production containers before staging. `90f9f3a` is retained only as an explicit

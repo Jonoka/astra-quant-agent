@@ -17,6 +17,7 @@ import io
 import ipaddress
 import json
 import os
+import operator
 from pathlib import Path
 import socket
 import sqlite3
@@ -66,7 +67,22 @@ def isolated(sandbox):
         return opened
     def os_opened(path, flags, *args, **kwargs):
         mode = 'w' if flags & (os.O_WRONLY | os.O_RDWR | os.O_CREAT | os.O_TRUNC | os.O_APPEND) else 'r'
-        guarded_file(lambda p, m: None)(path, mode)
+        checked_path = Path(os.fsdecode(path))
+        dir_fd = kwargs.get('dir_fd')
+        if dir_fd is not None and not checked_path.is_absolute():
+            fd_number = operator.index(dir_fd)
+            # Linux AT_FDCWD explicitly uses cwd; other relative openat calls
+            # use the descriptor (notably shutil.rmtree's 'data' cleanup).
+            if not (sys.platform.startswith('linux') and fd_number == -100):
+                # Resolve only for validation; forward the original call
+                # unchanged below. Without a usable fd link, fail closed
+                # rather than checking an unrelated path under cwd.
+                try:
+                    directory = (Path('/proc/self/fd') / str(fd_number)).resolve(strict=True)
+                except (OSError, RuntimeError):
+                    raise AssertionError('integration unresolved dir_fd refused') from None
+                checked_path = directory / checked_path
+        guarded_file(lambda p, m: None)(checked_path, mode)
         return real_os_open(path, flags, *args, **kwargs)
     def connect(database, *args, **kwargs):
         raw = str(database)

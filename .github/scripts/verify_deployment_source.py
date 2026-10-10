@@ -51,6 +51,7 @@ APPLICATION_PATCH = {
     'tests/maintenance_integration/test_actual_anyio.py',
     'tests/maintenance_integration/test_actual_helper_listener.py',
     'tests/maintenance_integration/test_endpoint_isolation.py',
+    'tests/maintenance_integration/test_dirfd_isolation.py',
     '.trellis/tasks/10-06-reusable-deployment-contract/prd.md',
     '.trellis/tasks/10-06-reusable-deployment-contract/design.md',
     '.trellis/tasks/10-06-reusable-deployment-contract/task.json',
@@ -173,6 +174,7 @@ ACTUAL_CASE_MINIMUMS = {
     'tests/maintenance_integration/test_actual_anyio.py': 4,
     'tests/maintenance_integration/test_actual_helper_listener.py': 3,
     'tests/maintenance_integration/test_endpoint_isolation.py': 8,
+    'tests/maintenance_integration/test_dirfd_isolation.py': 14,
 }
 
 # Independently reviewed names include all 62 original cycle-deadline regressions.

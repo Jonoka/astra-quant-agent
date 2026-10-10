@@ -21,6 +21,7 @@ SUITES = {
     'test_linux_singleton_lock.py': 7,
     'test_rehearse_cycle_deadline_upgrade.py': 4,
     'test_taker_regression_gate.py': 7,
+    'test_deployment_preflight_gate.py': 9,
 }
 
 
@@ -73,6 +74,8 @@ require_complete_result(result,minimum)
         subprocess.run([sys.executable, str(source / '.github/scripts/run_actual_integration.py')],
                        check=True, env=env, timeout=120, cwd=source)
         subprocess.run([sys.executable, str(source / 'tests/maintenance_integration/test_endpoint_isolation.py')],
+                       check=True, env=env, timeout=60, cwd=source)
+        subprocess.run([sys.executable, str(source / 'tests/maintenance_integration/test_dirfd_isolation.py')],
                        check=True, env=env, timeout=60, cwd=source)
     verify(source, UPSTREAM, revision)
     print('DEPLOYMENT_PREFLIGHT_PASS source=' + revision, flush=True)

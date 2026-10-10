@@ -48,6 +48,8 @@ APPLICATION_PATCH = {
     'tests/maintenance/test_deployment.py',
     'tests/maintenance/test_http_verification.py',
     'tests/maintenance/test_supervisor_startup.py',
+    'tests/maintenance_integration/test_actual_anyio.py',
+    'tests/maintenance_integration/test_actual_helper_listener.py',
     '.trellis/tasks/10-06-reusable-deployment-contract/prd.md',
     '.trellis/tasks/10-06-reusable-deployment-contract/design.md',
     '.trellis/tasks/10-06-reusable-deployment-contract/task.json',
@@ -163,6 +165,12 @@ MAINTENANCE_CASE_MINIMUMS = {
     'tests/maintenance/test_deployment.py': 34,
     'tests/maintenance/test_http_verification.py': 7,
     'tests/maintenance/test_supervisor_startup.py': 21,
+}
+
+# Separate actual local integration; never included in专项 totals.
+ACTUAL_CASE_MINIMUMS = {
+    'tests/maintenance_integration/test_actual_anyio.py': 4,
+    'tests/maintenance_integration/test_actual_helper_listener.py': 3,
 }
 
 # Independently reviewed names include all 62 original cycle-deadline regressions.
@@ -291,7 +299,7 @@ def verify(source: Path, upstream: str, revision: str) -> None:
                 and any(isinstance(t, ast.Name) and t.id == 'PROTOCOL_VERSION' for t in n.targets)
                 and isinstance(n.value, ast.Constant)]
     assert versions == [1], 'Maintenance protocol missing or unreviewed version'
-    for relative, minimum in MAINTENANCE_CASE_MINIMUMS.items():
+    for relative, minimum in {**MAINTENANCE_CASE_MINIMUMS, **ACTUAL_CASE_MINIMUMS}.items():
         tree = ast.parse((source / relative).read_text(encoding='utf-8'))
         cases = {n.name for c in tree.body if isinstance(c, ast.ClassDef)
                  for n in c.body if isinstance(n, ast.FunctionDef) and n.name.startswith('test_')}

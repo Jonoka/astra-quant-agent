@@ -69,7 +69,7 @@ class DeploymentSourceGuardTests(unittest.TestCase):
             source = Path(tmp)
             for relative in (*guard.DEADLINE_REGRESSIONS, *guard.TAKER_PATCH_SHA256,
                              *guard.ALPHA_PATCH_SHA256,
-                             *guard.MAINTENANCE_CASE_MINIMUMS, 'astra_backend/maintenance.py',
+                             *guard.MAINTENANCE_CASE_MINIMUMS, *guard.ACTUAL_CASE_MINIMUMS, 'astra_backend/maintenance.py',
                              'tests/ops/test_brain_dispatch.py'):
                 target = source / relative
                 target.parent.mkdir(parents=True, exist_ok=True)
@@ -240,7 +240,7 @@ class DeploymentSourceGuardTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             source = Path(temporary)
             for relative in (*guard.DEADLINE_REGRESSIONS, *guard.TAKER_PATCH_SHA256,
-                             *guard.ALPHA_PATCH_SHA256, *guard.MAINTENANCE_CASE_MINIMUMS,
+                             *guard.ALPHA_PATCH_SHA256, *guard.MAINTENANCE_CASE_MINIMUMS, *guard.ACTUAL_CASE_MINIMUMS,
                              'astra_backend/maintenance.py', 'tests/ops/test_brain_dispatch.py'):
                 destination = source / relative
                 destination.parent.mkdir(parents=True, exist_ok=True)
@@ -267,6 +267,29 @@ class DeploymentSourceGuardTests(unittest.TestCase):
         self.assertEqual(namespace['ROOT'], root.resolve())
         self.assertEqual(unittest.TestLoader().loadTestsFromTestCase(
             namespace['LinuxSingletonLockTests']).countTestCases(), 7)
+
+    def test_actual_integration_cases_are_retained_and_empty_suite_is_rejected(self):
+        root = Path(__file__).resolve().parents[2]
+        for relative in guard.ACTUAL_CASE_MINIMUMS:
+            with self.assertRaisesRegex(AssertionError, 'Missing retained patch'):
+                self._verify(guard.APPLICATION_PATCH - {relative})
+        with tempfile.TemporaryDirectory() as temporary:
+            source = Path(temporary)
+            for relative in (*guard.DEADLINE_REGRESSIONS, *guard.TAKER_PATCH_SHA256,
+                             *guard.ALPHA_PATCH_SHA256, *guard.MAINTENANCE_CASE_MINIMUMS,
+                             *guard.ACTUAL_CASE_MINIMUMS, 'astra_backend/maintenance.py',
+                             'tests/ops/test_brain_dispatch.py'):
+                destination = source / relative
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(root / relative, destination)
+            self._verify(source=source)
+            for relative in guard.ACTUAL_CASE_MINIMUMS:
+                path = source / relative
+                raw = path.read_bytes()
+                path.write_text('class EmptyActualAcceptance: pass\n')
+                with self.assertRaisesRegex(AssertionError, 'Maintenance regression missing'):
+                    self._verify(source=source)
+                path.write_bytes(raw)
 
     def test_smoke_rejects_missing_patch_labels_and_different_published_image(self):
         import smoke_release_compose as smoke

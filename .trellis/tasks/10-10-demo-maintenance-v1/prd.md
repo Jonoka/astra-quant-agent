@@ -77,3 +77,14 @@ verification retains work and stays fenced. Preserve the two closed repairs and
 all 143+17+2 coverage; add deterministic real controlled-child interleavings,
 quick completion before poll, failures and wrong/replayed/stale proofs. No new
 runtime, dependency, reviewer, network or deployment authorization is granted.
+
+## Authorized actual offline integration
+
+Use existing local dependencies only, with production data/credential/public
+network isolation established before imports. Allow controlled in-process or
+synthetic local loopback listeners, never Docker/WSL/daemon/host mounts or real
+scheduler/broker/LLM/exchange clients. Inventory frameworks and report exact gaps;
+complete runnable AnyIO and helper/listener chains without claiming missing
+FastAPI/Starlette/Uvicorn/auth as passed. Separate actual integration from the
+156+17+2专项 evidence, retain all previous hashes, pin necessary local changes and
+request one same-reviewer read-only review of new differences, no infinite loop.

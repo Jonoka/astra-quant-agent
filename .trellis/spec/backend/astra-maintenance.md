@@ -124,3 +124,22 @@ dotenv/credentials. Missing, failing, skipped and expected-failed required suite
 fail CI. Windows AST/flock/AnyIO mocks are not Linux lock/container evidence.
 All required old regressions remain, plus dedicated maintenance checks. No Actions
 dispatch, Docker build or publication is authorized by local test results.
+
+## Actual local integration evidence
+
+run_actual_integration.py is separate from the strict 156-case专项 runner.
+It rejects credentials/production data, public DNS/network, datagrams, other
+local services and real scheduler/broker/LLM imports/processes. Only ephemeral
+loopback endpoints owned by that test scope (including real loop wakeup socket
+pairs) can connect; synthetic listener ports are released at teardown.
+
+Installed real AnyIO/HTTPX drives tasks, streams, background/abandoned worker
+writes and accounted startup work with production adapters; Windows /proc remains
+unverified and must not get a fabricated Linux ACK. Real urllib loopback requests
+exercise actual Upgrade.verify/resume and the production status ASGI route, but
+Docker/OS/account/ACK/file-owner boundaries and health/auth shell routes are explicit
+synthetic substitutes. No completed fake framework initialization is claimed.
+Seven actual integration cases and their source minima are recorded separately;
+full FastAPI/Starlette/Uvicorn/auth and full physical verification stay blocked
+when dependencies or runtime proofs are missing. A local/hosted partial pass is
+not release, legacy-bootstrap, rollback or schedule-resume authorization.

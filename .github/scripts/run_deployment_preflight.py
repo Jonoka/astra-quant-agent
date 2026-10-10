@@ -13,7 +13,7 @@ from verify_deployment_source import PREVIOUS_SHA, verify
 from stage_release_bundle import extract
 
 SUITES = {
-    'test_verify_deployment_source.py': 15,
+    'test_verify_deployment_source.py': 18,
     'test_runtime_release_upgrade.py': 37,
     'test_deployment_plan.py': 29,
     'test_deployment_identity.py': 20,
@@ -69,6 +69,9 @@ require_complete_result(result,minimum)
                        check=True, env=env, timeout=120, cwd=source)
         subprocess.run([sys.executable, str(source / '.github/scripts/run_maintenance_tests.py'), '--require-linux'],
                        check=True, env=env, timeout=180, cwd=source)
+        # Partial actual local integration only; not complete framework/field acceptance.
+        subprocess.run([sys.executable, str(source / '.github/scripts/run_actual_integration.py')],
+                       check=True, env=env, timeout=120, cwd=source)
     verify(source, UPSTREAM, revision)
     print('DEPLOYMENT_PREFLIGHT_PASS source=' + revision, flush=True)
 

@@ -131,3 +131,14 @@ owns application integration/adapters/watchdog/entrypoint and focused integratio
 tests. Main owns .github scripts/workflows/source guard, deployment contract and
 cross-layer integration fixes. No worker reverts another's edits; interface
 questions go to the local forum and native mailbox before overlapping changes.
+
+## Actual offline integration boundary
+
+A separate runner preserves the old strict专项 runner and permits only ephemeral
+127.0.0.1/::1 sockets created by the test scope (including real event-loop wakeup
+pairs). Public/DNS/UDP/other-local-service connections, subprocesses and real
+dotenv/credentials/data remain denied. No real scheduler/broker/client imports.
+Use genuine installed AnyIO task/worker/stream/background execution and a
+synthetic loopback HTTP transport for real helper verify/resume code, explicitly
+substituting Docker/process/remote/account proofs and auth/health shell routes.
+Missing full framework dependencies remain blocked, not replaced as passing.

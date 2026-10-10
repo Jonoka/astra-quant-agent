@@ -37,3 +37,10 @@ failure, precise proof mismatch/replay/deadline/disconnect and normal finishing.
 Keep original 143+17+2 plus new cases, commit only scoped local source, bind final
 per-suite runs to that new HEAD/tree/raw blob/protection hashes, preserve both
 034d014 and 1a7 evidence, and stop for coordinator-owned independent re-review.
+
+Actual integration: inventory metadata first; create a separate isolated local
+runner and actual AnyIO lifecycle/controlled loopback helper suites. Never start
+framework tests without genuine dependencies or expose production data. Record
+actual vs synthetic boundaries individually, repair only revealed maintenance
+issues, pin changes and keep prior artifacts. Then one same-reviewer read-only
+review of the new diff/evidence, final completion/gap matrix and stop.

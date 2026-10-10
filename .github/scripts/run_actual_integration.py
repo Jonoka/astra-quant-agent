@@ -14,6 +14,7 @@ import importlib.abc
 import importlib.metadata
 import importlib.util
 import io
+import ipaddress
 import json
 import os
 from pathlib import Path
@@ -27,6 +28,7 @@ import threading
 import unittest
 from unittest.mock import patch
 import urllib.request
+import weakref
 from urllib.parse import urlsplit, unquote
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -46,11 +48,10 @@ class DenyClients(importlib.abc.MetaPathFinder):
 @contextmanager
 def isolated(sandbox):
     sandbox = Path(sandbox).resolve()
-    endpoints = set()
+    endpoints = weakref.WeakValueDictionary()
     endpoint_lock = threading.RLock()
     real_open, real_io, real_os_open = builtins.open, io.open, os.open
     real_connect, real_socket, real_getaddrinfo = sqlite3.connect, socket.socket, socket.getaddrinfo
-    real_urlopen = urllib.request.urlopen
     real_ssl_connect, real_ssl_connect_ex = ssl.SSLSocket.connect, ssl.SSLSocket.connect_ex
     def inside(value): return Path(value).resolve().is_relative_to(sandbox)
     def guarded_file(original):
@@ -74,12 +75,36 @@ def isolated(sandbox):
             if os.name == 'nt' and path.startswith('/') and len(path) > 2 and path[2] == ':': path = path[1:]
             if not inside(path): raise AssertionError('integration SQLite outside sandbox')
         return real_connect(database, *args, **kwargs)
-    def loopback(host): return host in ('127.0.0.1', '::1', 'localhost')
-    def destination(address):
+    def literal(host):
+        try:
+            if not isinstance(host, str) or '%' in host: raise ValueError()
+            parsed = ipaddress.ip_address(host)
+            if not parsed.is_loopback or getattr(parsed, 'ipv4_mapped', None): raise ValueError()
+            return socket.AF_INET if parsed.version == 4 else socket.AF_INET6, str(parsed)
+        except ValueError:
+            raise AssertionError('integration nonliteral/nonloopback/ambiguous address refused') from None
+    def endpoint(address, family=None):
+        if not isinstance(address, tuple) or len(address) not in (2, 4):
+            raise AssertionError('integration invalid endpoint refused')
+        inferred, host = literal(address[0])
+        port = address[1]
+        if (family not in (None, inferred) or type(port) is not int or not 0 <= port <= 65535
+                or (len(address) == 4 and (inferred != socket.AF_INET6 or address[2:] != (0, 0)))):
+            raise AssertionError('integration endpoint family/port/scope refused')
+        return inferred, host, port
+    def sockaddr(key):
+        return (key[1], key[2]) if key[0] == socket.AF_INET else (key[1], key[2], 0, 0)
+    def destination(address, family=None):
+        key = endpoint(address, family)
         with endpoint_lock:
-            if (not isinstance(address, tuple) or len(address) < 2 or not loopback(address[0])
-                    or not any(port == address[1] for _, port in endpoints)):
+            owner = endpoints.get(key)
+            if owner is None or owner.fileno() < 0:
                 raise AssertionError('integration public/other-local-service socket refused')
+            return key, owner
+    def peer_matches(owner, key):
+        if endpoint(owner.getpeername(), owner.family) != key:
+            owner.close()
+            raise AssertionError('integration connected peer differs from owned endpoint')
     class LocalSocket(real_socket):
         def __init__(self, family=socket.AF_INET, type=socket.SOCK_STREAM, proto=0, fileno=None):
             if family not in (socket.AF_INET, socket.AF_INET6, getattr(socket, 'AF_UNIX', -1)) or type & 0xF != socket.SOCK_STREAM:
@@ -87,35 +112,67 @@ def isolated(sandbox):
             self._owned_endpoint = None
             super().__init__(family, type, proto, fileno)
         def bind(self, address):
-            if not isinstance(address, tuple) or not loopback(address[0]) or address[1] != 0:
+            key = endpoint(address, self.family)
+            if key[2] != 0:
                 raise AssertionError('integration bind must be synthetic ephemeral loopback')
-            result = super().bind(address)
+            result = super().bind(sockaddr(key))
             actual = self.getsockname()
-            self._owned_endpoint = (actual[0], actual[1])
-            with endpoint_lock: endpoints.add(self._owned_endpoint)
+            self._owned_endpoint = endpoint(actual, self.family)
+            with endpoint_lock: endpoints[self._owned_endpoint] = self
             return result
-        def connect(self, address): destination(address); return super().connect(address)
-        def connect_ex(self, address): destination(address); return super().connect_ex(address)
+        def connect(self, address):
+            with endpoint_lock:
+                key, bound_owner = destination(address, self.family)
+                result = super().connect(sockaddr(key))
+                peer_matches(self, key)
+                return result
+        def connect_ex(self, address):
+            with endpoint_lock:
+                key, bound_owner = destination(address, self.family)
+                result = super().connect_ex(sockaddr(key))
+                if result == 0: peer_matches(self, key)
+                return result
         def sendto(self, *args, **kwargs): raise AssertionError('integration datagram send refused')
         def close(self):
             with endpoint_lock:
-                if self._owned_endpoint is not None: endpoints.discard(self._owned_endpoint)
+                if self._owned_endpoint is not None: endpoints.pop(self._owned_endpoint, None)
             return super().close()
-    def getaddrinfo(host, *args, **kwargs):
-        if not loopback(host): raise AssertionError('integration external DNS refused')
-        return real_getaddrinfo(host, *args, **kwargs)
+    def getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):
+        key, bound_owner = destination((host, port), family or None)
+        if type not in (0, socket.SOCK_STREAM) or proto not in (0, socket.IPPROTO_TCP):
+            raise AssertionError('integration nonstream resolution refused')
+        results = real_getaddrinfo(key[1], port, family, socket.SOCK_STREAM, socket.IPPROTO_TCP,
+                                   flags | socket.AI_NUMERICHOST | socket.AI_NUMERICSERV)
+        if not results: raise AssertionError('integration empty numeric resolution refused')
+        for af, kind, protocol, _, address in results:
+            actual, owner = destination(address, af)
+            if actual != key or kind != socket.SOCK_STREAM or protocol not in (0, socket.IPPROTO_TCP):
+                raise AssertionError('integration resolver endpoint mismatch')
+        return results
     def gethostbyname(host):
-        if not loopback(host): raise AssertionError('integration external DNS refused')
-        return '127.0.0.1' if host == 'localhost' else host
+        family, host = literal(host)
+        if family != socket.AF_INET: raise AssertionError('integration IPv4 metadata family refused')
+        return host
     def gethostbyaddr(host):
-        if not loopback(host): raise AssertionError('integration external reverse DNS refused')
+        _, host = literal(host)
         return ('localhost', [], [host])
+    def http_destination(url):
+        target = urlsplit(url)
+        if target.scheme != 'http' or target.username is not None or target.password is not None:
+            raise AssertionError('integration external/file/TLS/auth URL refused')
+        return destination((target.hostname, target.port or 80))
+    class GuardedRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, req, fp, code, msg, headers, newurl):
+            http_destination(newurl)
+            return super().redirect_request(req, fp, code, msg, headers, newurl)
     def urlopen(request, *args, **kwargs):
         url = request.full_url if hasattr(request, 'full_url') else str(request)
-        target = urlsplit(url)
-        if target.scheme != 'http': raise AssertionError('integration external/file/TLS URL refused')
-        destination((target.hostname, target.port or 80))
-        return real_urlopen(request, *args, **kwargs)
+        http_destination(url)
+        if kwargs.pop('context', None) is not None:
+            raise AssertionError('integration TLS context refused')
+        # Never discover registry/system/environment proxies or a global opener.
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), GuardedRedirect())
+        return opener.open(request, *args, **kwargs)
     def refused(*args, **kwargs): raise AssertionError('integration subprocess/public action refused')
     safe = {'PATH', 'SYSTEMROOT', 'SystemRoot', 'WINDIR', 'windir', 'COMSPEC', 'TEMP', 'TMP', 'LANG', 'LC_ALL', 'PYTHONUTF8'}
     environment = {k: v for k, v in os.environ.items() if k in safe}
@@ -136,8 +193,18 @@ def isolated(sandbox):
         stack.enter_context(patch.object(socket, 'gethostbyname', gethostbyname))
         stack.enter_context(patch.object(socket, 'gethostbyname_ex', lambda host: ('localhost', [], [gethostbyname(host)])))
         stack.enter_context(patch.object(socket, 'gethostbyaddr', gethostbyaddr))
-        def ssl_connect(owner, address): destination(address); return real_ssl_connect(owner, address)
-        def ssl_connect_ex(owner, address): destination(address); return real_ssl_connect_ex(owner, address)
+        def ssl_connect(owner, address):
+            with endpoint_lock:
+                key, bound_owner = destination(address, owner.family)
+                result = real_ssl_connect(owner, sockaddr(key))
+                peer_matches(owner, key)
+                return result
+        def ssl_connect_ex(owner, address):
+            with endpoint_lock:
+                key, bound_owner = destination(address, owner.family)
+                result = real_ssl_connect_ex(owner, sockaddr(key))
+                if result == 0: peer_matches(owner, key)
+                return result
         stack.enter_context(patch.object(ssl.SSLSocket, 'connect', ssl_connect))
         stack.enter_context(patch.object(ssl.SSLSocket, 'connect_ex', ssl_connect_ex))
         stack.enter_context(patch.object(urllib.request, 'urlopen', urlopen))

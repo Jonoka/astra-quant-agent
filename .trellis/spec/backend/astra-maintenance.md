@@ -133,6 +133,14 @@ local services and real scheduler/broker/LLM imports/processes. Only ephemeral
 loopback endpoints owned by that test scope (including real loop wakeup socket
 pairs) can connect; synthetic listener ports are released at teardown.
 
+Endpoint ownership is the canonical literal loopback address, exact port and AF,
+not just the port. Reject localhost, scoped/mapped aliases and wrong AF; validate
+numeric resolver results and completed peers against that same endpoint. Keep
+the owning socket alive and serialize connect with close/unregistration. HTTP
+uses a proxy-free private opener and checks redirects before transport. Eight
+guard-only regressions use an independent transport tripwire even against the
+old broken guard; they are not eight additional real application integrations.
+
 Installed real AnyIO/HTTPX drives tasks, streams, background/abandoned worker
 writes and accounted startup work with production adapters; Windows /proc remains
 unverified and must not get a fabricated Linux ACK. Real urllib loopback requests

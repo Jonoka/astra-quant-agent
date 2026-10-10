@@ -72,6 +72,8 @@ require_complete_result(result,minimum)
         # Partial actual local integration only; not complete framework/field acceptance.
         subprocess.run([sys.executable, str(source / '.github/scripts/run_actual_integration.py')],
                        check=True, env=env, timeout=120, cwd=source)
+        subprocess.run([sys.executable, str(source / 'tests/maintenance_integration/test_endpoint_isolation.py')],
+                       check=True, env=env, timeout=60, cwd=source)
     verify(source, UPSTREAM, revision)
     print('DEPLOYMENT_PREFLIGHT_PASS source=' + revision, flush=True)
 

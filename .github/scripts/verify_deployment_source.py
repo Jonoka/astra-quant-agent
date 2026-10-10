@@ -50,6 +50,7 @@ APPLICATION_PATCH = {
     'tests/maintenance/test_supervisor_startup.py',
     'tests/maintenance_integration/test_actual_anyio.py',
     'tests/maintenance_integration/test_actual_helper_listener.py',
+    'tests/maintenance_integration/test_endpoint_isolation.py',
     '.trellis/tasks/10-06-reusable-deployment-contract/prd.md',
     '.trellis/tasks/10-06-reusable-deployment-contract/design.md',
     '.trellis/tasks/10-06-reusable-deployment-contract/task.json',
@@ -167,10 +168,11 @@ MAINTENANCE_CASE_MINIMUMS = {
     'tests/maintenance/test_supervisor_startup.py': 21,
 }
 
-# Separate actual local integration; never included in专项 totals.
+# Separate actual local integration and guard-only cases, never merged as all-real acceptance.
 ACTUAL_CASE_MINIMUMS = {
     'tests/maintenance_integration/test_actual_anyio.py': 4,
     'tests/maintenance_integration/test_actual_helper_listener.py': 3,
+    'tests/maintenance_integration/test_endpoint_isolation.py': 8,
 }
 
 # Independently reviewed names include all 62 original cycle-deadline regressions.

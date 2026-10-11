@@ -810,7 +810,11 @@ class Upgrade:
                 require(phase in candidate_phases, 'deployment_candidate_phase')
                 label = 'release'
             else:
-                require(phase in previous_phases, 'deployment_previous_phase')
+                # The pause/shutdown ownership check runs before 'stopping'.
+                # Prepared may attest the old deployment, never rename/restore it.
+                require(phase in previous_phases or
+                        (phase == 'prepared' and not renaming and restore is None),
+                        'deployment_previous_phase')
                 label = 'previous'
             require(deployment_source(ROOT, extras) == sources[label], 'foreign_deployment_source')
         else:

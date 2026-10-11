@@ -1,6 +1,7 @@
 """Controller acceptance: actual protocol/SQLite, fake Docker/broker/clock only."""
 from dataclasses import replace
-from contextlib import closing
+from contextlib import closing, contextmanager
+import copy
 import hashlib
 import importlib.util
 import json
@@ -454,6 +455,221 @@ class DeploymentTests(unittest.TestCase):
         self.assertTrue(self.store.status()['fenced'])
         self.assertGreaterEqual(900 - int(self.now) % 900, 480)
         self.assertFalse(any('kill' in str(call) for call in self.upgrade.calls))
+
+    @contextmanager
+    def prepared_ownership_fixture(self, mode='maintenance'):
+        """Real Upgrade ownership/source/image checks and coordinator/SQLite.
+
+        Only Docker/process inventory, broker evidence, the clock and host /proc
+        are synthetic. FakeUpgrade supplies those I/O responses only; its
+        ownership method is deliberately not used by this coordinator.
+        """
+        self.now = 300.0
+        self.plan['maintenance']['mode'] = mode
+        self.plan['runtime'] = {'schedule_seconds': 900, 'minimum_idle_window_seconds': 480}
+        for name, raw in [('source-marker', b'previous fixture'),
+                          ('astra_backend/maintenance.py', (ROOT / 'astra_backend/maintenance.py').read_bytes()),
+                          ('scripts/nested/producer.py', b'# synthetic deployment source\n')]:
+            path = self.live / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(raw)
+        (self.op / 'source-release/source-marker').write_bytes(b'release fixture')
+        (self.op / 'Dockerfile.release').write_bytes(b'FROM synthetic-only\n')
+        pool = self.live / 'data/instrument_pool.json'
+        pool.write_bytes(b'{"synthetic": []}\n')
+        info = pool.stat()
+        self.plan['pool'] = {'relative_path': 'data/instrument_pool.json',
+            'uid': info.st_uid, 'gid': info.st_gid, 'mode': info.st_mode & 0o7777,
+            'size': info.st_size, 'sha256': u.digest(pool)}
+        self.plan['protected_config'] = {}
+        with closing(sqlite3.connect(self.live / u.GATEWAY_DATABASE)) as db:
+            db.execute('CREATE TABLE job_runs(status TEXT)')
+            db.commit()
+        image_ids = {self.previous_image: 'sha256:' + 'c' * 64,
+                     self.target_image: 'sha256:' + 'd' * 64}
+        self.ownership_inventory = {name: {'id': self.upgrade.ids[name], 'project': u.PROJECT,
+            'service': name.removeprefix('astraquant-'), 'ref': self.previous_image,
+            'image': image_ids[self.previous_image], 'state': 'running'} for name in u.NAMES}
+        value = u.Upgrade.__new__(u.Upgrade)
+        value.op, value.previous, value.release = self.op, self.previous_source, self.target_source
+        value.previous_image, value.image = self.previous_image, self.target_image
+        value.deployment_plan_sha256 = self.upgrade.deployment_plan_sha256
+        value.deployment_plan = lambda: self.plan
+        value.state = {'phase': 'prepared', 'extras': [],
+            'baseline': copy.deepcopy(self.ownership_inventory),
+            'deployment_sources': {'previous': u.deployment_source(self.live),
+                                   'release': u.deployment_source(self.op / 'source-release')}}
+        value.input_command_maintenance = self.upgrade.input_command_maintenance
+        command = self.upgrade.command_maintenance
+        def docker(*args):
+            raw = command(*args)
+            if args[:3] == ('docker', 'image', 'inspect'):
+                metadata = json.loads(raw)[0]
+                metadata.update(Id=image_ids[args[3]], Os='linux', Architecture='amd64')
+                metadata['Config']['Labels'].update({
+                    'org.opencontainers.image.version': 'v8.6.1',
+                    'org.opencontainers.image.source': 'https://github.com/Jonoka/astra-quant-agent',
+                    'io.jonoka.astra.upstream-revision': u.UPSTREAM,
+                    'io.jonoka.astra.council-completion-patch': u.PATCH_ID,
+                    'io.jonoka.astra.okx-public-domains-patch': u.OKX_PATCH_ID,
+                    'io.jonoka.astra.cycle-deadline-patch': u.DEADLINE_PATCH_ID,
+                    'io.jonoka.astra.build-recipe-sha256': u.digest(self.op / 'Dockerfile.release')})
+                return json.dumps([metadata]).encode()
+            return raw
+        activity = self.store.admit(self.identities['backend'], 'synthetic-preexisting-work')
+        pending = [activity]
+        def drain_and_exit(seconds):
+            if pending:
+                self.store.finish(pending.pop(), self.identities['backend'])
+            self.sleep(seconds)
+            for c in self.ownership_inventory.values():
+                c['state'] = 'running' if self.upgrade.running else 'exited'
+        original_iterdir = Path.iterdir
+        def processes(path):
+            return iter(()) if path == Path('/proc') else original_iterdir(path)
+        with patch.object(u, 'ROOT', self.live), \
+                patch.object(u, 'containers', side_effect=lambda: copy.deepcopy(self.ownership_inventory)), \
+                patch.object(u, 'run', side_effect=docker), \
+                patch.object(u.time, 'time', side_effect=lambda: self.now), \
+                patch.object(Path, 'iterdir', processes):
+            self.coordinator = d.MaintenanceCoordinator(value, m, clock=lambda: self.now, sleep=drain_and_exit)
+            yield value
+
+    def assert_prepared_natural_stop(self, mode):
+        with self.prepared_ownership_fixture(mode) as value:
+            self.upgrade.finish_on_sleep = True
+            self.assertEqual(len(self.store.status()['activities']), 1)
+            self.coordinator.request_pause()
+            self.assertEqual(self.store.status()['phase'], 'PAUSED')
+            self.assertEqual(value.state['phase'], 'prepared')
+            self.coordinator.orderly_stop()
+            status = self.store.status()
+            self.assertEqual(status['phase'], 'SWITCHING')
+            self.assertTrue(status['shutdown_requested'])
+            self.assertFalse(status['activities'])
+            self.assertEqual({row['role'] for row in status['acks']}, set(d.ROLES))
+            self.assertEqual(self.coordinator.ended, {i.instance_id for i in self.identities.values()})
+            self.assertEqual(value.state['phase'], 'prepared')
+            self.assertEqual(value.read('state.json'), value.state)
+            self.assertEqual(u.deployment_source(self.live), value.state['deployment_sources']['previous'])
+            self.assertEqual({c['state'] for c in self.ownership_inventory.values()}, {'exited'})
+            self.assertEqual(sum(c[:2] == ('docker', 'update') for c in self.upgrade.calls), 2)
+            self.assertFalse(any(c[:2] in [('docker', 'stop'), ('docker', 'kill')]
+                                 for c in self.upgrade.calls))
+            self.assertTrue(status['fenced'])
+            self.assertFalse(any(actor['online'] for actor in status['actors']))
+            with self.assertRaisesRegex(m.MaintenanceError, 'unregistered or disconnected'):
+                self.store.admit(self.identities['backend'], 'late-order')
+
+    def test_prepared_real_ownership_normal_drain_reaches_natural_stop(self):
+        self.assert_prepared_natural_stop('normal')
+
+    def test_prepared_real_ownership_maintenance_drain_reaches_natural_stop(self):
+        self.assert_prepared_natural_stop('maintenance')
+
+    def refused_prepared_stop(self, value, gate):
+        before = self.store.status()
+        with self.assertRaisesRegex(u.GateError, gate):
+            self.coordinator.orderly_stop()
+        self.assertEqual(self.store.status(), before)
+        self.assertFalse(before['shutdown_requested'])
+        self.assertTrue(self.upgrade.running)
+        self.assertNotIn('maintenance_restart_policies', value.state)
+        self.assertFalse(any(c[:2] in [('docker', 'update'), ('docker', 'stop'), ('docker', 'kill')]
+                             for c in self.upgrade.calls))
+        self.no_open()
+
+    def test_prepared_foreign_source_refused_before_shutdown(self):
+        with self.prepared_ownership_fixture() as value:
+            self.coordinator.request_pause()
+            # Real nested source hashing, not a marker-only identity substitute.
+            path = self.live / 'scripts/nested/producer.py'
+            path.write_bytes(b'# later deployment source\n')
+            self.refused_prepared_stop(value, 'foreign_deployment_source')
+
+    def test_prepared_foreign_image_ref_or_immutable_id_refused_before_shutdown(self):
+        with self.prepared_ownership_fixture() as value:
+            self.coordinator.request_pause()
+            current = self.ownership_inventory[u.NAMES[0]]
+            for field, foreign in [('ref', 'ghcr.io/jonoka/astra-quant-agent@sha256:' + 'f' * 64),
+                                   ('image', 'sha256:' + 'f' * 64)]:
+                old = current[field]
+                try:
+                    with self.subTest(field=field):
+                        current[field] = foreign
+                        self.refused_prepared_stop(value, 'foreign_deployment_image')
+                finally:
+                    current[field] = old
+
+    def test_prepared_replaced_container_id_refused_before_shutdown(self):
+        with self.prepared_ownership_fixture() as value:
+            self.coordinator.request_pause()
+            for name, current in self.ownership_inventory.items():
+                old = current['id']
+                try:
+                    with self.subTest(name=name):
+                        current['id'] = 'external-replacement'
+                        self.refused_prepared_stop(value, 'foreign_deployment_container')
+                finally:
+                    current['id'] = old
+
+    def test_prepared_wrong_project_or_service_refused_before_shutdown(self):
+        with self.prepared_ownership_fixture() as value:
+            self.coordinator.request_pause()
+            current = self.ownership_inventory[u.NAMES[0]]
+            for field in ('project', 'service'):
+                old = current[field]
+                try:
+                    with self.subTest(field=field):
+                        current[field] = 'foreign'
+                        self.refused_prepared_stop(value, 'deployment_container_scope')
+                finally:
+                    current[field] = old
+            self.ownership_inventory['extra-project-service'] = dict(current)
+            self.refused_prepared_stop(value, 'deployment_container_scope')
+
+    def test_unrelated_previous_phase_still_refused_before_shutdown(self):
+        with self.prepared_ownership_fixture() as value:
+            self.coordinator.request_pause()
+            for phase in ('root-moved', 'accepted', 'recovery-ready', 'unknown'):
+                with self.subTest(phase=phase):
+                    value.state['phase'] = phase
+                    self.refused_prepared_stop(value, 'deployment_previous_phase')
+
+    def test_prepared_cannot_claim_candidate_recovery_or_missing_root(self):
+        with self.prepared_ownership_fixture() as value:
+            self.coordinator.request_pause()
+            original = self.op / 'original-deployment'
+            failed = self.op / 'failed-candidate'
+            original.mkdir()
+            self.refused_prepared_stop(value, 'deployment_candidate_phase')
+            failed.mkdir()
+            self.refused_prepared_stop(value, 'deployment_recovery_phase')
+            self.live.rename(self.op / 'synthetic-retained')
+            # The store uses the retained fixture for this missing-root probe.
+            self.coordinator.store = m.MaintenanceStore(self.op / 'synthetic-retained' / d.DATABASE,
+                                                       clock=lambda: self.now)
+            with self.assertRaisesRegex(u.GateError, 'deployment_missing_root_phase'):
+                value.deployment_guard()
+            self.assertFalse(self.coordinator.store.status()['shutdown_requested'])
+            self.assertFalse(any(c[:2] == ('docker', 'update') for c in self.upgrade.calls))
+
+    def test_prepared_disallows_rename_and_restore_even_when_containers_exited(self):
+        with self.prepared_ownership_fixture() as value:
+            self.coordinator.request_pause()
+            for current in self.ownership_inventory.values():
+                current['state'] = 'exited'
+            for options in ({'renaming': True}, {'restore': self.op / 'candidate'},
+                            {'renaming': True, 'restore': self.op / 'original-deployment'}):
+                with self.subTest(options=options):
+                    with self.assertRaisesRegex(u.GateError, 'deployment_previous_phase'):
+                        value.deployment_guard(**options)
+            with self.assertRaisesRegex(u.GateError, 'deployment_previous_phase'):
+                value.move(self.live, self.op / 'original-deployment')
+            self.assertTrue(self.live.exists())
+            self.assertFalse((self.op / 'original-deployment').exists())
+            self.assertFalse(self.store.status()['shutdown_requested'])
+            self.assertFalse(any(c[:2] == ('docker', 'update') for c in self.upgrade.calls))
 
     def started(self, previous=False):
         source = self.previous_source if previous else self.target_source

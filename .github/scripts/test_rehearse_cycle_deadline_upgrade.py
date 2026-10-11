@@ -28,7 +28,41 @@ class CycleStateRehearsalTests(unittest.TestCase):
         result = rehearsal.rehearse(SOURCE, PREVIOUS)
         self.assertTrue(all(value == 'passed' for value in result['portable_checks'].values()))
         self.assertEqual(result['external_commands'], 'disabled')
+        self.assertEqual(result['rollback_phase'], 'rolled-back-paused')
+        self.assertEqual(result['maintenance_protocol'], 'synthetic_adapter_only')
         self.assertEqual(len(result['pending']), 2)
+
+    @unittest.skipUnless((PREVIOUS / 'astra_gateway/store.py').is_file(), 'verified previous archive not supplied')
+    def test_legacy_schema_cannot_enter_portable_rollback(self):
+        load = rehearsal.load_module
+        def inject(path, name):
+            module = load(path, name)
+            if name == 'deadline_runtime_rehearsal':
+                rollback = module.Upgrade.rollback
+                def legacy_plan(obj):
+                    obj.deployment_plan.return_value['schema'] = 1
+                    rollback(obj)
+                module.Upgrade.rollback = legacy_plan
+            return module
+        with patch.object(rehearsal, 'load_module', inject):
+            with self.assertRaisesRegex(RuntimeError, 'legacy_rollback_requires_new_protocol_plan'):
+                rehearsal.rehearse(SOURCE, PREVIOUS)
+
+    @unittest.skipUnless((PREVIOUS / 'astra_gateway/store.py').is_file(), 'verified previous archive not supplied')
+    def test_automatic_resume_cannot_pass_portable_rehearsal(self):
+        load = rehearsal.load_module
+        def inject(path, name):
+            module = load(path, name)
+            if name == 'deadline_runtime_rehearsal':
+                rollback = module.Upgrade.rollback
+                def automatic_resume(obj):
+                    rollback(obj)
+                    obj.maintenance().explicit_resume()
+                module.Upgrade.rollback = automatic_resume
+            return module
+        with patch.object(rehearsal, 'load_module', inject):
+            with self.assertRaisesRegex(AssertionError, 'explicit_resume'):
+                rehearsal.rehearse(SOURCE, PREVIOUS)
 
     @unittest.skipUnless((PREVIOUS / 'astra_gateway/store.py').is_file(), 'verified previous archive not supplied')
     def test_source_drift_after_probes_and_freeze_is_still_rejected(self):

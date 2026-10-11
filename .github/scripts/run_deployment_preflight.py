@@ -19,7 +19,7 @@ SUITES = {
     'test_deployment_identity.py': 20,
     'test_recovery_journal.py': 20,
     'test_linux_singleton_lock.py': 7,
-    'test_rehearse_cycle_deadline_upgrade.py': 4,
+    'test_rehearse_cycle_deadline_upgrade.py': 6,
     'test_taker_regression_gate.py': 7,
     'test_deployment_preflight_gate.py': 9,
 }

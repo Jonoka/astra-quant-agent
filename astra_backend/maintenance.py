@@ -620,6 +620,54 @@ class MaintenanceStore:
                 raise MaintenanceError("owner still has admitted work")
             db.execute("INSERT OR REPLACE INTO maintenance_acks VALUES (?,?,?,?)", (identity.role, _json(binding.as_dict()), _json(identity.as_dict()), now))
 
+    def reconcile_acknowledgement(self, binding: Binding, identity: Identity,
+                                  quiescent: Callable[[], bool]) -> bool:
+        """Refresh or revoke a Runtime ACK under the barrier's write lock.
+
+        The local probe must not access this store or perform external actions.
+        Run it only after BEGIN IMMEDIATE, so a failed observation cannot race
+        a pause between observation and revocation. Probe exceptions revoke the
+        previous proof durably before being re-raised. A barrier that committed
+        first is fenced back to HOLD when its matching proof is invalidated.
+        An explicit resume that committed first supersedes the fenced poll;
+        NORMAL permits producers again and must not be re-fenced by that poll.
+
+        This orders *observations*, not arbitrary unguarded producer births.
+        Producers bypassing admission can still appear after a successful probe;
+        their absence between polls is not established by an ACK or its age.
+        """
+        error = None
+        acknowledged = False
+        with self._transaction() as (db, state, now):
+            self._bound(state, binding)
+            self._live(db, identity)
+            if binding.instances.get(identity.role) != identity:
+                raise MaintenanceError("ACK must bind a current instance")
+            if state["phase"] == "NORMAL":
+                return False
+            encoded_binding, owner = _json(binding.as_dict()), _json(identity.as_dict())
+            try:
+                quiet = quiescent() is True
+            except BaseException as exc:
+                quiet, error = False, exc
+            active = db.execute("SELECT 1 FROM maintenance_activities WHERE owner=?", (owner,)).fetchone()
+            if not quiet or active:
+                previous = db.execute(
+                    "SELECT 1 FROM maintenance_acks WHERE role=? AND binding=? AND identity=?",
+                    (identity.role, encoded_binding, owner)).fetchone()
+                db.execute("DELETE FROM maintenance_acks WHERE role=? AND binding=? AND identity=?",
+                           (identity.role, encoded_binding, owner))
+                if previous and state["phase"] in ("PAUSED", "STOPPING", "SWITCHING", "VERIFYING", "RESUMING"):
+                    db.execute("UPDATE maintenance_state SET phase='HOLD',reason=? WHERE id=1",
+                               ("component quiescence proof invalidated: " + identity.role,))
+            else:
+                db.execute("INSERT OR REPLACE INTO maintenance_acks VALUES (?,?,?,?)",
+                           (identity.role, encoded_binding, owner, now))
+                acknowledged = True
+        if error is not None:
+            raise error
+        return acknowledged
+
     def pause(self, binding: Binding, proof: RiskProof) -> None:
         with self._transaction() as (db, state, now):
             self._bound(state, binding)

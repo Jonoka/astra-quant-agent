@@ -4,7 +4,7 @@ HTTP server is synthetic, health/auth shell routes use fixture data, Docker/OS/
 account/role-ACK/file-ownership guards are explicit substitutes. No complete
 FastAPI/auth/Uvicorn or physical deployment acceptance is claimed.
 """
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler, HTTPServer
 import gc
 import json
 from pathlib import Path
@@ -126,9 +126,14 @@ class ActualHelperListenerTests(unittest.TestCase):
                 body=b''.join(message.get('body',b'') for message in messages if message['type']=='http.response.body')
                 self.send_response(start['status']); self.send_header('Content-Type','application/json')
                 self.send_header('Content-Length',str(len(body)));self.end_headers();self.wfile.write(body)
-        self.server=ThreadingHTTPServer(('127.0.0.1',0),Handler)
+        # Helper requests are sequential. Use one explicitly controlled listener
+        # instead of introducing unregistered per-request threads whose presence
+        # must invalidate the production Runtime's existing quiescence proof.
+        self.server=HTTPServer(('127.0.0.1',0),Handler)
         self.thread=threading.Thread(target=self.server.serve_forever,kwargs={'poll_interval':.01},daemon=True)
+        self.runtime.register_threads([self.thread])
         self.thread.start();self.addCleanup(self.close_server)
+        self.assertEqual(self.runtime.unknown_threads(),[])
         self.local='http://127.0.0.1:'+str(self.server.server_port)
         self.original_urlopen=urllib.request.urlopen
         self.operator=u.Upgrade.__new__(u.Upgrade)

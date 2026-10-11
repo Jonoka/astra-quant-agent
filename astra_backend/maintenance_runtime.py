@@ -245,18 +245,20 @@ class Runtime:
             raise AdmissionClosed("persisted maintenance database was removed")
         status = self.store.status()
         limbo_lock = getattr(threading, "_active_limbo_lock", None)
-        if status["fenced"] and status.get("binding") and limbo_lock is not None:
-            # Linearize thread creation and QQ spawn completion against ACK.
-            # Existing HTTP/source activities remain present while Thread.start
-            # is waiting for limbo; a finished source cannot hide its live thread.
-            with self._producer_lock, limbo_lock:
-                if self.unknown_threads():
-                    return True
-                evidence = unsupported_producers()
-                if not evidence["verified"] or any(evidence["counts"].values()):
-                    return True
+        if status["fenced"] and status.get("binding"):
+            # Hold local creation boundaries through observation and ACK commit,
+            # but take the observation only inside the SQLite barrier transaction.
+            # This revokes an earlier ACK on failed/unknown evidence, including a
+            # missing limbo lock. It does not fence arbitrary births between polls.
+            with self._producer_lock, (limbo_lock if limbo_lock is not None else nullcontext()):
+                def quiescent():
+                    if limbo_lock is None or self.unknown_threads():
+                        return False
+                    evidence = unsupported_producers()
+                    return evidence["verified"] is True and not any(evidence["counts"].values())
                 try:
-                    self.store.acknowledge(Binding.from_dict(status["binding"]), self.identity)
+                    self.store.reconcile_acknowledgement(
+                        Binding.from_dict(status["binding"]), self.identity, quiescent)
                 except AdmissionClosed:
                     pass
                 except ValueError:

@@ -1,4 +1,5 @@
 """Offline real SQLite/runtime tests; all processes and brokers are fakes."""
+from contextlib import contextmanager
 from dataclasses import replace
 import importlib.util
 from pathlib import Path
@@ -559,6 +560,281 @@ class RuntimeTests(unittest.TestCase):
                 {"type": "http", "path": "/api/v1/health", "method": "GET"}, None, None))
         self.assertIn(workers[0], self.runtime._controlled_threads)
         self.assertEqual(self.store.status()["activities"], [])
+
+
+class AckReconciliationTests(unittest.TestCase):
+    """Fresh ACK invalidation, including deterministically ordered barriers.
+
+    Only the stdlib maintenance core, temporary SQLite and test-owned threads
+    run here. Process identity and risk/source pins are synthetic fixtures.
+    """
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix="astra-ack-offline-")
+        self.addCleanup(self.temp.cleanup)
+        self.store = m.MaintenanceStore(Path(self.temp.name) / "maintenance.sqlite", lambda: 1000.0)
+        self.identities = {role: m.Identity(role, role + ":ack", "a" * 40,
+                                          "ghcr.io/example/astra@sha256:" + "a" * 64)
+                           for role in m.REQUIRED_ROLES}
+        for identity in self.identities.values():
+            self.store.startup(identity)
+        self.binding = m.Binding("ack-reconciliation", "b" * 64, "a" * 40,
+                                 "ghcr.io/example/astra@sha256:" + "a" * 64,
+                                 "c" * 40, "ghcr.io/example/astra@sha256:" + "c" * 64,
+                                 1, self.identities)
+        self.store.request(self.binding, 1100.0, self.proof())
+        self.runtime = r.Runtime(self.store, self.identities["gateway"])
+        for identity in self.identities.values():
+            self.store.acknowledge(self.binding, identity)
+
+    def proof(self, binding=None):
+        binding = binding or self.binding
+        return m.RiskProof(binding.operation_id, binding.generation, binding.plan_sha256,
+                           "a" * 40, "ghcr.io/example/astra@sha256:" + "a" * 64,
+                           1000.0, "DEMO", True, 0, 0, 0, 0, 0, 0)
+
+    def roles(self):
+        return {row["role"] for row in self.store.status()["acks"]}
+
+    def assert_revoked(self, phase="DRAINING"):
+        self.assertEqual(self.roles(), set(m.REQUIRED_ROLES) - {"gateway"})
+        self.assertEqual(self.store.status()["phase"], phase)
+        with self.assertRaises(m.MaintenanceError):
+            self.store.pause(self.binding, self.proof())
+
+    def clean_poll(self):
+        with patch.object(r, "unsupported_producers", return_value={"verified": True, "counts": {}}):
+            return self.runtime.poll()
+
+    def test_unknown_thread_after_ack_revokes_and_recovery_requires_fresh_poll(self):
+        release = threading.Event()
+        unknown = threading.Thread(target=release.wait)
+        unknown.start()
+        try:
+            self.assertIn(unknown, self.runtime.unknown_threads())
+            self.assertTrue(self.runtime.poll())
+            self.assert_revoked()
+        finally:
+            release.set()
+            unknown.join(3)
+        self.assertFalse(unknown.is_alive())
+        self.assert_revoked()  # Merely exiting never restores the old proof.
+        self.assertTrue(self.clean_poll())
+        self.store.pause(self.binding, self.proof())
+        self.assertEqual(self.store.status()["phase"], "PAUSED")
+
+    def test_nonzero_producer_inventory_revokes_fresh_ack(self):
+        with patch.object(r, "unsupported_producers", return_value={"verified": True, "counts": {"writer": 1}}):
+            self.assertTrue(self.runtime.poll())
+        self.assert_revoked()
+
+    def test_unverified_producer_inventory_revokes_fresh_ack(self):
+        with patch.object(r, "unsupported_producers", return_value={"verified": False, "counts": {"writer": 0}}):
+            self.assertTrue(self.runtime.poll())
+        self.assert_revoked()
+
+    def test_missing_limbo_lock_revokes_instead_of_skipping_poll(self):
+        with patch.object(r.threading, "_active_limbo_lock", None):
+            self.assertTrue(self.runtime.poll())
+        self.assert_revoked()
+
+    def test_inventory_exception_commits_revocation_before_propagating(self):
+        with patch.object(r, "unsupported_producers", side_effect=RuntimeError("inventory failed")):
+            with self.assertRaisesRegex(RuntimeError, "inventory failed"):
+                self.runtime.poll()
+        self.assert_revoked()
+
+    def test_valueerror_probe_does_not_rollback_revocation(self):
+        with patch.object(r, "unsupported_producers", side_effect=ValueError("inventory malformed")):
+            self.assertTrue(self.runtime.poll())
+        self.assert_revoked()
+
+    def test_thread_inventory_exception_also_revokes(self):
+        with patch.object(self.runtime, "unknown_threads", side_effect=RuntimeError("thread inventory failed")):
+            with self.assertRaisesRegex(RuntimeError, "thread inventory failed"):
+                self.runtime.poll()
+        self.assert_revoked()
+
+    def test_probe_interrupt_is_committed_before_it_is_reraised(self):
+        with patch.object(r, "unsupported_producers", side_effect=KeyboardInterrupt):
+            with self.assertRaises(KeyboardInterrupt):
+                self.runtime.poll()
+        self.assert_revoked()
+
+    def test_malformed_inventory_revokes_before_keyerror(self):
+        with patch.object(r, "unsupported_producers", return_value={"verified": True}):
+            with self.assertRaises(KeyError):
+                self.runtime.poll()
+        self.assert_revoked()
+
+    def test_new_verification_activity_revokes_until_finished_and_repolled(self):
+        activity = self.store.admit_verification(self.runtime.identity)
+        self.assertTrue(self.clean_poll())
+        self.assert_revoked()
+        self.runtime.finish_activity(activity)
+        self.assert_revoked()
+        self.clean_poll()
+        self.store.pause(self.binding, self.proof())
+
+    def test_reappeared_durable_activity_cannot_preserve_stale_ack(self):
+        # Fault injection: a restored activity and a stale ACK coexist. Ordinary
+        # production admission already removes this ACK in the same transaction.
+        with self.store._transaction() as (db, state, now):
+            db.execute("INSERT INTO maintenance_activities VALUES (?,?,?,?,?)",
+                       ("restored-activity", json.dumps(self.runtime.identity.as_dict(), sort_keys=True,
+                                                       separators=(",", ":")), "restored", None, now))
+        self.assertIn("gateway", self.roles())
+        self.clean_poll()
+        self.assert_revoked()
+        self.assertEqual(len(self.store.status()["activities"]), 1)
+
+    def test_stale_binding_cannot_revoke_current_proof_or_run_probe(self):
+        before = self.store.status()
+        stale = replace(self.binding, generation=2)
+        with self.assertRaises(m.MaintenanceError):
+            self.store.reconcile_acknowledgement(stale, self.runtime.identity,
+                                                lambda: self.fail("stale probe ran"))
+        self.assertEqual(self.store.status(), before)
+
+    def test_changed_identity_cannot_revoke_current_proof_or_run_probe(self):
+        before = self.store.status()
+        changed = replace(self.runtime.identity, source="d" * 40)
+        with self.assertRaises(m.MaintenanceError):
+            self.store.reconcile_acknowledgement(self.binding, changed,
+                                                lambda: self.fail("wrong-identity probe ran"))
+        self.assertEqual(self.store.status(), before)
+
+    def test_repeated_invalid_poll_never_removes_peer_proofs(self):
+        with patch.object(r, "unsupported_producers", return_value={"verified": False, "counts": {}}):
+            for _ in range(3):
+                self.runtime.poll()
+                self.assert_revoked()
+
+    def test_poll_observation_holds_sqlite_lock_until_revocation_before_pause(self):
+        poll_start, probe_entered, release_probe = (threading.Event() for _ in range(3))
+        pause_attempted, pause_done = threading.Event(), threading.Event()
+        outcomes, failures = [], []
+        original_connection = self.store._connection
+
+        @contextmanager
+        def traced_connection(*args, **kwargs):
+            with original_connection(*args, **kwargs) as db:
+                if threading.current_thread() is pauser:
+                    db.set_trace_callback(lambda sql: pause_attempted.set()
+                                          if sql == "BEGIN IMMEDIATE" else None)
+                yield db
+
+        def probe():
+            probe_entered.set()
+            if not release_probe.wait(5):
+                raise AssertionError("test did not release probe")
+            return {"verified": False, "counts": {}}
+
+        def poll():
+            try:
+                if not poll_start.wait(5):
+                    raise AssertionError("test did not start poll")
+                self.runtime.poll()
+            except BaseException as exc:
+                failures.append(exc)
+
+        def pause():
+            try:
+                if not probe_entered.wait(5):
+                    raise AssertionError("probe did not start")
+                try:
+                    self.store.pause(self.binding, self.proof())
+                except m.MaintenanceError:
+                    outcomes.append("refused")
+                else:
+                    outcomes.append("accepted")
+            except BaseException as exc:
+                failures.append(exc)
+            finally:
+                pause_done.set()
+
+        poller, pauser = threading.Thread(target=poll), threading.Thread(target=pause)
+        self.runtime.register_threads([poller, pauser])
+        with patch.object(self.store, "_connection", traced_connection), \
+             patch.object(r, "unsupported_producers", side_effect=probe):
+            # Start both before poll acquires the real limbo lock.
+            poller.start()
+            pauser.start()
+            try:
+                poll_start.set()
+                self.assertTrue(probe_entered.wait(5))
+                self.assertTrue(pause_attempted.wait(5))
+                self.assertFalse(pause_done.is_set())
+            finally:
+                release_probe.set()
+                poller.join(6)
+                pauser.join(6)
+        self.assertFalse(poller.is_alive())
+        self.assertFalse(pauser.is_alive())
+        self.assertEqual(failures, [])
+        self.assertEqual(outcomes, ["refused"])
+        self.assert_revoked()
+
+    def test_pause_wins_then_failed_poll_moves_to_hold_and_blocks_shutdown(self):
+        draining_snapshot = self.store.status()
+        self.store.pause(self.binding, self.proof())
+        with patch.object(self.store, "status", return_value=draining_snapshot), \
+             patch.object(r, "unsupported_producers", return_value={"verified": False, "counts": {}}):
+            self.runtime.poll()
+        self.assert_revoked("HOLD")
+        with self.assertRaises(m.MaintenanceError):
+            self.store.begin_shutdown(self.binding)
+        self.clean_poll()
+        self.assertEqual(self.store.status()["phase"], "HOLD")
+        self.store.resume(self.binding, self.proof())  # Explicit recovery only.
+        newer = replace(self.binding, operation_id="after-recovery", generation=2)
+        self.store.request(newer, 1100.0, self.proof(newer))
+        with self.assertRaises(m.MaintenanceError):
+            self.store.pause(newer, self.proof(newer))
+        for identity in self.identities.values():
+            self.store.acknowledge(newer, identity)
+        self.store.pause(newer, self.proof(newer))
+        self.store.resume(newer, self.proof(newer))
+        self.assertEqual(self.store.status()["phase"], "NORMAL")
+
+    def test_shutdown_wins_then_failed_poll_preserves_shutdown_in_hold(self):
+        self.store.pause(self.binding, self.proof())
+        self.store.begin_shutdown(self.binding)
+        with patch.object(r, "unsupported_producers", return_value={"verified": False, "counts": {}}):
+            self.runtime.poll()
+        self.assert_revoked("HOLD")
+        self.assertTrue(self.store.status()["shutdown_requested"])
+        self.clean_poll()
+        with self.assertRaises(m.MaintenanceError):
+            self.store.resume(self.binding, self.proof())
+
+    def test_resume_wins_against_fenced_poll_so_normal_producers_are_not_rechecked(self):
+        self.store.pause(self.binding, self.proof())
+        snapshot = self.store.status()
+        self.store.resume(self.binding, self.proof())
+        with patch.object(self.store, "status", return_value=snapshot), \
+             patch.object(r, "unsupported_producers", return_value={"verified": True, "counts": {"writer": 1}}) as probe:
+            self.runtime.poll()
+            probe.assert_not_called()
+        self.assertEqual(self.store.status()["phase"], "NORMAL")
+        newer = replace(self.binding, operation_id="after-resume", generation=2)
+        self.store.request(newer, 1100.0, self.proof(newer))
+        self.assertEqual(self.roles(), set())
+        with self.assertRaises(m.MaintenanceError):
+            self.store.pause(newer, self.proof(newer))
+
+    def test_normal_admission_revokes_proof_without_spurious_hold_from_old_poll(self):
+        self.store.pause(self.binding, self.proof())
+        snapshot = self.store.status()
+        self.store.resume(self.binding, self.proof())
+        activity = self.runtime.admit("ordinary-work")
+        self.assertNotIn("gateway", self.roles())
+        with patch.object(self.store, "status", return_value=snapshot), \
+             patch.object(r, "unsupported_producers", return_value={"verified": True, "counts": {}}) as probe:
+            self.runtime.poll()
+            probe.assert_not_called()
+        self.assertEqual(self.store.status()["phase"], "NORMAL")
+        self.runtime.finish_activity(activity)
+        self.assertNotIn("gateway", self.roles())
 
 
 if __name__ == "__main__":

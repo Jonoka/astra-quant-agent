@@ -31,7 +31,7 @@ SUITES = {
     'test_protocol.py': 33,
     'test_journal.py': 10,
     'test_concurrency.py': 5,
-    'test_runtime.py': 30,
+    'test_runtime.py': 49,
     'test_entrypoints.py': 16,
     'test_deployment.py': 34,
     'test_http_verification.py': 7,

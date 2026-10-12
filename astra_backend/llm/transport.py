@@ -364,7 +364,7 @@ def _server_request_id(response) -> str:
     headers = getattr(response, "headers", None)
     if headers is None:
         return ""
-    for name in ("X-Newapi-Request-Id", "X-Request-Id", "Request-Id"):
+    for name in ("X-Oneapi-Request-Id", "X-Newapi-Request-Id", "X-Request-Id", "Request-Id"):
         value = headers.get(name, "")
         if isinstance(value, str) and 0 < len(value) <= 160 and all(
             c.isascii() and (c.isalnum() or c in "._:-") for c in value

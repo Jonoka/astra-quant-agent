@@ -4,6 +4,7 @@ import json
 import socket
 import unittest
 import urllib.error
+from http.client import HTTPMessage
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -44,6 +45,62 @@ class Response:
 
 def http_error(code, body="upstream", request_id=""):
     return urllib.error.HTTPError("https://mock.invalid", code, "mock error", {"X-Request-Id": request_id}, io.BytesIO(body.encode()))
+
+
+def response_headers(*items):
+    headers = HTTPMessage()
+    for name, value in items:
+        headers[name] = value
+    return headers
+
+
+class ServerRequestIdTests(unittest.TestCase):
+    def test_oneapi_header_is_case_insensitive(self):
+        for name in ("X-Oneapi-Request-Id", "x-oneapi-request-id", "X-ONEAPI-REQUEST-ID"):
+            with self.subTest(name=name):
+                response = SimpleNamespace(headers=response_headers((name, "oneapi-123")))
+                self.assertEqual(transport._server_request_id(response), "oneapi-123")
+
+    def test_header_precedence_and_missing_header_fallback(self):
+        ordered = (
+            ("X-Oneapi-Request-Id", "oneapi-id"),
+            ("X-Newapi-Request-Id", "newapi-id"),
+            ("X-Request-Id", "upstream-id"),
+            ("Request-Id", "generic-id"),
+        )
+        for index, (name, expected) in enumerate(ordered):
+            with self.subTest(first_available=name):
+                response = SimpleNamespace(headers=response_headers(*reversed(ordered[index:])))
+                self.assertEqual(transport._server_request_id(response), expected)
+
+    def test_legacy_headers_are_case_insensitive(self):
+        for name in ("x-newapi-request-id", "x-request-id", "request-id"):
+            with self.subTest(name=name):
+                response = SimpleNamespace(headers=response_headers((name, "legacy-id")))
+                self.assertEqual(transport._server_request_id(response), "legacy-id")
+
+    def test_invalid_oneapi_id_falls_back_without_weakening_filter(self):
+        for value in ("", "bad id", "bad\nvalue", "bad/value", "非ASCII", "x" * 161, None, 123, b"bytes-id"):
+            with self.subTest(value=value):
+                response = SimpleNamespace(headers=response_headers(
+                    ("X-Oneapi-Request-Id", value), ("X-Newapi-Request-Id", "valid-fallback"),
+                ))
+                self.assertEqual(transport._server_request_id(response), "valid-fallback")
+
+    def test_allowed_id_characters_and_length_boundary(self):
+        for value in ("a", "a._:-09", "x" * 160):
+            with self.subTest(value=value):
+                response = SimpleNamespace(headers=response_headers(("X-Oneapi-Request-Id", value)))
+                self.assertEqual(transport._server_request_id(response), value)
+
+    def test_absent_or_invalid_headers_return_empty(self):
+        invalid = response_headers(*((name, "invalid id") for name in (
+            "X-Oneapi-Request-Id", "X-Newapi-Request-Id", "X-Request-Id", "Request-Id",
+        )))
+        for response in (SimpleNamespace(), SimpleNamespace(headers=None),
+                         SimpleNamespace(headers=HTTPMessage()), SimpleNamespace(headers=invalid)):
+            with self.subTest(response=response):
+                self.assertEqual(transport._server_request_id(response), "")
 
 
 class LlmDeadlineTests(unittest.TestCase):
@@ -92,6 +149,65 @@ class LlmDeadlineTests(unittest.TestCase):
         with patch.object(transport.urllib.request, "urlopen", return_value=Response(self.clock)):
             usage = self.execute()[2]
         self.assertEqual(usage["_astra_trace"]["request_id"], "")
+
+    def test_oneapi_identity_wins_in_success_trace_and_attempt_records(self):
+        headers = response_headers(
+            ("X-Request-Id", "upstream-id"), ("X-Newapi-Request-Id", "newapi-id"),
+            ("x-oneapi-request-id", "oneapi-success"),
+        )
+        with patch.object(transport.urllib.request, "urlopen", return_value=Response(self.clock, headers=headers)):
+            usage = self.execute()[2]
+        self.assertEqual(usage["_astra_trace"]["request_id"], "oneapi-success")
+        self.assertEqual([r["request_id"] for r in self.starts], ["", "oneapi-success"])
+        self.assertEqual(self.records[0]["request_id"], "oneapi-success")
+        self.assertEqual(self.records[0]["status"], "success")
+        self.assertEqual(self.records[0]["client_request_id"], usage["_astra_trace"]["client_request_id"])
+
+    def test_oneapi_identity_is_recorded_before_response_body_can_block(self):
+        before_body = []
+        def blocked_body(response):
+            before_body.append(dict(self.starts[-1]))
+            self.clock.advance(10)
+            raise deadline.DeadlineExceeded("synthetic body deadline")
+        headers = response_headers(("X-ONEAPI-REQUEST-ID", "oneapi-before-body"))
+        with patch.object(transport.urllib.request, "urlopen", return_value=Response(self.clock, headers=headers)), \
+             patch.object(transport, "_read_with_deadline", blocked_body):
+            with self.assertRaises(deadline.DeadlineExceeded):
+                self.execute(allow_fallback=False)
+        self.assertEqual(before_body[0]["request_id"], "oneapi-before-body")
+        self.assertEqual(before_body[0]["http_status"], 200)
+        self.assertEqual(self.records[0]["request_id"], "oneapi-before-body")
+
+    def test_oneapi_identity_is_recorded_before_error_body_can_block(self):
+        before_body = []
+        def blocked_body(response):
+            before_body.append(dict(self.starts[-1]))
+            self.clock.advance(10)
+            raise deadline.DeadlineExceeded("synthetic error body deadline")
+        headers = response_headers(
+            ("x-oneapi-request-id", "oneapi-before-error-body"), ("X-Request-Id", "upstream-id"),
+        )
+        error = urllib.error.HTTPError("https://mock.invalid", 429, "mock error", headers, io.BytesIO(b"upstream"))
+        with patch.object(transport.urllib.request, "urlopen", side_effect=error), \
+             patch.object(transport, "_read_with_deadline", blocked_body):
+            with self.assertRaises(deadline.DeadlineExceeded):
+                self.execute(allow_fallback=False)
+        self.assertEqual(before_body[0]["request_id"], "oneapi-before-error-body")
+        self.assertEqual(before_body[0]["http_status"], 429)
+        self.assertEqual(self.records[0]["request_id"], "oneapi-before-error-body")
+
+    def test_oneapi_http_error_identity_is_recorded_in_failed_attempt(self):
+        headers = response_headers(
+            ("X-Oneapi-Request-Id", "oneapi-failed"), ("X-Newapi-Request-Id", "newapi-id"),
+        )
+        error = urllib.error.HTTPError("https://mock.invalid", 401, "mock error", headers, io.BytesIO(b"unauthorized"))
+        with patch.object(transport.urllib.request, "urlopen", side_effect=error):
+            with self.assertRaises(RuntimeError):
+                self.execute(allow_fallback=False)
+        self.assertEqual([r["request_id"] for r in self.starts], ["", "oneapi-failed"])
+        self.assertEqual(self.records[0]["request_id"], "oneapi-failed")
+        self.assertEqual(self.records[0]["status"], "failed")
+        self.assertEqual(self.records[0]["http_status"], 401)
 
     def test_known_response_identity_is_recorded_before_body_read_can_block(self):
         def blocked_body(response):

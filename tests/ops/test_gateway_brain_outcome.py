@@ -13,7 +13,7 @@ from unittest.mock import MagicMock, patch
 from astra_backend.dashboard_payload.health import build_ai_health
 from astra_backend.dashboard_payload.integrity_sidecars import merge_ai_health_failures
 from astra_gateway import agents, scheduler
-from astra_gateway.store import GatewayStore
+from astra_gateway.store import GatewayStore, job_run_outcome
 
 AT = datetime(2026, 10, 5, 12, tzinfo=timezone(timedelta(hours=8)))
 
@@ -105,6 +105,27 @@ class BrainOutcomeTests(unittest.TestCase):
         row = self.finish()
         self.store.finish_job(row["id"], 0, "later", self.result(row["id"], "ok"))
         self.assertEqual(self.store.job_runs(1)[0], row)
+
+    def test_previous_writer_terminal_fields_override_pending_process_columns(self):
+        # Previous versions only know the original lifecycle columns. They can
+        # finish/recover a row created by the new version during rollback.
+        for status, code, expected in (("success", 0, "success"), ("failed", 7, "failed"),
+                                       ("interrupted", None, "interrupted"),
+                                       ("skipped", None, "skipped")):
+            with self.subTest(status=status):
+                row = job_run_outcome(dict(job_name="trader", status=status,
+                    return_code=code, process_status="running", brain_status="pending"))
+                self.assertEqual(row["process_status"], expected)
+                self.assertEqual(row["brain_status"], "not_run" if status == "skipped" else "unknown")
+
+    def test_previous_writer_process_changes_preserve_terminal_brain_evidence(self):
+        row = job_run_outcome(dict(job_name="trader", status="failed", return_code=7,
+            process_status="success", brain_status="ok", brain_result_at=self.scheduled_at,
+            brain_detail="confirmed decision"))
+        self.assertEqual((row["status"], row["process_status"], row["brain_status"]),
+                         ("failed", "failed", "ok"))
+        self.assertEqual((row["brain_result_at"], row["brain_detail"]),
+                         (self.scheduled_at, "confirmed decision"))
 
     def test_scheduler_skips_and_recovery_have_explicit_process_outcomes(self):
         self.store.record_skipped_job("trader", self.scheduled_at, "scheduler_window_missed")

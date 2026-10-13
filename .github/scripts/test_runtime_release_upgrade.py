@@ -141,6 +141,23 @@ class RuntimeUpgradeTests(unittest.TestCase):
         with self.assertRaisesRegex(upgrade.GateError, 'unknown_database_migration'):
             upgrade.compatible_databases(before, after)
 
+    def test_collection_status_additions_require_exact_prior_table(self):
+        # Matching four column names cannot authorize migration of an unrelated
+        # or altered job_runs table. Its original full contract is also pinned.
+        before = self.schema_fixture(additive=True)
+        after = copy.deepcopy(before)
+        after[upgrade.GATEWAY_DATABASE]['tables']['job_runs']['columns'].extend(
+            copy.deepcopy(upgrade.COLLECTION_JOB_COLUMNS))
+        with self.assertRaisesRegex(upgrade.GateError, 'unknown_database_migration'):
+            upgrade.compatible_databases(before, after)
+
+    def test_same_collection_source_requires_fixed_reviewed_bytes(self):
+        source = self.root / 'unreviewed.py'
+        source.write_text('SCHEMA = ' + repr('process_status TEXT;\n' + upgrade.DEADLINE_SCHEMA_ADDITION)
+                          + '\nMIGRATION_COLUMNS = ()\n', encoding='utf-8')
+        with self.assertRaisesRegex(upgrade.GateError, 'collection_gateway_source_changed'):
+            upgrade.gateway_source_compatibility(source, source)
+
     def test_source_contract_rejects_shadowed_literal_and_migration_method(self):
         old, new = self.root / 'old.py', self.root / 'new.py'
         prefix = 'SCHEMA = ""\nMIGRATION_COLUMNS: tuple = ()\n'

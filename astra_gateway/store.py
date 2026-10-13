@@ -118,11 +118,21 @@ def job_run_outcome(run: dict[str, Any]) -> dict[str, Any]:
     """
     out = dict(run)
     recorded = str(out.get("status") or "unknown")
-    process = str(out.get("process_status") or "")
-    if not process:
-        code = out.get("return_code")
-        process = ("success" if code == 0 else "failed") if code is not None else recorded
+    # A previous-version writer can finish or recover a run created by this
+    # version without updating the additive columns. The original lifecycle
+    # fields remain authoritative for process completion across rollback.
+    code = out.get("return_code")
+    if recorded in {"running", "skipped", "interrupted"}:
+        process = recorded
+    elif code is not None:
+        process = "success" if code == 0 else "failed"
+    else:
+        process = str(out.get("process_status") or recorded)
+        if process == "running":
+            process = recorded
     brain = str(out.get("brain_status") or "")
+    if brain == "pending" and process != "running":
+        brain = ""
     if not brain:
         brain = ("not_run" if recorded == "skipped" else "unknown") if out.get("job_name") == "trader" else "not_applicable"
     status = recorded

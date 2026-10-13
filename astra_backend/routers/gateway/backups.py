@@ -7,6 +7,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+from astra_backend.maintenance_runtime import run_process
 import sys
 import tempfile
 from pathlib import Path
@@ -270,7 +271,7 @@ def run_backup_job_api(job_id: str, payload: BackupJobRunRequest, x_astra_sessio
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     script = SCRIPTS_DIR / "nightly_backup_and_clean.py"
-    result = subprocess.run([sys.executable, str(script), "--job-id", job_id], cwd=ROOT, text=True, capture_output=True, timeout=1800)
+    result = run_process([sys.executable, str(script), "--job-id", job_id], cwd=ROOT, text=True, capture_output=True, timeout=1800)
     BACKUP_LOG_FILE.parent.mkdir(exist_ok=True)
     BACKUP_LOG_FILE.write_text(result.stdout + "\n" + result.stderr, encoding="utf-8")
     audit_record("backup.job.run", "success" if result.returncode == 0 else "failed", {"actor": actor["username"], "job_id": job_id, "returncode": result.returncode})
@@ -366,7 +367,7 @@ def run_backup(payload: BackupRequest, x_astra_admin_token: str | None = Header(
     if payload.confirmation.strip().upper() != "BACKUP ASTRA":
         raise HTTPException(status_code=400, detail="确认短语必须精确为：BACKUP ASTRA")
     script = SCRIPTS_DIR / "nightly_backup_and_clean.py"
-    result = subprocess.run([sys.executable, str(script)], cwd=ROOT, text=True, capture_output=True, timeout=600)
+    result = run_process([sys.executable, str(script)], cwd=ROOT, text=True, capture_output=True, timeout=600)
     BACKUP_LOG_FILE.parent.mkdir(exist_ok=True)
     BACKUP_LOG_FILE.write_text(result.stdout + "\n" + result.stderr, encoding="utf-8")
     if result.returncode:

@@ -38,6 +38,7 @@ import re
 import time
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
+from astra_backend.maintenance_runtime import guarded
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -183,6 +184,7 @@ def _record_warmup_telemetry(model: str, effort: str, system_text: str, user_tex
         pass
 
 
+@guarded("cache-warmup-send", child=True, blocked={"ok": False, "reason": "maintenance"})
 def send_cache_warmup_ping(timeout: float = 30.0, prefix: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """发送**真前缀**微请求（max_tokens=1），返回缓存命中情况与诊断字段。"""
     global _last_warmup_time
@@ -282,6 +284,7 @@ def _mark_result(res: Dict[str, Any]) -> Dict[str, Any]:
     return res
 
 
+@guarded("cache-warmup", blocked=False)
 def check_and_warmup_cache(now: Optional[float] = None, idle_threshold_seconds: float = 270.0) -> bool:
     """按模式决定是否预热；返回**是否真的发出了预热请求**。
 

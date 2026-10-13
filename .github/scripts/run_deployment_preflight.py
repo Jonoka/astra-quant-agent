@@ -13,14 +13,15 @@ from verify_deployment_source import PREVIOUS_SHA, verify
 from stage_release_bundle import extract
 
 SUITES = {
-    'test_verify_deployment_source.py': 15,
+    'test_verify_deployment_source.py': 18,
     'test_runtime_release_upgrade.py': 37,
     'test_deployment_plan.py': 29,
-    'test_deployment_identity.py': 19,
+    'test_deployment_identity.py': 20,
     'test_recovery_journal.py': 20,
     'test_linux_singleton_lock.py': 7,
-    'test_rehearse_cycle_deadline_upgrade.py': 4,
+    'test_rehearse_cycle_deadline_upgrade.py': 6,
     'test_taker_regression_gate.py': 7,
+    'test_deployment_preflight_gate.py': 9,
 }
 
 
@@ -67,6 +68,15 @@ require_complete_result(result,minimum)
                        check=True, env=env, timeout=360, cwd=source)
         subprocess.run([sys.executable, str(source / '.github/scripts/run_taker_regressions.py'), '--alpha'],
                        check=True, env=env, timeout=120, cwd=source)
+        subprocess.run([sys.executable, str(source / '.github/scripts/run_maintenance_tests.py'), '--require-linux'],
+                       check=True, env=env, timeout=180, cwd=source)
+        # Partial actual local integration only; not complete framework/field acceptance.
+        subprocess.run([sys.executable, str(source / '.github/scripts/run_actual_integration.py')],
+                       check=True, env=env, timeout=120, cwd=source)
+        subprocess.run([sys.executable, str(source / 'tests/maintenance_integration/test_endpoint_isolation.py')],
+                       check=True, env=env, timeout=60, cwd=source)
+        subprocess.run([sys.executable, str(source / 'tests/maintenance_integration/test_dirfd_isolation.py')],
+                       check=True, env=env, timeout=60, cwd=source)
     verify(source, UPSTREAM, revision)
     print('DEPLOYMENT_PREFLIGHT_PASS source=' + revision, flush=True)
 

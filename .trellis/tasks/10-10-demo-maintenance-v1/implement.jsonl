@@ -1,0 +1,2 @@
+{"file":".trellis/spec/backend/astra-release-contract.md","reason":"Immutable provenance, retained PR5, rollback and local-only boundaries"}
+{"file":".trellis/spec/backend/astra-cycle-deadlines.md","reason":"Real scheduling deadlines, singleton and no replay"}

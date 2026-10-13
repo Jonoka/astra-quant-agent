@@ -19,6 +19,7 @@ REQUIRED_RELEASE_CHECKS = frozenset({
     'cycle_deadline_regression', 'linux_singleton_lock',
     'cycle_deadline_state_rehearsal',
     'shared_deployment_preflight', 'deployment_plan_tests', 'current_baseline_rehearsal',
+    'demo_maintenance_regression',
 })
 
 
@@ -126,7 +127,8 @@ def main():
     checks = json.loads(plain(args.checks_json).read_bytes())
     require_checks(checks)
     required = {'source-previous.tar', 'source-release.tar', 'runtime_release_upgrade.py',
-                'stage_release_bundle.py', 'prepare_deployment_plan.py', 'Dockerfile.release'}
+                'stage_release_bundle.py', 'prepare_deployment_plan.py', 'Dockerfile.release',
+                'maintenance_deployment.py', 'maintenance_protocol.py'}
     require(required <= set(evidence['sha256']), 'artifact_manifest_incomplete')
     for name, expected in evidence['sha256'].items():
         require(Path(name).name == name and re.fullmatch(r'[0-9a-f]{64}', expected), 'artifact_name_hash')
@@ -135,9 +137,18 @@ def main():
         require(path.stat().st_uid == 0 and not path.stat().st_mode & 0o077, 'artifact_permissions')
     sources = {label: extract(op / ('source-' + label + '.tar'), op / ('source-' + label), pin)
                for label, pin in (('previous', previous), ('release', release))}
-    for helper in ('runtime_release_upgrade.py', 'stage_release_bundle.py', 'prepare_deployment_plan.py'):
+    for helper in ('runtime_release_upgrade.py', 'stage_release_bundle.py', 'prepare_deployment_plan.py',
+                   'maintenance_deployment.py'):
         require(digest(op / helper) == digest(op / 'source-release/.github/scripts' / helper),
                 'helper_source_drift')
+    require(digest(op / 'maintenance_protocol.py') ==
+            digest(op / 'source-release/astra_backend/maintenance.py'), 'maintenance_protocol_source_drift')
+    if plan['schema'] == 2:
+        scope = plan['maintenance']
+        require((op / 'source-previous/astra_backend/maintenance.py').is_file() and
+                digest(op / 'source-previous/astra_backend/maintenance.py') == scope['previous_protocol_sha256'] and
+                digest(op / 'maintenance_protocol.py') == scope['target_protocol_sha256'],
+                'maintenance_legacy_or_protocol_artifact_refused')
     official = (op / 'source-release/Dockerfile').read_bytes()
     anchor = b'RUN rm -rf public/images && mkdir -p public/images\n'
     require(official.count(anchor) == 1, 'recipe_anchor_drift')

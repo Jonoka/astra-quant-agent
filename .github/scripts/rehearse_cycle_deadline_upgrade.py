@@ -4,6 +4,8 @@ The caller supplies the independently verified previous git archive. All writabl
 fixtures are invented and temporary; Docker, shell and network calls are denied.
 Portable copy adapters exercise the existing carry/rollback control flow without
 claiming POSIX ownership, process locks, image health or service acceptance.
+The schema2 maintenance boundary is synthetic: this checks paused rollback
+control flow, not protocol support in the historical source or running images.
 """
 from __future__ import annotations
 
@@ -163,6 +165,12 @@ def rehearse(source: Path, previous: Path) -> dict:
         obj.image_metadata = Mock(return_value="synthetic-image-not-inspected")
         obj.capacity, obj.stop = Mock(), Mock()
         obj.start = Mock()
+        # The historical SQLite fixture predates the maintenance protocol. Keep
+        # its source authentic; model only the external protocol boundary, as
+        # with Docker/ownership above, while exercising the real rollback body.
+        obj.deployment_plan = Mock(return_value={'schema': 2, 'maintenance': {'mode': 'normal'}})
+        coordinator = Mock(spec_set=['orderly_stop', 'explicit_resume'])
+        obj.maintenance = Mock(return_value=coordinator)
         obj.phase = lambda phase: obj.state.update(phase=phase)
         def portable_copy(source_path, destination):
             obj.allowed(source_path)
@@ -194,9 +202,13 @@ def rehearse(source: Path, previous: Path) -> dict:
         # Root UID/mode and service acceptance are intentionally outside this
         # portable rehearsal; unchanged production gates are never relaxed.
         with patch.object(helper, "ROOT", live), patch.object(helper, "env_gate", lambda root: None), \
-                patch.object(helper, 'containers', return_value={}):
+                patch.object(helper, 'containers', return_value={}), \
+                patch('maintenance_deployment.check_protocol_versions') as protocol_versions:
             obj.rollback()
-        assert obj.state["phase"] == "rolled-back"
+        protocol_versions.assert_called_once_with(obj)
+        coordinator.orderly_stop.assert_called_once_with(recovery=True)
+        coordinator.explicit_resume.assert_not_called()
+        assert obj.state["phase"] == "rolled-back-paused", "rollback must remain paused"
         obj.start.assert_called_once_with(True)
         assert helper.tree_manifest(stopped) == snapshot, "independent snapshot was modified"
         assert helper.tree_manifest(original) == snapshot, "original deployment was modified"
@@ -206,8 +218,11 @@ def rehearse(source: Path, previous: Path) -> dict:
         return {"portable_checks": {"actual_previous_forward_schema": "passed", "idempotence": "passed",
                                     "old_reader_writer": "passed", "latest_state_rollback": "passed",
                                     "auth_trading_config_retention": "passed"},
+                "rollback_phase": obj.state["phase"],
+                "maintenance_protocol": "synthetic_adapter_only",
                 "external_commands": "disabled", "fixtures": "synthetic_temporary_only",
-                "pending": ["POSIX ownership and real process locks", "candidate/published image and service acceptance"]}
+                "pending": ["POSIX ownership and real process locks",
+                            "real maintenance protocol, candidate/published image and service acceptance"]}
 
 
 def main():

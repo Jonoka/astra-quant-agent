@@ -54,17 +54,28 @@ class DeploymentIdentityTests(unittest.TestCase):
         self.obj.pool_guard = Mock()
         self.obj.start = Mock()
         self.obj.verify = Mock()
+        # This suite tests actual filesystem/container ownership and rename
+        # recovery. Only the separate protocol barrier is synthetic here.
+        self.obj.deployment_plan = Mock(return_value={'schema': 2, 'maintenance': {'mode': 'normal'}})
+        coordinator = Mock()
+        coordinator.startup_environment.return_value = {'ASTRA_MAINTENANCE_ENABLED': '1'}
+        self.obj.maintenance = Mock(return_value=coordinator)
+        version_patch = patch('maintenance_deployment.check_protocol_versions')
+        version_patch.start()
+        self.addCleanup(version_patch.stop)
         self.docker = Mock()
+        def natural_exit(*, recovery=False):
+            self.obj.deployment_guard()
+            self.docker('protocol-natural-exit', *(c['id'] for c in self.current.values()))
+            for c in self.current.values():
+                c['state'] = 'exited'
+        coordinator.orderly_stop.side_effect = natural_exit
         actual_run = M.run
         def command(*args, **kwargs):
             if args[0] != 'docker':
                 return actual_run(*args, **kwargs)
             self.docker(*args, **kwargs)
-            self.assertEqual(args[:4], ('docker', 'stop', '-t', '60'))
-            for c in self.current.values():
-                if c['id'] in args[4:]:
-                    c['state'] = 'exited'
-            return b''
+            raise AssertionError('schema2 lifecycle must never signal Docker stop/kill')
         for patcher in (patch.object(M, 'ROOT', self.live),
                         patch.object(M, 'containers', side_effect=lambda: copy.deepcopy(self.current)),
                         patch.object(M, 'run', side_effect=command)):
@@ -142,12 +153,14 @@ class DeploymentIdentityTests(unittest.TestCase):
         self.assertEqual((self.live / 'data/records.json').read_bytes(), b'latest')
 
     def test_accepted_owned_candidate_rolls_back_latest_records_and_deletions(self):
+        self.obj.state['phase'] = 'accepted-paused'
         self.obj.rollback()
         self.assertEqual((self.live / 'source-marker').read_bytes(), b'previous')
         self.assertEqual((self.live / 'data/records.json').read_bytes(), b'latest')
         self.assertFalse((self.live / 'data/deleted.json').exists())
         self.assertEqual(M.tree_manifest(self.original), self.obj.state['snapshot'])
         self.obj.start.assert_called_once_with(True)
+        self.assertEqual(self.obj.state['phase'], 'rolled-back-paused')
 
     def test_unhealthy_and_exited_owned_candidate_remains_recoverable(self):
         self.obj.state['phase'] = 'starting'
@@ -212,6 +225,21 @@ class DeploymentIdentityTests(unittest.TestCase):
         self.obj.rollback()
         self.docker.assert_not_called()
         self.obj.start.assert_called_once_with(True)
+
+    def test_paused_and_resumed_recovery_phases_keep_exact_ownership_gates(self):
+        self.prepare_recovery_retry()
+        for phase in ('rolled-back-paused', 'rolled-back'):
+            self.obj.state['phase'] = phase
+            with self.subTest(phase=phase):
+                self.obj.deployment_guard()
+                before = self.current[M.NAMES[0]]['id']
+                self.current[M.NAMES[0]]['id'] = 'external-replacement'
+                try:
+                    with self.assertRaisesRegex(M.GateError, 'foreign_deployment_container'):
+                        self.obj.deployment_guard()
+                finally:
+                    self.current[M.NAMES[0]]['id'] = before
+        self.docker.assert_not_called()
 
     def test_rename_never_moves_source_under_running_owned_containers(self):
         with self.assertRaisesRegex(M.GateError, 'deployment_rename_running_container'):

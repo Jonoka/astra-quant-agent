@@ -22,6 +22,7 @@ from astra_gateway.publisher import DB_PATH as GATEWAY_DB_PATH
 from astra_gateway.scheduler import scheduler_snapshot
 from astra_gateway.pidfile import process_running, read_pid
 from astra_gateway.store import GatewayStore
+from astra_backend.maintenance_runtime import run_process
 
 from fastapi import APIRouter
 
@@ -106,7 +107,7 @@ def run_gateway_job(
 
     cmd = [sys.executable, str(script_path), *job_cfg["args"]]
     try:
-        result = subprocess.run(
+        result = run_process(
             cmd,
             cwd=ROOT,
             text=True,

@@ -172,6 +172,12 @@ def _stable_python() -> str:
 
 
 def ensure_qq_gateway_daemon_running() -> None:
+    from astra_backend.maintenance_runtime import get_runtime
+    with get_runtime().activity("qq-daemon-launch"):
+        _ensure_qq_gateway_daemon_running()
+
+
+def _ensure_qq_gateway_daemon_running() -> None:
     """Ensure the persistent QQ Gateway daemon is active in background.
 
     并发防护三层：①本进程 threading.Lock 串行化 check-then-act；
@@ -497,8 +503,13 @@ def start_openid_capture(app_id: Optional[str] = None, client_secret: Optional[s
         session = _OpenidCaptureSession(capture_id, effective_app_id, effective_secret, timeout=timeout)
         _CAPTURE_SESSIONS[capture_id] = session
 
-    t = threading.Thread(target=_run_capture_thread, args=(session,), daemon=True, name=f"qq_openid_{capture_id}")
-    t.start()
+    from astra_backend.maintenance_runtime import start_thread
+    try:
+        start_thread("qq-openid-capture", _run_capture_thread, session, name=f"qq_openid_{capture_id}")
+    except BaseException:
+        with _CAPTURE_LOCK:
+            _CAPTURE_SESSIONS.pop(capture_id, None)
+        raise
 
     return {
         "capture_id": capture_id,

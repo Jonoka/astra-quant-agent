@@ -1,0 +1,90 @@
+# DEMO maintenance deployment protocol
+
+## Authorization and scope
+
+The owner approved implementation on an independent local branch and offline
+verification. Base: `948df24e458853cf9c6966c2d8641c18e6dc0917` (fixed PR5).
+No VPS/SSH, exchange/network probes, credentials, production state, push, merge,
+Actions dispatch, image build/publication or new live OP/PIN are authorized.
+The only network operation was one approved anonymous fixed-SHA Git fetch.
+
+## Required behavior
+
+1. DEMO-only maintenance closes every new admission, drains admitted/queued
+   work, obtains current-generation component acknowledgements, performs a
+   consistent cutover, starts the candidate paused, verifies it, and resumes
+   only explicitly. All startup/rollback ambiguity stays fenced.
+2. All scheduler/manual/order/cache/ledger/notification/write sources participate.
+   Track queued futures, child processes and active writers; zero job rows alone
+   is insufficient. Preserve the worker singleton lock through actual drain.
+3. Maintenance timeout cancels publication, never kills admitted work. Disconnect,
+   crash, restart, missing acknowledgements and unknown order outcomes cannot
+   resume trading. A live old worker/child blocks a replacement.
+4. Bind requests and acknowledgements to operation, external plan pin, approved
+   source/image and exact component instance. Duplicate requests cannot renew
+   deadlines; stale generations cannot release a newer operation.
+5. Live/unknown mode, positions, pending/conditional/partial orders, unresolved
+   requests or unverified risk proof refuse maintenance. No automatic cancel,
+   close, strategy changes or weakening of risk settings.
+6. Preserve normal release's real 900-second slot and >=480 seconds remaining,
+   plus all existing provenance/configuration/auth/state/rollback gates.
+   Maintenance replaces only the time-window condition using real pause/risk/
+   ownership proofs and an absolute bounded budget.
+7. Previous and candidate must both support the protocol. Legacy bootstrap and
+   legacy-image rollback remain explicitly blocked; no fabricated lease ACK,
+   signals or supervisory bridge is included in this implementation.
+8. Preserve latest writable records and intentional deletions on rollback; do
+   not restore stale order state. Missed trading cycles are not replayed.
+9. Necessary sending-before-network order journal records stable idempotency
+   identity and unknown outcomes. It must not pretend legacy intents are this
+   journal. Never resubmit unknown requests merely because a lease expires.
+10. Preserve PR5 alpha files, policy/prompts/models/assets/leverage/risk values,
+    original worktrees and prepared PR5 bundle/helper/pin bytes.
+
+## Acceptance
+
+Focused offline tests exercise actual reducers/admission/queue/process/command
+paths with temporary data, fake broker, clocks and commands. They cover races,
+timeout-without-kill, supervision, restart-paused, stale requests, duplicates,
+unsupported versions, order unknown/partial cases, source guards, normal >=480
+behavior and latest-state recovery. No generalized production-reading test
+discovery. Linux real flock and container/field acceptance are separate pending
+gates, not inferred from Windows tests. CI code is updated but not dispatched.
+
+## Approval retained for later
+
+## Authorized local review repairs
+
+Continue the same isolated branch with sequential main-agent repairs only:
+controller-bound paused candidate/recovery startup, a side-effect-free production
+ASGI maintenance-status contract used by verification, and a fresh normal >=480
+window check after drain and before supervision changes/natural shutdown. Retain
+all prior coverage and add controlled real subprocess and in-memory HTTP/ASGI
+acceptance. No new dependencies, network, containers, publication or deployment.
+Local code commits are authorized solely to pin the repaired candidate. Preserve
+historical evidence and report unavailable full FastAPI/Linux/runtime acceptance.
+
+No implementation result authorizes first legacy transition, live use, external
+supervisor signals/restart changes, real risk checks, publication or deployment.
+
+## Authorized remaining startup handshake repair
+
+Replace zero-activity readiness inference with durable completion bound to the
+exact startup permit, external operation/generation/source/image and watchdog/
+child identities. Production backend and gateway must publish success only after
+their real initialization succeeds. Unstarted/failed/dead/disconnected/expired
+verification retains work and stays fenced. Preserve the two closed repairs and
+all 143+17+2 coverage; add deterministic real controlled-child interleavings,
+quick completion before poll, failures and wrong/replayed/stale proofs. No new
+runtime, dependency, reviewer, network or deployment authorization is granted.
+
+## Authorized actual offline integration
+
+Use existing local dependencies only, with production data/credential/public
+network isolation established before imports. Allow controlled in-process or
+synthetic local loopback listeners, never Docker/WSL/daemon/host mounts or real
+scheduler/broker/LLM/exchange clients. Inventory frameworks and report exact gaps;
+complete runnable AnyIO and helper/listener chains without claiming missing
+FastAPI/Starlette/Uvicorn/auth as passed. Separate actual integration from the
+156+17+2专项 evidence, retain all previous hashes, pin necessary local changes and
+request one same-reviewer read-only review of new differences, no infinite loop.

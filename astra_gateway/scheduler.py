@@ -8,12 +8,14 @@ import os
 import subprocess
 import sys
 import time
+import threading
 from typing import Any
 
 from astra_backend.time_utils import parse_beijing
 from astra_backend.schedule_store import load_schedule
 from astra_backend.backup_store import list_jobs as list_backup_jobs
 from astra_gateway.store import GatewayStore
+from astra_backend.maintenance_runtime import AdmissionClosed, get_runtime, run_process
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "scripts"
@@ -86,10 +88,11 @@ def scheduler_snapshot(store: GatewayStore) -> dict[str, Any]:
 
 
 class GatewayScheduler:
-    def __init__(self, store: GatewayStore, max_workers: int = 3):
+    def __init__(self, store: GatewayStore, max_workers: int = 3, maintenance=None):
         self.store = store
         self.executor = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="astra-job")
         self.running: dict[str, Future[None]] = {}
+        self.maintenance = maintenance or get_runtime("gateway")
 
     def _last_at(self, name: str) -> datetime | None:
         raw = self.store.get_state(f"job.last.{name}")
@@ -171,7 +174,7 @@ class GatewayScheduler:
                     self.store.skip_started_job(run_id, "budget_exhausted_before_start")
                     return
                 timeout = min(timeout, hard_deadline - admitted_at)
-            result = subprocess.run(
+            result = run_process(
                 command,
                 cwd=ROOT,
                 text=True,
@@ -189,6 +192,14 @@ class GatewayScheduler:
     def tick(self, now: datetime | None = None) -> list[str]:
         now = now or datetime.now(BJ_TZ)
         self.running = {name: future for name, future in self.running.items() if not future.done()}
+        try:
+            activity = self.maintenance.admit("scheduler-tick")
+        except AdmissionClosed:
+            self.maintenance.poll()
+            return []
+        return self.maintenance.run_admitted(activity, self._tick_admitted, now)
+
+    def _tick_admitted(self, now: datetime) -> list[str]:
         schedule = load_schedule()
         launched: list[str] = []
         for spec in current_jobs():
@@ -210,10 +221,22 @@ class GatewayScheduler:
                     continue
             if spec.name in self.running or not self.due(spec, now, schedule):
                 continue
-            self.store.set_state(f"job.last.{spec.name}", now.isoformat())
-            if spec.name == "trader" and spec.interval_seconds:
-                self.store.set_state("job.slot.trader", str(int(now.timestamp()) // spec.interval_seconds))
-            self.running[spec.name] = self.executor.submit(self._execute, spec, now.isoformat())
+            try:
+                # Register before submit: queued Futures block pause just like
+                # running children. No fresh queue admission after a fence.
+                activity = self.maintenance.admit("scheduler-job:" + spec.name)
+            except AdmissionClosed:
+                break
+            try:
+                self.store.set_state(f"job.last.{spec.name}", now.isoformat())
+                if spec.name == "trader" and spec.interval_seconds:
+                    self.store.set_state("job.slot.trader", str(int(now.timestamp()) // spec.interval_seconds))
+                self.running[spec.name] = self.executor.submit(
+                    self.maintenance.run_admitted, activity, self._execute, spec, now.isoformat())
+                self.maintenance.register_threads(self.executor._threads)
+            except BaseException:
+                self.maintenance.store.finish(activity, self.maintenance.identity)
+                raise
             launched.append(spec.name)
         return launched
 
@@ -236,5 +259,11 @@ class GatewayScheduler:
             })
         return {"jobs": result, "recent_runs": self.store.job_runs(30)}
 
-    def shutdown(self) -> None:
-        self.executor.shutdown(wait=False, cancel_futures=False)
+    def shutdown(self, heartbeat=None) -> None:
+        self.maintenance.register_threads([threading.current_thread()])
+        while any(not future.done() for future in self.running.values()):
+            if heartbeat is not None:
+                heartbeat()
+            time.sleep(.2)
+        self.executor.shutdown(wait=True, cancel_futures=False)
+        self.maintenance.wait_settled(heartbeat)

@@ -11,6 +11,7 @@ import sys
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from astra_backend.maintenance_runtime import AdmissionClosed, get_runtime, run_process
 
 try:
     from astra_backend.schedule_store import load_schedule
@@ -57,7 +58,7 @@ JOBS = {
 
 def run_script(name: str) -> None:
     script = SCRIPTS / JOBS[name][0]
-    result = subprocess.run([sys.executable, str(script)], cwd=ROOT, text=True, capture_output=True, timeout=600)
+    result = run_process([sys.executable, str(script)], cwd=ROOT, text=True, capture_output=True, timeout=600)
     if result.returncode:
         logger.error("job=%s rc=%s stderr=%s", name, result.returncode, result.stderr[-1000:])
     else:
@@ -88,6 +89,10 @@ def main() -> None:
         last: dict[str, datetime | None] = {key: None for key in JOBS}
         logger.info("ASTRA standalone scheduler v6.6.2 started")
         while True:
+            maintenance = get_runtime("gateway")
+            if maintenance.poll():
+                time.sleep(5)
+                continue
             now = datetime.now(tz).replace(second=0, microsecond=0)
             current = datetime.now(tz)
             if not last["trader"] or (current - last["trader"]).total_seconds() >= 15 * 60:

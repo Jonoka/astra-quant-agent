@@ -211,6 +211,65 @@ def request(
     *,
     env: OKXEnvironment | None = None,
     timeout: float = DEFAULT_TIMEOUT,
+    logical_intent: str | None = None,
+) -> list[dict[str, Any]]:
+    if method.upper() == "GET":
+        return _request_once(method, path, params, env=env, timeout=timeout)
+    from astra_backend.maintenance_runtime import get_runtime, order_send, OrderNotSent, _request_intent
+    try:
+        runtime = get_runtime()
+    except Exception as exc:
+        raise OrderNotSent("maintenance startup/identity unavailable; order not sent") from exc
+    if not runtime.enabled:
+        runtime.startup()
+        return _request_once(method, path, params, env=env, timeout=timeout)
+    selected = env or current_environment()
+    if not selected.configured:
+        raise OKXNotConfigured(
+            f"OKX {selected.mode.upper()} API Key 未配置：V5 直签是唯一私有通道（fail-closed，无 CLI 回退）"
+        )
+    try:
+        _validate_params(params)
+        payload = _clean(params) or {}
+    except (ValueError, TypeError) as exc:
+        raise OrderNotSent(str(exc)) from exc
+    if not isinstance(payload, (dict, list)) or (isinstance(payload, list)
+                                                and any(not isinstance(row, dict) for row in payload)):
+        raise OrderNotSent("broker mutation requires a mapping or batch of mappings")
+    with runtime.activity("broker-mutation"):
+        if not path.startswith("/api/v5/trade/"):
+            return _request_once(method, path, payload, env=selected, timeout=timeout)
+        caller_id = payload.get("clOrdId") if isinstance(payload, dict) else None
+        cycle = os.environ.get("ASTRA_JOB_RUN_ID") or os.environ.get("ASTRA_SCHEDULED_AT", "")
+        request_intent = _request_intent.get() or os.environ.get("ASTRA_ORDER_INTENT_ID", "")
+        if not (logical_intent or caller_id or cycle or request_intent):
+            raise OrderNotSent("explicit logical request ID required: supply X-Astra-Request-ID or logical_intent")
+        targets = payload if isinstance(payload, list) else [payload]
+        logical_target = [{key: row.get(key) for key in ("instId", "ordId", "algoId", "side", "posSide")
+                           if row.get(key) is not None} for row in targets]
+        target_hash = hashlib.sha256(json.dumps(logical_target, sort_keys=True,
+                                                separators=(",", ":")).encode()).hexdigest()
+        stable = logical_intent or caller_id or f"{cycle or request_intent}:{path}:{target_hash}"
+        seed = f"{selected.identity}:{stable}"
+        logical = "okx-" + hashlib.sha256(seed.encode()).hexdigest()
+        def send(client_order_id):
+            outgoing = dict(payload) if isinstance(payload, dict) else payload
+            if isinstance(outgoing, dict) and path in {
+                "/api/v5/trade/order", "/api/v5/trade/close-position"}:
+                outgoing["clOrdId"] = client_order_id
+            elif isinstance(outgoing, dict) and path == "/api/v5/trade/order-algo":
+                outgoing["algoClOrdId"] = client_order_id
+            return _request_once(method, path, outgoing, env=selected, timeout=timeout, require_receipt=True)
+        return order_send(logical, {"account_identity": selected.identity, "path": path, "params": payload},
+                          send, runtime=runtime)
+
+
+def _request_once(
+    method: str, path: str,
+    params: Mapping[str, Any] | Sequence[Mapping[str, Any]] | None = None,
+    *, env: OKXEnvironment | None = None, timeout: float = DEFAULT_TIMEOUT,
+    require_evidence: bool = False,
+    require_receipt: bool = False,
 ) -> list[dict[str, Any]]:
     """One signed V5 private request. GET params go into the query string and the
     prehash; POST/list bodies are compact JSON and the prehash. Never falls back
@@ -260,18 +319,57 @@ def request(
         raise RuntimeError(f"OKX V5 网络请求失败：{type(exc).__name__}: {exc}") from exc
     if not isinstance(payload_json, dict):
         raise RuntimeError("OKX V5 invalid response envelope")
+    if require_receipt and ("code" not in payload_json or "data" not in payload_json
+            or not isinstance(payload_json["data"], list)
+            or any(not isinstance(row, dict) for row in payload_json["data"])):
+        from astra_backend.maintenance_runtime import UnknownOrderReceipt
+        raise UnknownOrderReceipt("unverifiable mutation response envelope")
+    if require_evidence and ("code" not in payload_json or str(payload_json["code"]) != "0"
+            or "data" not in payload_json or not isinstance(payload_json["data"], list)
+            or any(not isinstance(row, dict) for row in payload_json["data"])):
+        raise RuntimeError("unverified broker evidence envelope; missing data is not zero")
     data = payload_json.get("data") or []
     if not isinstance(data, list):
         data = [data]
     rows = [row for row in data if isinstance(row, dict)]
+    if require_receipt and rows:
+        from astra_backend.maintenance_runtime import UnknownOrderReceipt
+        targets = payload if isinstance(payload, list) else [payload]
+        if len(rows) != len(targets) or any("sCode" not in row for row in rows):
+            raise UnknownOrderReceipt("incomplete mutation receipt; reservation retained")
+        accepted = [row for row in rows if str(row["sCode"]) == "0"]
+        identities = [str(row.get("ordId") or row.get("algoId") or "") for row in accepted]
+        if any(not identity for identity in identities) or len(set(identities)) != len(identities):
+            raise UnknownOrderReceipt("unverifiable accepted mutation identities")
+        for target in targets:
+            for key in ("ordId", "algoId"):
+                if target.get(key) and not any(str(row.get(key, "")) == str(target[key]) for row in rows):
+                    raise UnknownOrderReceipt("mutation receipt does not identify every request target")
     failures = [row for row in rows if str(row.get("sCode", "0")) != "0"]
     if failures:
-        raise RuntimeError(
+        if require_receipt and len(failures) != len(rows):
+            from astra_backend.maintenance_runtime import UnknownOrderReceipt
+            raise UnknownOrderReceipt("mixed accepted/rejected mutation receipt; reservation retained")
+        from astra_backend.maintenance_runtime import BrokerRejected
+        raise BrokerRejected(
             f"OKX {failures[0].get('sCode')}: {failures[0].get('sMsg') or '业务请求失败'}"
         )
     if str(payload_json.get("code", "0")) != "0":
-        raise RuntimeError(f"OKX {payload_json.get('code')}: {payload_json.get('msg') or '请求失败'}")
+        if require_receipt and any((row.get("ordId") or row.get("algoId"))
+                                   and str(row.get("sCode", "0")) == "0" for row in rows):
+            from astra_backend.maintenance_runtime import UnknownOrderReceipt
+            raise UnknownOrderReceipt("contradictory mutation receipt; accepted identity retained")
+        from astra_backend.maintenance_runtime import BrokerRejected
+        raise BrokerRejected(f"OKX {payload_json.get('code')}: {payload_json.get('msg') or '请求失败'}")
     return rows
+
+
+def readonly_evidence(path, params=None, *, env=None, timeout=DEFAULT_TIMEOUT):
+    """Dedicated maintenance evidence; GET only with explicit successful data."""
+    if path not in {"/api/v5/account/config", "/api/v5/account/positions",
+                    "/api/v5/trade/orders-pending", "/api/v5/trade/orders-algo-pending"}:
+        raise ValueError("unsupported read-only maintenance evidence endpoint")
+    return _request_once("GET", path, params, env=env, timeout=timeout, require_evidence=True)
 
 
 # ---------------------------------------------------------------------------
@@ -299,6 +397,7 @@ def place_order(
     attach_algo_ords: Sequence[Mapping[str, Any]] | None = None,
     extra: Mapping[str, Any] | None = None,
     env: OKXEnvironment | None = None,
+    logical_intent: str | None = None,
 ) -> list[dict[str, Any]]:
     """POST /api/v5/trade/order. ``attach_tp``/``attach_sl`` build the V5
     ``attachAlgoOrds`` array (market execution via px=-1 by default, matching the
@@ -346,6 +445,8 @@ def place_order(
         params.update(extra)
     _required(inst_id, "instId")
     _validate_attachments(params.get("attachAlgoOrds"))
+    if logical_intent is not None:
+        return request("POST", "/api/v5/trade/order", params, env=env, logical_intent=logical_intent)
     return request("POST", "/api/v5/trade/order", params, env=env)
 
 

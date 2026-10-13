@@ -1,5 +1,21 @@
 # Astra release preparation contract
 
+## Local maintenance extension (not deployed)
+
+See astra-maintenance.md. New executable operations require schema2 with an
+explicit protocol scope; schema1 remains read-only parse compatibility and cannot
+execute/rollback through this helper. Normal scope retains the real >=480 window
+and also obtains the protocol barrier; maintenance scope substitutes only that
+time condition. Unsupported previous/candidate/recovery versions are rejected
+before any stop or rename, including missing-ROOT recovery. Candidate/recovery
+startup stays paused and explicit resume opens admission only after verified
+supervision restoration, exact runtime identity and fresh DEMO proof. Existing
+legacy bundle/helper/pin bytes are never modified or reused to conceal this change.
+
+Shared CI must additionally run the isolated maintenance acceptance and package
+the controller plus exact protocol module bytes. This local code/test approval is
+not approval for Actions dispatch, image/provenance publication or live operation.
+
 The deployment fork is `Jonoka/astra-quant-agent`, deploy branch `codex/deploy`.
 Each release builds its actual `github.sha`; upstream `main` remains unchanged.
 PR3's reviewed taker repair extends the exact application path set. Its five

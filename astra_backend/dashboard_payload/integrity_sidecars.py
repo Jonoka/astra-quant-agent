@@ -44,6 +44,8 @@ import json
 import os
 from typing import Any, List
 
+from astra_backend.dashboard_payload.health import _latest_trader_run
+
 __all__ = ["merge_ledger_sync_status", "merge_ai_health_failures",
            "LEDGER_STALE_SECONDS", "AI_CONSECUTIVE_FAILURE_THRESHOLD",
            "REASON_TRUNCATE"]
@@ -105,6 +107,8 @@ def merge_ai_health_failures(source_errors: List[str], data_dir) -> None:
     """把 `ai_health.json` 的连续失败并进 `source_errors`（原地）。
 
     阈值 `>= 2`：单次失败不降 PARTIAL（瞬时抖动），连续 2 轮才报。
+    若可读当前任务，必须精确关联；历史旁车不可污染新轮或明确跳过。
+    无任务记录的旧旁车只报告历史，不能声称“本轮”失败。
     """
     try:
         _ah_path = os.path.join(data_dir, "ai_health.json")
@@ -112,8 +116,15 @@ def merge_ai_health_failures(source_errors: List[str], data_dir) -> None:
             with open(_ah_path, "r", encoding="utf-8") as _f:
                 _ah = json.load(_f)
             _cf = int(_ah.get("consecutive_failures", 0) or 0)
-            if _cf >= AI_CONSECUTIVE_FAILURE_THRESHOLD:
-                source_errors.append(f"ai-inference: AI决策链连续{_cf}轮失败({str(_ah.get('last_error') or '')[:REASON_TRUNCATE]})，本轮无新指令")
+            if _cf >= AI_CONSECUTIVE_FAILURE_THRESHOLD and _ah.get("last_status", "failed") == "failed":
+                run = _latest_trader_run(data_dir)
+                if run:
+                    linked_id = _ah.get("job_run_id")
+                    if (isinstance(linked_id, bool) or str(linked_id) != str(run["id"])
+                            or not run.get("scheduled_at") or _ah.get("scheduled_at") != run["scheduled_at"]
+                            or run["brain_status"] in {"ok", "skipped", "not_run"}):
+                        return
+                source_errors.append(f"ai-inference: 最近已记录AI决策链连续{_cf}轮失败({str(_ah.get('last_error') or '')[:REASON_TRUNCATE]})，结果时间 {str(_ah.get('last_at') or '未知')[:40]}")
     except Exception:
         pass
 

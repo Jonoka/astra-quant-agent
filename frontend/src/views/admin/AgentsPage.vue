@@ -19,8 +19,9 @@ const props = withDefaults(defineProps<{ embedded?: boolean }>(), { embedded: fa
  * ⚠️ 修复：`useResource` 的文档声明 `immediate` 默认 true，但实现只在传入真值时取数，
  *    本页此前**从不自动加载**。现显式传 `immediate: true`。
  *
- * 后端契约（逐字未改）：GET /api/v1/admin/agents
- *   → { agents:[{id,name,role,health,last_run_at,last_run_status,output_age_seconds,output}],
+ * 后端契约（保留既有键并增加本轮审计字段）：GET /api/v1/admin/agents
+ *   → { agents:[{id,name,role,health,last_run_at,last_run_status,output_age_seconds,output,
+ *                last_job_run_id,scheduled_at,process_status,brain_status,brain_result_at,brain_detail}],
  *       prompt_policy,
  *       model_stats:{total_calls,successful_calls,avg_duration_ms,cached_tokens_total,
  *                    cache_hit_calls,cache_reporting_calls,cache_hit_rate},
@@ -33,6 +34,7 @@ const props = withDefaults(defineProps<{ embedded?: boolean }>(), { embedded: fa
  */
 import { computed } from 'vue';
 import { fmtDateTime } from '../../utils/format';
+import { resolveJobOutcome, statusTone as outcomeTone } from '../../utils/jobOutcome';
 import { useI18n } from '../../composables/useI18n';
 const { t } = useI18n();
 import PageHeader from '../../components/admin/PageHeader.vue';
@@ -50,10 +52,10 @@ const agents = computed<any[]>(() => data.value?.agents || []);
 const calls = computed<any[]>(() => (data.value?.model_calls || []).slice(0, 30));
 const showSkeleton = computed(() => loading.value && !loaded.value);
 
-/** 状态语义 → 徽章色调（判定集合与旧版 statusColor 完全一致） */
+/** 状态语义 → 徽章色调；healthy/degraded 必须与后端健康枚举一致。 */
 function statusTone(s: string): string {
-  if (['success', 'running', 'online', 'idle'].includes(s)) return 'badge-up';
-  if (['failed', 'error', 'offline'].includes(s)) return 'badge-down';
+  if (['healthy', 'success', 'online', 'idle'].includes(s)) return 'badge-up';
+  if (['degraded', 'failed', 'error', 'offline'].includes(s)) return 'badge-down';
   return 'badge-warn';
 }
 
@@ -63,9 +65,13 @@ function statusLabel(s: string): string {
 }
 
 const healthyCount = computed(
-  () => agents.value.filter((a) => ['success', 'running', 'online', 'idle'].includes(a.health)).length,
+  () => agents.value.filter((a) => ['healthy', 'success', 'online', 'idle'].includes(a.health)).length,
 );
 const issueCount = computed(() => agents.value.length - healthyCount.value);
+
+function agentOutcome(a: any) {
+  return resolveJobOutcome({ ...a, job_name: a.job, status: a.last_run_status });
+}
 
 const avgLatency = computed(() =>
   data.value?.model_stats?.avg_duration_ms
@@ -231,7 +237,17 @@ function ageText(a: any): string {
               <span class="ag-run-time mono">
                 {{ a.last_run_at ? fmtDateTime(a.last_run_at) : t('admin.agents.notScheduled') }}
               </span>
-              <span class="badge" :class="statusTone(a.last_run_status)" :title="a.last_run_status">{{ statusLabel(a.last_run_status) }}</span>
+              <span class="badge" :class="agentOutcome(a).tone">{{ statusLabel(agentOutcome(a).status) }}</span>
+              <template v-if="a.job === 'trader'">
+                <span class="badge" :class="agentOutcome(a).processTone">
+                  {{ t('admin.gateway.runs.inspection') }}: {{ t(`admin.gateway.runs.process.${agentOutcome(a).processStatus}`, t('admin.gateway.runs.process.unknown')) }}
+                </span>
+                <span class="badge" :class="outcomeTone(a.brain_status || 'unknown')" :title="a.brain_detail || ''">
+                  {{ t('admin.gateway.runs.brainLabel') }}: {{ t(`admin.gateway.runs.brain.${a.brain_status || 'unknown'}`, t('admin.gateway.runs.brain.unknown')) }}
+                </span>
+                <span class="ag-role mono">#{{ a.last_job_run_id ?? '--' }} · {{ a.scheduled_at || '--' }}</span>
+                <span v-if="a.brain_detail" class="ag-role">{{ a.brain_detail }}</span>
+              </template>
             </div>
 
             <span class="ag-age num">{{ ageText(a) }}</span>
@@ -372,6 +388,13 @@ function ageText(a: any): string {
   padding: var(--ds-space-3) var(--ds-space-4);
   border-bottom: 1px solid var(--ds-color-border-default);
   transition: background-color var(--dur-fast);
+}
+.ag-row > .badge {
+  max-width: 100%;
+  height: auto;
+  min-height: 20px;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 .ag-row:last-child {
   border-bottom: 0;

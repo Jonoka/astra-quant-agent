@@ -471,7 +471,36 @@ class NoOrderEndpointBypassTest(unittest.TestCase):
                                '"/api/v5/trade/close-position"', "'/api/v5/trade/close-position'",
                                '"/api/v5/trade/order-algo"', "'/api/v5/trade/order-algo'")
 
-    ALLOWED = {"scripts/okx_rest.py"}
+    # collection.py lists fixed endpoints only to redact diagnostic labels.
+    # The separate AST guard below forbids transport imports/calls there, so
+    # this narrow exception cannot become a second order-entry client.
+    ALLOWED = {"scripts/okx_rest.py", "astra_backend/collection.py"}
+
+    def test_collection_endpoint_allowlist_is_diagnostics_only(self):
+        import ast
+        root = Path(okx_rest.__file__).resolve().parents[1]
+        tree = ast.parse((root / "astra_backend/collection.py").read_text(encoding="utf-8"))
+        allowed_imports = {
+            "__future__", "contextlib", "contextvars", "datetime", "json", "math",
+            "threading", "time", "urllib.parse", "astra_backend.deadline",
+        }
+        forbidden_calls = {
+            "urlopen", "request", "Request", "get_market_session",
+            "place_order", "place_algo_oco", "close_position",
+            "__import__", "eval", "exec", "compile",
+        }
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for name in node.names:
+                    self.assertIn(name.name, allowed_imports,
+                                  "Diagnostics may not import a transport/client")
+            elif isinstance(node, ast.ImportFrom):
+                self.assertIn(node.module, allowed_imports,
+                              "Diagnostics may not import a transport/client")
+            elif isinstance(node, ast.Call):
+                name = getattr(node.func, "id", getattr(node.func, "attr", ""))
+                self.assertNotIn(name, forbidden_calls,
+                                 "Diagnostics must not call an HTTP/order transport")
 
     def test_only_the_shared_client_talks_to_order_endpoints(self):
         root = Path(okx_rest.__file__).resolve().parents[1]

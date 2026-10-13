@@ -33,6 +33,7 @@ export const zhRadar = {
   },
   health: {
     decisionAge: '决策缓存',
+    lastKnown: '上次已记录主脑结果',
   },
   council: {
     title: '委员会状态',

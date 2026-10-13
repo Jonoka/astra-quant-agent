@@ -27,6 +27,7 @@ export const enRadar = {
   },
   health: {
     decisionAge: 'Decision cache',
+    lastKnown: 'Last recorded brain result',
   },
   council: {
     title: 'Council status',

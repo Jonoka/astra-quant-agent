@@ -86,8 +86,8 @@ council → policy → prompts；路由表对拍门 `tests/trading/test_strategy
 | 审计与备份 | `audit.py`、`backup_store.py`、`backup_secrets.py`、`file_locks.py` |
 | 组合与账户 | `portfolio_aggregator.py`、`account_baseline.py`、`evolution_config.py`、`plaza_share.py` |
 | 提示词 | `prompt_views.py`、`dashboard_payload/prompts*` |
-| 通用 | `time_utils.py`、`math_utils.py`、`schemas.py`、`schedule_store.py`、`trading_session_store.py`（交易时段配置的读写；判定纯函数在 `scripts/trader/session.py`） |
-| 可观测性 | `metrics.py`（Prometheus 文本 exposition 的唯一渲染点；路由薄壳在 `routers/system.py::admin_metrics`） |
+| 通用 | `deadline.py`（共享单调 deadline、合作取消与短提交闸）、`http_deadline.py`（HTTP 剩余预算与逐跳重定向）、`time_utils.py`、`math_utils.py`、`schemas.py`、`schedule_store.py`、`trading_session_store.py`（交易时段配置的读写；判定纯函数在 `scripts/trader/session.py`） |
+| 可观测性 | `collection.py`（按调度运行关联的去敏阶段/端点耗时）、`metrics.py`（Prometheus 文本 exposition 的唯一渲染点；路由薄壳在 `routers/system.py::admin_metrics`） |
 
 ### L4 纯计算/载荷子包（新代码的默认去处）
 

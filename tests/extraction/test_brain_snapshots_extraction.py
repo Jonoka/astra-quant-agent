@@ -117,19 +117,23 @@ class BrainSnapshotsVerbatimTest(unittest.TestCase):
             self.assertEqual(Path(target).read_text(encoding="utf-8"), "[SYS|USER]")
             self.assertFalse(os.path.exists(target + ".tmp"))
 
-    def test_update_factor_library_calls_the_module_and_swallows_failure(self):
+    def test_update_factor_library_returns_exact_result_and_propagates_failure(self):
         """注入**假模块**（不依赖 sys.path 顺序/已导入状态）验证真的调用了自更新。"""
         import types as _types
         from scripts.brain import snapshots as S
         fake = _types.ModuleType("factor_library")
         fake.CALLS = []
-        fake.update_factor_library = lambda: fake.CALLS.append(1)
+        snapshot = {"timestamp": 123, "instruments": []}
+        def update():
+            fake.CALLS.append(1)
+            return snapshot
+        fake.update_factor_library = update
         with tempfile.TemporaryDirectory() as td:
             old_path = list(sys.path)
             old_mod = sys.modules.get("factor_library")
             sys.modules["factor_library"] = fake          # 段内 `import factor_library` 命中它
             try:
-                S.update_factor_library_snapshot(WORKSPACE_DIR=td, os=os, sys=sys)
+                self.assertIs(S.update_factor_library_snapshot(WORKSPACE_DIR=td, os=os, sys=sys), snapshot)
             finally:
                 sys.path[:] = old_path
                 if old_mod is None:
@@ -137,7 +141,7 @@ class BrainSnapshotsVerbatimTest(unittest.TestCase):
                 else:
                     sys.modules["factor_library"] = old_mod
         self.assertEqual(fake.CALLS, [1], "必须真的调用因子库自更新")
-        # 失败路径：**同样走替身**（让它抛错）⇒ 只告警不抛。
+        # 失败路径仍走替身；本轮刷新失败必须上抛，禁止退回旧快照。
         # ⚠️ 首版这里传了一个不存在的目录，于是段内 `import factor_library` 落到**真实**
         # 模块并触发自更新 → 真的写了 `data/factor_library_snapshot.json.tmp`，
         # 被离线守卫 `CONFIG_WRITE_ATTEMPTS` 当场抓到。测试的失败路径也必须封闭。
@@ -147,8 +151,9 @@ class BrainSnapshotsVerbatimTest(unittest.TestCase):
         old_mod = sys.modules.get("factor_library")
         sys.modules["factor_library"] = fake
         try:
-            S.update_factor_library_snapshot(WORKSPACE_DIR="/nonexistent-dir-xyz",
-                                             os=os, sys=sys)   # 不得抛出
+            with self.assertRaisesRegex(RuntimeError, "boom"):
+                S.update_factor_library_snapshot(WORKSPACE_DIR="/nonexistent-dir-xyz",
+                                                 os=os, sys=sys)
         finally:
             if old_mod is None:
                 sys.modules.pop("factor_library", None)

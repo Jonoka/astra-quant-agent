@@ -106,6 +106,28 @@ APPROVED_REQUEST_INSERT = '''f"INSERT INTO model_requests({','.join(columns)}) V
 "ON CONFLICT(client_request_id) DO UPDATE SET "
 + ",".join(f"{column}=excluded.{column}" for column in columns if column != "client_request_id")'''
 
+# Reviewed collection-status source contract. These are fixed reviewed file
+# identities, never hashes learned from a candidate during gate execution.
+COLLECTION_BASELINE_SOURCE = "0356bcdcf5ca58748b5ce42197b8cf4d9d1f32e6"
+COLLECTION_BASELINE_GATEWAY_SHA256 = "024b4e5e841614444092297d44e640c23ef93aeb6d48c2a5bf2e005a4ad93295"
+COLLECTION_HISTORICAL_GATEWAY_SHA256 = "3f7c2b55693f2110b84845a12abc171c9db2693f03802809033616708ccc2edf"
+COLLECTION_GATEWAY_SHA256 = "f6fe5f7b0b69d2cd3ff10cd42e9696d7e5c09aa8ce0f2a04d73d4c612d97fe06"
+COLLECTION_JOB_COLUMNS = [
+    [name, "TEXT", 1, "''", 0]
+    for name in ("process_status", "brain_status", "brain_result_at", "brain_detail")
+]
+# Independent pre-status declaration, including existing constraints and layout.
+# Only this exact table can receive the four additional columns.
+COLLECTION_JOB_BASE_SCHEMA = """CREATE TABLE job_runs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  job_name TEXT NOT NULL,
+  status TEXT NOT NULL,
+  started_at TEXT NOT NULL,
+  finished_at TEXT NOT NULL DEFAULT '',
+  return_code INTEGER,
+  detail TEXT NOT NULL DEFAULT ''
+)"""
+
 
 class GateError(RuntimeError):
     """Only constant, secret-free gate identifiers may be exposed."""
@@ -461,7 +483,7 @@ def db_state(root):
 
 
 def compatible_databases(before, after):
-    """Allow only the reviewed deadline additions; retain every old schema."""
+    """Allow only exact reviewed deadline/status additions; retain old schema."""
     require(set(before) == set(after), "database_set_changed")
     for name, old in before.items():
         require(name in after, "database_removed")
@@ -474,14 +496,22 @@ def compatible_databases(before, after):
             extra = {k: c for k, c in columns.items() if k not in prior}
             permitted = (name == GATEWAY_DATABASE and table == "job_runs" and
                          extra == {"scheduled_at": JOB_SCHEDULED_COLUMN})
-            require(not extra or permitted, "unknown_database_migration")
+            status_addition = (bool(extra) and name == GATEWAY_DATABASE and table == "job_runs" and
+                               approved_collection_job_transition(values, new["tables"][table]))
+            require(not extra or permitted or status_addition, "unknown_database_migration")
+            addition = []
+            if permitted:
+                addition = [JOB_SCHEDULED_COLUMN]
+            elif status_addition:
+                addition = ([JOB_SCHEDULED_COLUMN] if "scheduled_at" not in prior else []) + COLLECTION_JOB_COLUMNS
             require(new["tables"][table]["columns"] == values["columns"] +
-                    ([JOB_SCHEDULED_COLUMN] if permitted else []), "database_column_changed")
+                    addition, "database_column_changed")
             if "sql" in values:
                 expected_sql = values["sql"]
-                if permitted:
+                if addition:
                     require(expected_sql.endswith(")"), "gateway_job_schema_changed")
-                    expected_sql = expected_sql[:-1] + ", scheduled_at TEXT NOT NULL DEFAULT '')"
+                    for column in addition:
+                        expected_sql = expected_sql[:-1] + ", " + column[0] + " TEXT NOT NULL DEFAULT '')"
                 require(new["tables"][table].get("sql") == expected_sql, "database_table_sql_changed")
             if name == "data/astra_quant.db" and table != "sqlite_sequence":
                 require(new["tables"][table]["rows"] >= values["rows"], "trading_rows_lost")
@@ -500,6 +530,30 @@ def compatible_databases(before, after):
         if name == GATEWAY_DATABASE and extra_tables == {"model_requests"}:
             expected_indexes = sorted(expected_indexes + approved_request_schema()[1], key=lambda row: (row[0], row[1]))
         require(new["indexes"] == expected_indexes, "database_index_changed")
+
+
+def approved_collection_job_transition(before, after):
+    """Recognize exact historical/deadline -> four-status-column migrations.
+
+    Fixed SQL supplies the approval oracle. In particular, a table with changed
+    constraints, an extra column, or partial status migration is not accepted.
+    New empty databases can have a different physical column order; they do not
+    replace an existing table and must still preserve that order on later runs.
+    """
+    def shape(db):
+        return {"columns": [list(row[1:]) for row in db.execute("PRAGMA table_info(job_runs)")],
+                "sql": db.execute("SELECT sql FROM sqlite_master WHERE name='job_runs'").fetchone()[0]}
+    with closing(sqlite3.connect(":memory:")) as db:
+        db.execute(COLLECTION_JOB_BASE_SCHEMA)
+        legacy = shape(db)
+        db.execute(JOB_SCHEDULED_ALTER)
+        deadline = shape(db)
+        for name, *_ in COLLECTION_JOB_COLUMNS:
+            db.execute("ALTER TABLE job_runs ADD COLUMN " + name + " TEXT NOT NULL DEFAULT ''")
+        status = shape(db)
+    old = {key: before.get(key) for key in ("columns", "sql")}
+    new = {key: after.get(key) for key in ("columns", "sql")}
+    return old in (legacy, deadline) and new == status
 
 
 def approved_request_schema():
@@ -555,11 +609,19 @@ def source_literal(path, name):
 
 
 def gateway_source_compatibility(old, new):
-    """Only the independent deadline DDL and migration/query AST may change."""
+    """Accept only original deadline AST changes or fixed status-source pairs."""
     old_schema = source_literal(old, "SCHEMA")
     new_schema = source_literal(new, "SCHEMA")
     prior = source_literal(old, "MIGRATION_COLUMNS")
     require(source_literal(new, "MIGRATION_COLUMNS") == prior, "gateway_migration_changed")
+    old_hash, new_hash = digest(old), digest(new)
+    if (old_hash in {COLLECTION_BASELINE_GATEWAY_SHA256, COLLECTION_HISTORICAL_GATEWAY_SHA256,
+                    COLLECTION_GATEWAY_SHA256} and new_hash == COLLECTION_GATEWAY_SHA256):
+        # Complete fixed source hashes also bind every query, migration method,
+        # status projection and legacy-writer behavior in this reviewed pair.
+        return
+    require(not any(column[0] in schema for column in COLLECTION_JOB_COLUMNS
+                    for schema in (old_schema, new_schema)), "collection_gateway_source_changed")
     # Subsequent deployments already contain the reviewed additive migration.
     # Only byte-identical gateway code may use this same-schema branch.
     if old.read_bytes() == new.read_bytes():

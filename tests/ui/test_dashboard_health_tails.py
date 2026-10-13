@@ -105,7 +105,9 @@ class DashboardHealthTailsTests(unittest.TestCase):
         self.assertTrue(health["council_enabled"])
         self.assertEqual(health["council_timeout"], 45)
         self.assertEqual(health["last_cycle_time"], "2026-09-22 12:00:00")
-        self.assertEqual(health["last_council_status"], {"ok": True, "passed": 3})
+        self.assertIsNone(health["last_council_status"])
+        self.assertEqual(health["last_successful_council_status"], {"ok": True, "passed": 3})
+        self.assertEqual(health["last_status"], "unknown")
 
     def test_build_ai_health_decisions_read_exception_handled(self):
         # 决策文件读取异常安全跳过 (line 83)

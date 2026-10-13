@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import os
+import json
 import subprocess
 import sys
 import time
@@ -20,6 +21,16 @@ SCRIPTS = ROOT / "scripts"
 BJ_TZ = timezone(timedelta(hours=8))
 TRADER_SLOT_GUARD_SECONDS = 30
 TRADER_PERSISTENCE_SECONDS = 60
+
+
+def read_brain_result() -> dict[str, Any]:
+    """Read only; GatewayStore verifies this snapshot belongs to this exact run."""
+    try:
+        with (ROOT / "data" / "ai_health.json").open(encoding="utf-8") as handle:
+            result = json.load(handle)
+        return result if isinstance(result, dict) else {}
+    except (OSError, ValueError):
+        return {}
 
 
 @dataclass(frozen=True)
@@ -64,6 +75,10 @@ def scheduler_snapshot(store: GatewayStore) -> dict[str, Any]:
     schedule = load_schedule()
     now = datetime.now(BJ_TZ)
     jobs = []
+    recent_runs = store.job_runs(30)
+    latest_runs: dict[str, dict[str, Any]] = {}
+    for run in store.latest_job_runs():
+        latest_runs.setdefault(run["job_name"], run)
     for spec in current_jobs():
         raw = store.get_state(f"job.last.{spec.name}")
         try:
@@ -81,8 +96,9 @@ def scheduler_snapshot(store: GatewayStore) -> dict[str, Any]:
             "timezone": "Asia/Shanghai",
             "overdue": bool(spec.interval_seconds and last and (now - last).total_seconds() > spec.interval_seconds * 2),
             "offset_seconds": spec.offset_seconds,
+            "latest_run": latest_runs.get(spec.name),
         })
-    return {"jobs": jobs, "recent_runs": store.job_runs(30)}
+    return {"jobs": jobs, "recent_runs": recent_runs[:30]}
 
 
 class GatewayScheduler:
@@ -171,6 +187,12 @@ class GatewayScheduler:
                     self.store.skip_started_job(run_id, "budget_exhausted_before_start")
                     return
                 timeout = min(timeout, hard_deadline - admitted_at)
+            # Bound nested collection work too, leaving its caller's own
+            # deadline free to shorten this subprocess budget further.
+            env["ASTRA_EXECUTION_DEADLINE_EPOCH"] = str(
+                min(hard_deadline, admitted_at + timeout) if spec.name == "trader" and spec.interval_seconds
+                else time.time() + timeout
+            )
             result = subprocess.run(
                 command,
                 cwd=ROOT,
@@ -180,11 +202,14 @@ class GatewayScheduler:
                 env=env,
             )
             detail = (result.stderr if result.returncode else result.stdout)[-2000:]
-            self.store.finish_job(run_id, result.returncode, detail)
+            self.store.finish_job(run_id, result.returncode, detail,
+                                  brain_result=read_brain_result() if spec.name == "trader" else None)
         except subprocess.TimeoutExpired:
-            self.store.finish_job(run_id, 124, f"timeout after {timeout:g}s; execution_budget_exhausted")
+            self.store.finish_job(run_id, 124, f"timeout after {timeout:g}s; execution_budget_exhausted",
+                                  brain_result=read_brain_result() if spec.name == "trader" else None)
         except Exception as exc:
-            self.store.finish_job(run_id, 1, f"{type(exc).__name__}: {exc}")
+            self.store.finish_job(run_id, 1, f"{type(exc).__name__}: {exc}",
+                                  brain_result=read_brain_result() if spec.name == "trader" else None)
 
     def tick(self, now: datetime | None = None) -> list[str]:
         now = now or datetime.now(BJ_TZ)
@@ -221,6 +246,10 @@ class GatewayScheduler:
         schedule = load_schedule()
         result = []
         now = datetime.now(BJ_TZ)
+        recent_runs = self.store.job_runs(30)
+        latest_runs: dict[str, dict[str, Any]] = {}
+        for run in self.store.latest_job_runs():
+            latest_runs.setdefault(run["job_name"], run)
         for spec in current_jobs():
             last = self._last_at(spec.name)
             schedule_text = f"每 {spec.interval_seconds // 60} 分钟 (错峰 +{spec.offset_seconds // 60}m)" if (spec.interval_seconds and spec.offset_seconds) else (f"每 {spec.interval_seconds // 60} 分钟" if spec.interval_seconds else "、".join(self._scheduled_times(spec, schedule)))
@@ -233,8 +262,9 @@ class GatewayScheduler:
                 "timezone": "Asia/Shanghai",
                 "overdue": bool(spec.interval_seconds and last and (now - last).total_seconds() > spec.interval_seconds * 2),
                 "offset_seconds": spec.offset_seconds,
+                "latest_run": latest_runs.get(spec.name),
             })
-        return {"jobs": result, "recent_runs": self.store.job_runs(30)}
+        return {"jobs": result, "recent_runs": recent_runs[:30]}
 
     def shutdown(self) -> None:
         self.executor.shutdown(wait=False, cancel_futures=False)

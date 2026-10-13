@@ -23,6 +23,9 @@ if str(_THIS_DIR) not in sys.path:
 from astra_backend.math_utils import safe_float as _shared_safe_float
 
 import json
+import math
+import tempfile
+from contextvars import copy_context
 import time
 from datetime import datetime, timedelta, timezone
 import subprocess
@@ -39,7 +42,10 @@ from scripts.factors.scoring import score_composite_alpha
 from scripts.factors.candles_15m import compute_15m_indicators, mark_15m_missing
 from scripts.factors import okx_quant_factors as qf
 from scripts.okx_taker import latest_taker_net
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
+from astra_backend.deadline import (DeadlineExceeded, check_deadline, cancellation_scope,
+                                    commit_scope, execution_scope, deadline_scope)
+from astra_backend.collection import collection_phase
 
 _BJ = timezone(timedelta(hours=8))
 
@@ -67,6 +73,7 @@ def safe_float(val: Any, default: float = 0.0) -> float:
 
 
 def compute_instrument_factors(item: Dict[str, Any], smart_money_pool: Dict[str, Any]) -> Dict[str, Any]:
+    check_deadline()
     inst_id = item["instId"]
     name = item["name"]
     ccy = item.get("ccy", "")
@@ -76,6 +83,7 @@ def compute_instrument_factors(item: Dict[str, Any], smart_money_pool: Dict[str,
 
     # 1. Ticker & Depth (Orderbook)
     try:
+        check_deadline()
         d = public_json_get(f"/api/v5/market/ticker?instId={inst_id}", opener=urllib.request.urlopen,
                             timeout=3, user_agent=headers["User-Agent"])
         if d.get("code") == "0" and d.get("data"):
@@ -90,19 +98,25 @@ def compute_instrument_factors(item: Dict[str, Any], smart_money_pool: Dict[str,
             if factors["microstructure"]["ask_px"] > 0 and factors["price"] > 0:
                 spread = factors["microstructure"]["ask_px"] - factors["microstructure"]["bid_px"]
                 factors["microstructure"]["spread_pct"] = round(spread / factors["price"] * 100, 4)
+    except DeadlineExceeded:
+        raise
     except Exception:
         pass
 
     # 2. Orderbook Depth（T1：Top20 一次取回，同时导出 Top5/Top20 深度比与 OBI）
     depth_data = None
     try:
+        check_deadline()
         depth_data = fetch_orderbook_depth(inst_id, sz=20)
+    except DeadlineExceeded:
+        raise
     except Exception:
         depth_data = None
 
     # 3. 15M Candles -> ATR, RSI, VWAP Bias, Vol Ratio, OBV（+ T3 筹码分布）
     closes_15m: List[float] = []
     try:
+        check_deadline()
         d = {"data": fetch_candles(inst_id, bar="15m", limit=24)}
         if d["data"] and len(d["data"]) >= 15:
             raw_candles = d["data"]
@@ -115,6 +129,8 @@ def compute_instrument_factors(item: Dict[str, Any], smart_money_pool: Dict[str,
             print(f"[Factor] ⚠️ {inst_id} 15m K线获取不足15根（openapi/www 双域容灾均未取回），15M 因子降级缺省")
             # ★「不许假数据」：降级缺省 ≠ 留着默认值（rsi_14=50.0 会被打分读成中性偏多加 15 分）
             mark_15m_missing(factors)
+    except DeadlineExceeded:
+        raise
     except Exception as exc:
         print(f"[Factor] ⚠️ {inst_id} 15m K线处理异常: {exc}")
         mark_15m_missing(factors)
@@ -124,6 +140,7 @@ def compute_instrument_factors(item: Dict[str, Any], smart_money_pool: Dict[str,
     #    只取 24 根会让 MACD 块静默退化成 0/中性（实盘已观测到）。
     closes_1h: List[float] = []
     try:
+        check_deadline()
         d = {"data": fetch_candles(inst_id, bar="1H", limit=100)}
         if d["data"] and len(d["data"]) >= 15:
             raw_1h = d["data"]
@@ -142,6 +159,8 @@ def compute_instrument_factors(item: Dict[str, Any], smart_money_pool: Dict[str,
                     factors["volatility_channel"]["atr_1h_pct"] = round(atr_1h / factors["price"] * 100, 2)
         else:
             print(f"[Factor] ⚠️ {inst_id} 1H K线获取不足15根（openapi/www 双域容灾均未取回），1H ATR 字段降级缺省")
+    except DeadlineExceeded:
+        raise
     except Exception as exc:
         print(f"[Factor] ⚠️ {inst_id} 1H K线处理异常: {exc}")
 
@@ -154,6 +173,7 @@ def compute_instrument_factors(item: Dict[str, Any], smart_money_pool: Dict[str,
     factors["volatility_channel"]["bb_width_1h"] = None
     factors["volume_money_flow"]["cmf_1h"] = None
     try:
+        check_deadline()
         inds = fetch_indicators_batch(inst_id, ["adx", "kdj", "bbwidth", "cmf"], bar="1H")
         if "ADX" in inds:
             factors["trend_momentum"]["adx_1h"] = safe_float(inds["ADX"].get("adx"))
@@ -163,6 +183,8 @@ def compute_instrument_factors(item: Dict[str, Any], smart_money_pool: Dict[str,
             factors["volatility_channel"]["bb_width_1h"] = safe_float(inds["BBWIDTH"].get("bbWidth"))
         if "CMF" in inds:
             factors["volume_money_flow"]["cmf_1h"] = safe_float(inds["CMF"].get("cmf"))
+    except DeadlineExceeded:
+        raise
     except Exception:
         pass
 
@@ -183,12 +205,15 @@ def compute_instrument_factors(item: Dict[str, Any], smart_money_pool: Dict[str,
 
     # --- T3 筹码分布（24H 滚动 VWAP ± σ 带 + VPVR POC）---
     try:
+        check_deadline()
         raw_vp = fetch_candles(inst_id, bar="15m", limit=qf.VWAP_WINDOW_15M)
         if raw_vp:
             qf.apply_volume_profile_tier(factors, raw_candles_15m=raw_vp,
                                          price=factors["price"])
         else:
             qf.mark_volume_profile_missing(factors)
+    except DeadlineExceeded:
+        raise
     except Exception:
         pass
 
@@ -201,7 +226,9 @@ def compute_instrument_factors(item: Dict[str, Any], smart_money_pool: Dict[str,
 
     # --- T0.5 订单流（5M/1H CVD、Taker 买卖比、量价背离）---
     if ccy:
+        check_deadline()
         taker_5m = qf.fetch_taker_volume(ccy, "5m")
+        check_deadline()
         taker_1h = qf.fetch_taker_volume(ccy, "1H")
         qf.apply_orderflow_tier(factors, taker_5m=taker_5m, taker_1h=taker_1h,
                                 closes_1h=closes_1h)
@@ -218,11 +245,15 @@ def compute_instrument_factors(item: Dict[str, Any], smart_money_pool: Dict[str,
     # --- T0 衍生品（费率/预测费率/ΔOI/账户多空比/清算脉冲）+ T1.5/T2（BTC/ETH 限定）---
     if ccy:
         ul_y = "-".join(inst_id.split("-")[:2]) if "-" in inst_id else inst_id
+        check_deadline()
         snapshot = qf.fetch_derivatives_snapshot(ccy, inst_id, ul_y)
         options_block = basis_block = loan_block = None
         if ccy in ("BTC", "ETH"):
+            check_deadline()
             options_block = qf.fetch_option_snapshot(f"{ccy}-USD", ccy) or None
+            check_deadline()
             basis_block = qf.fetch_quarterly_basis_inputs(ccy) or None
+            check_deadline()
             loan_block = qf.fetch_loan_rate_snapshot() or None
         price_chg_1h_pct = 0.0
         if len(closes_1h) >= 2 and closes_1h[-2] > 0:
@@ -278,46 +309,88 @@ def compute_instrument_factors(item: Dict[str, Any], smart_money_pool: Dict[str,
     score_composite_alpha(factors)
 
 
+    check_deadline()
     return factors
 
-def update_factor_library() -> Dict[str, Any]:
-    """Fetch and calculate multi-pillar factor library snapshot for 6 instruments."""
-    # 1. Smart Money Pool：通过 OKX Rubik 官方公开统计端点采集
-    #    取数不可用时保持空池 → 优雅缺失化 available=False
-    try:
+def _factor_worker(item, smart_money_pool):
+    check_deadline()
+    result = compute_instrument_factors(item, smart_money_pool)
+    check_deadline()
+    return result
+
+
+def _collect_factors(smart_money_pool):
+    with cancellation_scope(), collection_phase("factor_computation"):
+        executor = ThreadPoolExecutor(max_workers=6)
+        futures = []
         try:
-            from scripts.factors.smart_money import fetch_smart_money_pool
-        except ImportError:
-            from factors.smart_money import fetch_smart_money_pool
-        smart_money_pool = fetch_smart_money_pool(TARGET_INSTRUMENTS)
-    except Exception as e:
-        print(f"[Factor Library] SmartMoney pool fetch fallback: {e}")
-        smart_money_pool = {}
+            for item in TARGET_INSTRUMENTS:
+                check_deadline()
+                futures.append(executor.submit(copy_context().run, _factor_worker, item, smart_money_pool))
+            results = []
+            for future in futures:
+                left = check_deadline()
+                results.append(future.result(timeout=left if math.isfinite(left) else None))
+                check_deadline()
+            return results
+        except FutureTimeout:
+            raise DeadlineExceeded("factor collection deadline exhausted") from None
+        finally:
+            for future in futures:
+                future.cancel()
+            executor.shutdown(wait=False, cancel_futures=True)
 
-    # 2. Parallel Factor Computations
-    with ThreadPoolExecutor(max_workers=6) as executor:
-        results = list(executor.map(lambda item: compute_instrument_factors(item, smart_money_pool), TARGET_INSTRUMENTS))
 
-    snapshot = {
-        "timestamp": int(time.time()),
-        "time_str": datetime.now(_BJ).isoformat(sep=" ", timespec="seconds"),
-        "instruments": results
-    }
+def update_factor_library() -> Dict[str, Any]:
+    """Compute a complete current refresh under its owner's original budget."""
+    with execution_scope(), cancellation_scope():
+        with collection_phase("factor_smart_money"):
+            try:
+                try:
+                    from scripts.factors.smart_money import fetch_smart_money_pool
+                except ImportError:
+                    from factors.smart_money import fetch_smart_money_pool
+                smart_money_pool = fetch_smart_money_pool(TARGET_INSTRUMENTS)
+            except DeadlineExceeded:
+                raise
+            except Exception as exc:
+                print(f"[Factor Library] SmartMoney pool fetch fallback: {type(exc).__name__}")
+                smart_money_pool = {}
 
-    # Atomic Write
-    try:
-        os.makedirs(DATA_DIR, exist_ok=True)
-        tmp_file = FACTOR_LIB_CACHE_FILE + ".tmp"
-        with open(tmp_file, "w", encoding="utf-8") as f:
-            json.dump(snapshot, f, ensure_ascii=False, indent=2)
-        os.replace(tmp_file, FACTOR_LIB_CACHE_FILE)
-    except Exception as e:
-        print(f"[Factor Library] Cache write error: {e}")
+        results = _collect_factors(smart_money_pool)
+        check_deadline()
+        snapshot = {
+            "timestamp": int(time.time()),
+            "time_str": datetime.now(_BJ).isoformat(sep=" ", timespec="seconds"),
+            "instruments": results
+        }
 
-    return snapshot
+        # Unique temp paths avoid collisions with the independently scheduled
+        # factor process. A cancelled/late worker cannot replace the live file.
+        with collection_phase("factor_publish"):
+            tmp_file = None
+            try:
+                check_deadline()
+                os.makedirs(DATA_DIR, exist_ok=True)
+                fd, tmp_file = tempfile.mkstemp(prefix=".factor-library-", suffix=".tmp", dir=DATA_DIR)
+                with os.fdopen(fd, "w", encoding="utf-8") as output:
+                    json.dump(snapshot, output, ensure_ascii=False, indent=2)
+                    output.flush()
+                    os.fsync(output.fileno())
+                with commit_scope():
+                    os.replace(tmp_file, FACTOR_LIB_CACHE_FILE)
+            except DeadlineExceeded:
+                raise
+            except Exception as exc:
+                print(f"[Factor Library] Cache write error: {type(exc).__name__}")
+            finally:
+                if tmp_file and os.path.exists(tmp_file):
+                    os.unlink(tmp_file)
+        return snapshot
 
 if __name__ == "__main__":
-    snap = update_factor_library()
+    with deadline_scope(timeout=55.0):
+        snap = update_factor_library()
     print(f"✅ Factor Library Engine Snapshot Complete at {snap['time_str']}:")
     for inst in snap["instruments"]:
         print(f"[{inst['name']}] Alpha Score: {inst['composite_alpha_score']:+5.1f} | Signal: {inst['signal_recommendation']:10} | ADX: {inst['trend_momentum']['adx_1h']} | SM Long: {inst['smart_money_derivatives']['weighted_long_pct']}% | CMF: {inst['volume_money_flow']['cmf_1h']} | Depth: {inst['microstructure']['bid_ask_depth_ratio']}")

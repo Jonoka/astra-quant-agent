@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import copy
 import os
 from pathlib import Path
@@ -17,6 +18,10 @@ SPEC = importlib.util.spec_from_file_location(
     "verify_deployment_source", Path(__file__).with_name("verify_deployment_source.py"))
 guard = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(guard)
+
+
+def baseline_root():
+    return Path(os.environ.get("ASTRA_COLLECTION_BASELINE", str(Path(__file__).resolve().parents[2])))
 
 
 class DeploymentSourceGuardTests(unittest.TestCase):
@@ -37,7 +42,7 @@ class DeploymentSourceGuardTests(unittest.TestCase):
             return SimpleNamespace(stdout=values[verb])
 
         with patch.object(guard.subprocess, "run", side_effect=git):
-            guard.verify(source or Path(__file__).resolve().parents[2], "a" * 40, revision)
+            guard.verify(source or baseline_root(), "a" * 40, revision)
 
     def test_reviewed_patch_with_workflow_delta_passes(self):
         self._verify(guard.APPLICATION_PATCH | {".github/workflows/build-release-image.yml"})
@@ -64,7 +69,7 @@ class DeploymentSourceGuardTests(unittest.TestCase):
     def test_all_reviewed_deadline_cases_are_required(self):
         self.assertEqual(sum(len(cases) for cases in guard.DEADLINE_REGRESSIONS.values()), 79)
         self.assertEqual(len(guard.DEADLINE_REGRESSIONS), 6)
-        root = Path(__file__).resolve().parents[2]
+        root = baseline_root()
         with tempfile.TemporaryDirectory() as tmp:
             source = Path(tmp)
             for relative in (*guard.DEADLINE_REGRESSIONS, *guard.TAKER_PATCH_SHA256,
@@ -87,7 +92,7 @@ class DeploymentSourceGuardTests(unittest.TestCase):
                 self._verify(source=source)
 
     def test_reviewed_taker_files_cannot_disappear_or_change(self):
-        root = Path(__file__).resolve().parents[2]
+        root = baseline_root()
         self.assertEqual(len(guard.TAKER_PATCH_SHA256), 5)
         with tempfile.TemporaryDirectory() as tmp:
             source = Path(tmp)
@@ -133,7 +138,7 @@ class DeploymentSourceGuardTests(unittest.TestCase):
                          guard.ALPHA_PATCH_SHA256['scripts/brain/packages.py'])
 
     def test_reviewed_alpha_files_cannot_disappear_or_change(self):
-        root = Path(__file__).resolve().parents[2]
+        root = baseline_root()
         with tempfile.TemporaryDirectory() as tmp:
             source = Path(tmp)
             for relative in (*guard.TAKER_PATCH_SHA256, *guard.ALPHA_PATCH_SHA256):
@@ -265,6 +270,184 @@ class DeploymentSourceGuardTests(unittest.TestCase):
                     smoke.verify_image_metadata(bad)
             with self.assertRaisesRegex(AssertionError, 'Published image differs'):
                 smoke.verify_image_metadata({**metadata, 'Id': 'different-published-id'})
+
+
+class CollectionSourceGuardTests(unittest.TestCase):
+    """Synthetic git responses exercise the contract, not real history proof."""
+    def setUp(self):
+        # Release tests exercise the unchanged historical PR contract against
+        # its archived reviewed source, never silently re-pin it to release bytes.
+        self.root = Path(os.environ.get("ASTRA_COLLECTION_REVIEWED_SOURCE", str(Path(__file__).resolve().parents[2])))
+        self.base = baseline_root()
+        self.contract = copy.deepcopy(guard.collection_contract())
+        self.revision = "b" * 40
+        self.delta = set(self.contract["application"]) | set(self.contract["ci_paths"])
+
+    def verify(self, *, delta=None, head=None, tree=None, dirty=b"", missing_ancestor=None,
+               baseline_delta=None, retained_delta=None, baseline_mutation=None, source=None,
+               upstream=guard.UPSTREAM_SHA, contract=None, bad_mode_path=None):
+        contract = self.contract if contract is None else contract
+        def git(command, **_kwargs):
+            verb, args = command[3], command[4:]
+            if verb == "rev-parse":
+                value = (head or self.revision) if args == ["HEAD"] else (tree or guard.COLLECTION_BASELINE_TREE)
+                return SimpleNamespace(stdout=(value + "\n").encode())
+            if verb == "merge-base":
+                if missing_ancestor in args:
+                    raise subprocess.CalledProcessError(1, command)
+                return SimpleNamespace(stdout=b"")
+            if verb == "diff":
+                pair = args[-2:]
+                if pair == [guard.UPSTREAM_SHA, guard.COLLECTION_BASELINE]:
+                    values = guard.APPLICATION_PATCH if baseline_delta is None else baseline_delta
+                elif pair == [guard.COLLECTION_BASELINE, self.revision]:
+                    values = self.delta if delta is None else delta
+                else:
+                    values = guard.APPLICATION_PATCH | set(self.contract["application"]) if retained_delta is None else retained_delta
+                return SimpleNamespace(stdout=b"\0".join(p.encode() for p in sorted(values)))
+            if verb == "show":
+                revision, relative = args[0].split(":", 1)
+                assert revision == guard.COLLECTION_BASELINE
+                value = (self.base / relative).read_bytes()
+                if baseline_mutation == relative:
+                    value += b"\n# unreviewed baseline mutation\n"
+                return SimpleNamespace(stdout=value)
+            if verb == "ls-tree":
+                relative = args[-1]
+                if args[0] == "--name-only":
+                    return SimpleNamespace(stdout=(relative + "\n").encode() if (self.base / relative).exists() else b"")
+                mode = "100755" if relative == bad_mode_path else "100644"
+                return SimpleNamespace(stdout=(mode + " blob " + "d" * 40 + "\t" + relative + "\0").encode())
+            if verb == "status":
+                return SimpleNamespace(stdout=dirty)
+            raise AssertionError("Unexpected git fixture command")
+        with patch.object(guard.subprocess, "run", side_effect=git), patch.object(guard, "collection_contract", return_value=contract):
+            guard.verify_collection_source(source or self.root, upstream, self.revision)
+
+    def test_reviewed_collection_source_fixture_passes(self):
+        self.verify()
+
+    def test_every_approved_application_and_ci_mode_is_checked(self):
+        for relative in self.delta:
+            with self.subTest(relative=relative), self.assertRaisesRegex(AssertionError, "Unreviewed Git mode or type"):
+                self.verify(bad_mode_path=relative)
+
+    def test_real_git_tree_modes_reject_chmod_symlinks_and_gitlinks(self):
+        # A real, disposable Git index proves mode semantics. It does not claim
+        # to reconstruct or verify the production repository's commit history.
+        with tempfile.TemporaryDirectory(prefix="astra-source-mode-fixture-") as temporary:
+            root = Path(temporary)
+            def git(*args, **kwargs):
+                return subprocess.run(["git", "-C", str(root), *args], check=True,
+                                      capture_output=True, timeout=15, **kwargs).stdout
+            git("init", "--quiet")
+            target = root / "fixture.py"
+            target.write_text("# reviewed synthetic file\n")
+            git("add", "--", "fixture.py")
+            approved_tree = git("write-tree").decode().strip()
+            guard.verify_tree_modes(git, approved_tree, {"fixture.py"})
+            target.chmod(0o755)
+            git("add", "--", "fixture.py")
+            executable_tree = git("write-tree").decode().strip()
+            target.unlink()
+            target.symlink_to("synthetic-target")
+            git("add", "--", "fixture.py")
+            symlink_tree = git("write-tree").decode().strip()
+            commit = git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+                         "commit-tree", approved_tree, input=b"Synthetic fixture only\n").decode().strip()
+            git("update-index", "--add", "--cacheinfo", "160000," + commit + ",fixture.py")
+            gitlink_tree = git("write-tree").decode().strip()
+            for label, tree in (("chmod", executable_tree), ("symlink", symlink_tree), ("gitlink", gitlink_tree)):
+                with self.subTest(label=label), self.assertRaisesRegex(AssertionError, "Unreviewed Git mode or type"):
+                    guard.verify_tree_modes(git, tree, {"fixture.py"})
+
+    def test_exact_upstream_is_required(self):
+        with self.assertRaisesRegex(AssertionError, "Wrong collection upstream"):
+            self.verify(upstream="a" * 40)
+
+    def test_wrong_head_is_rejected(self):
+        with self.assertRaisesRegex(AssertionError, "Wrong fork source commit"):
+            self.verify(head="c" * 40)
+
+    def test_wrong_baseline_tree_is_rejected(self):
+        with self.assertRaisesRegex(AssertionError, "Wrong collection baseline tree"):
+            self.verify(tree="c" * 40)
+
+    def test_each_pinned_ancestor_is_required(self):
+        for ancestor in (guard.UPSTREAM_SHA, guard.PREVIOUS_SHA, guard.COLLECTION_BASELINE):
+            with self.subTest(ancestor=ancestor), self.assertRaises(subprocess.CalledProcessError):
+                self.verify(missing_ancestor=ancestor)
+
+    def test_dirty_or_untracked_source_is_rejected(self):
+        for status in (b" M astra_backend/collection.py\n", b"?? unreviewed.py\n"):
+            with self.subTest(status=status), self.assertRaisesRegex(AssertionError, "Source changed"):
+                self.verify(dirty=status)
+
+    def test_each_missing_application_path_is_rejected(self):
+        for relative in self.contract["application"]:
+            with self.subTest(relative=relative), self.assertRaisesRegex(AssertionError, "collection application changes"):
+                self.verify(delta=self.delta - {relative})
+
+    def test_unreviewed_application_path_is_rejected(self):
+        with self.assertRaisesRegex(AssertionError, "collection application changes"):
+            self.verify(delta=self.delta | {"scripts/unreviewed.py"})
+
+    def test_missing_or_extra_ci_path_is_rejected(self):
+        for delta in (self.delta - {".github/scripts/run_collection_regressions.py"},
+                      self.delta | {".github/workflows/build-release-image.yml"},
+                      self.delta | {".github/unreviewed.py"}):
+            with self.subTest(delta=delta), self.assertRaisesRegex(AssertionError, "collection CI changes"):
+                self.verify(delta=delta)
+
+    def test_baseline_must_keep_original_application_patch(self):
+        with self.assertRaisesRegex(AssertionError, "Baseline lost retained patch"):
+            self.verify(baseline_delta=guard.APPLICATION_PATCH - {"scripts/okx_taker.py"})
+
+    def test_candidate_must_keep_original_application_patch(self):
+        retained = guard.APPLICATION_PATCH | set(self.contract["application"])
+        with self.assertRaisesRegex(AssertionError, "Missing retained patch"):
+            self.verify(retained_delta=retained - {"scripts/okx_taker.py"})
+
+    def test_old_taker_and_alpha_baseline_pins_remain_required(self):
+        for relative in {**guard.TAKER_PATCH_SHA256, **guard.ALPHA_PATCH_SHA256}:
+            with self.subTest(relative=relative), self.assertRaisesRegex(AssertionError, "Baseline reviewed source changed"):
+                self.verify(baseline_mutation=relative)
+
+    def test_changed_application_baseline_hash_is_required(self):
+        with self.assertRaisesRegex(AssertionError, "Collection baseline source changed"):
+            self.verify(baseline_mutation="astra_gateway/store.py")
+
+    def test_every_candidate_hash_is_required(self):
+        # Mutate each approved pin, not the working tree or the implementation.
+        for relative in self.contract["application"]:
+            contract = copy.deepcopy(self.contract)
+            contract["application"][relative]["sha256"] = "0" * 64
+            with self.subTest(relative=relative), self.assertRaisesRegex(AssertionError, "Reviewed collection source changed"):
+                self.verify(contract=contract)
+
+    def test_every_non_self_referential_ci_hash_is_required(self):
+        for relative in self.contract["ci_sha256"]:
+            contract = copy.deepcopy(self.contract)
+            contract["ci_sha256"][relative] = "0" * 64
+            with self.subTest(relative=relative), self.assertRaisesRegex(AssertionError, "Reviewed CI source changed"):
+                self.verify(contract=contract)
+
+    def test_baseline_and_self_hash_exemptions_cannot_be_extended(self):
+        mutations = [dict(baseline="c" * 40), dict(baseline_tree="c" * 40),
+                     dict(self_hash_exemptions=self.contract["self_hash_exemptions"] + [".github/scripts/runtime_release_upgrade.py"])]
+        for mutation in mutations:
+            with self.subTest(mutation=mutation), patch.object(Path, "read_text", return_value=json.dumps({**self.contract, **mutation})), self.assertRaises(AssertionError):
+                guard.collection_contract()
+
+    def test_new_source_is_not_eligible_for_default_release_verify(self):
+        with self.assertRaisesRegex(AssertionError, "Missing retained patch"):
+            DeploymentSourceGuardTests()._verify(guard.APPLICATION_PATCH | set(self.contract["application"]), source=self.root)
+
+    def test_static_contract_baseline_and_new_paths_are_fixed(self):
+        self.assertEqual(self.contract["baseline"], "0356bcdcf5ca58748b5ce42197b8cf4d9d1f32e6")
+        self.assertEqual(len(self.contract["application"]), 48)
+        self.assertIsNone(self.contract["application"]["astra_backend/collection.py"]["base_sha256"])
+        self.assertNotIn(".github/workflows/build-release-image.yml", self.contract["ci_paths"])
 
 
 if __name__ == "__main__":

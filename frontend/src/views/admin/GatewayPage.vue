@@ -11,9 +11,9 @@
  *
  * 三态：首屏骨架 · 空态 · 拉取失败（含「已有旧数据时的刷新失败」细条提示）
  *
- * 后端契约（逐字未改）：
+ * 后端契约（保留既有键并展示本轮审计字段）：
  *   GET  /api/v1/admin/gateway?limit=50
- *        → running / pid / version / stats{} / event_health{} / scheduler.jobs[] / deliveries[]
+ *        → running / pid / version / stats{} / event_health{} / scheduler.jobs[] / scheduler.recent_runs[] / deliveries[]
  *   POST /api/v1/admin/gateway/deliveries/{id}/replay
  *        body { confirmation: <输入去空格转大写> }
  *   ⚠️ 语义与旧版一致：仍由后端校验确认短语，前端只负责收集；输入非空即允许提交。
@@ -30,6 +30,9 @@ import BaseDialog from '../../components/base/BaseDialog.vue';
 import PageHeader from '../../components/admin/PageHeader.vue';
 import BaseTabs from '../../components/base/BaseTabs.vue';
 import AgentsPage from './AgentsPage.vue';
+import BaseCodeBlock from '../../components/base/BaseCodeBlock.vue';
+import BaseDrawer from '../../components/base/BaseDrawer.vue';
+import { resolveJobOutcome } from '../../utils/jobOutcome';
 
 import { Zap, RefreshCw, RotateCcw, Server, Clock, CalendarClock, AlertTriangle, Save } from 'lucide-vue-next';
 import { fmtDateTime } from '../../utils/format';
@@ -85,6 +88,8 @@ const { data: gw, loading, error, loaded, reload: load } = useResource<any>(
 const showSkeleton = computed(() => loading.value && !loaded.value);
 const jobs = computed<any[]>(() => gw.value?.scheduler?.jobs || []);
 const deliveries = computed<any[]>(() => gw.value?.deliveries || []);
+const jobRuns = computed<any[]>(() => gw.value?.scheduler?.recent_runs || []);
+const selectedRun = ref<any>(null);
 
 const deliveredCount = computed(() => (gw.value?.stats?.delivered ?? 0) + (gw.value?.stats?.accepted ?? 0));
 const deliveryTotal = computed(() => Object.values(gw.value?.stats || {}).reduce((a: number, b: any) => a + Number(b || 0), 0));
@@ -380,20 +385,61 @@ onMounted(() => {
             <span class="text-right sm:text-left">{{ t('admin.gateway.scheduler.colStatus') }}</span>
           </div>
           <div v-for="j in jobs" :key="j.name" class="gw-job" :class="{ 'is-overdue': j.overdue }">
-            <span class="dsh-status-dot" :class="j.overdue ? 'error' : 'active'" aria-hidden="true" />
+            <span class="dsh-status-dot" :class="j.overdue || (j.latest_run && resolveJobOutcome(j.latest_run).tone === 'badge-down') ? 'error' : j.latest_run && resolveJobOutcome(j.latest_run).tone === 'badge-up' ? 'active' : 'warn'" aria-hidden="true" />
             <span class="gw-job-name mono truncate" :title="j.name">{{ j.name }}</span>
-            <span class="gw-job-cell mono">{{ j.interval_seconds }}s</span>
+            <span class="gw-job-cell mono">{{ j.schedule }}</span>
             <span class="gw-job-cell mono">
-              {{ j.last_run ? fmtJobTime(j.last_run) : t('admin.gateway.scheduler.notScheduled') }}
+              {{ j.last_scheduled_at ? fmtJobTime(j.last_scheduled_at) : t('admin.gateway.scheduler.notScheduled') }}
             </span>
             <span>
-              <span class="badge" :class="j.overdue ? 'badge-down' : 'badge-up'">
-                {{ j.overdue ? t('admin.gateway.scheduler.overdue') : t('admin.gateway.scheduler.normal') }}
+              <span class="badge" :class="j.overdue ? 'badge-down' : j.latest_run ? resolveJobOutcome(j.latest_run).tone : 'badge-warn'">
+                {{ j.overdue ? t('admin.gateway.scheduler.overdue') : j.latest_run ? t(`admin.gateway.runs.status.${resolveJobOutcome(j.latest_run).status}`, resolveJobOutcome(j.latest_run).status) : t('admin.gateway.scheduler.notScheduled') }}
+              </span>
+              <span v-if="j.name === 'trader' && j.latest_run" class="badge" :class="resolveJobOutcome(j.latest_run).brainTone">
+                {{ t('admin.gateway.runs.brainLabel') }}: {{ t(`admin.gateway.runs.brain.${resolveJobOutcome(j.latest_run).brainStatus}`, t('admin.gateway.runs.brain.unknown')) }}
               </span>
             </span>
           </div>
         </div>
       </section>
+
+      <section class="card">
+        <header class="card-head">
+          <div>
+            <h2 class="card-title"><Clock :size="14" />{{ t('admin.gateway.runs.title') }}</h2>
+            <p class="card-sub">{{ t('admin.gateway.runs.desc') }}</p>
+          </div>
+        </header>
+        <DataTable flat :rows="jobRuns" :row-key="(r: any) => r.id" :loading="showSkeleton"
+          :empty-text="t('common.noRecords')" :label="t('admin.gateway.runs.title')">
+          <template #head>
+            <tr class="gw-th">
+              <th scope="col">{{ t('admin.gateway.scheduler.colJob') }}</th>
+              <th scope="col">{{ t('admin.gateway.runs.inspection') }}</th>
+              <th scope="col">{{ t('admin.gateway.runs.brainLabel') }}</th>
+              <th scope="col">{{ t('admin.gateway.runs.scheduledAt') }}</th>
+              <th scope="col">{{ t('admin.gateway.runs.detail') }}</th>
+            </tr>
+          </template>
+          <template #row="{ row: r }">
+            <td class="mono">#{{ r.id }} · {{ r.job_name }}</td>
+            <td><span class="badge" :class="resolveJobOutcome(r).processTone">{{ t(`admin.gateway.runs.process.${resolveJobOutcome(r).processStatus}`, t('admin.gateway.runs.process.unknown')) }}</span></td>
+            <td><span class="badge" :class="resolveJobOutcome(r).brainTone">{{ t(`admin.gateway.runs.brain.${resolveJobOutcome(r).brainStatus}`, t('admin.gateway.runs.brain.unknown')) }}</span></td>
+            <td class="mono">{{ r.scheduled_at ? fmtDateTime(r.scheduled_at) : '--' }}</td>
+            <td><button type="button" class="btn btn-quiet btn-sm" @click="selectedRun = r">{{ t('admin.gateway.runs.detail') }}</button></td>
+          </template>
+        </DataTable>
+      </section>
+
+      <BaseDrawer :open="!!selectedRun" :title="t('admin.gateway.runs.detail')" @close="selectedRun = null">
+        <template v-if="selectedRun">
+          <p class="mono">#{{ selectedRun.id }} · {{ selectedRun.job_name }} · {{ selectedRun.scheduled_at || '--' }}</p>
+          <p>{{ t('admin.gateway.runs.inspection') }}: {{ t(`admin.gateway.runs.process.${resolveJobOutcome(selectedRun).processStatus}`, t('admin.gateway.runs.process.unknown')) }} · {{ t('admin.gateway.runs.returnCode') }}: {{ selectedRun.return_code ?? '--' }}</p>
+          <p>{{ t('admin.gateway.runs.brainLabel') }}: {{ t(`admin.gateway.runs.brain.${resolveJobOutcome(selectedRun).brainStatus}`, t('admin.gateway.runs.brain.unknown')) }} · {{ selectedRun.brain_result_at || '--' }}</p>
+          <p v-if="selectedRun.brain_detail">{{ selectedRun.brain_detail }}</p>
+          <BaseCodeBlock :code="selectedRun.detail || '--'" />
+        </template>
+      </BaseDrawer>
 
       <!-- ══ 交易时段 ══ -->
       <section class="card">
@@ -711,6 +757,13 @@ onMounted(() => {
   min-height: var(--row-h);
   padding: 0 var(--ds-space-4);
   border-bottom: 1px solid var(--ds-color-border-default);
+}
+.gw-job > span:last-child .badge {
+  max-width: 100%;
+  height: auto;
+  min-height: 20px;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 @media (max-width: 640px) {
   .gw-job {

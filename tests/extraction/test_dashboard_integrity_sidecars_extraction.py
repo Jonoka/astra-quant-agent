@@ -289,7 +289,8 @@ class AiHealthTest(_TmpDir):
         self.assertEqual(len(errs), 1)
         self.assertIn("AI决策链连续2轮失败", errs[0])
         self.assertIn("boom", errs[0])
-        self.assertIn("本轮无新指令", errs[0])
+        self.assertIn("最近已记录", errs[0])
+        self.assertNotIn("本轮", errs[0])
 
     def test_zero_failures(self):
         self._write_cf(0)

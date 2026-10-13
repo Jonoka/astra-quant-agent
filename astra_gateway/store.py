@@ -43,7 +43,11 @@ CREATE TABLE IF NOT EXISTS job_runs (
   started_at TEXT NOT NULL,
   finished_at TEXT NOT NULL DEFAULT '',
   return_code INTEGER,
-  detail TEXT NOT NULL DEFAULT ''
+  detail TEXT NOT NULL DEFAULT '',
+  process_status TEXT NOT NULL DEFAULT '',
+  brain_status TEXT NOT NULL DEFAULT '',
+  brain_result_at TEXT NOT NULL DEFAULT '',
+  brain_detail TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_job_runs_name ON job_runs(job_name, id DESC);
 CREATE TABLE IF NOT EXISTS runtime_state (
@@ -105,6 +109,41 @@ MIGRATION_COLUMNS: tuple[tuple[str, str], ...] = (
 )
 
 
+def job_run_outcome(run: dict[str, Any]) -> dict[str, Any]:
+    """Project legacy rows honestly without guessing from a global AI sidecar.
+
+    A trader exit code proves inspection completion, not an AI decision. Old
+    rows have no correlated result and must not acquire one from a later run.
+    This is also used by the dashboard's read-only SQLite reader.
+    """
+    out = dict(run)
+    recorded = str(out.get("status") or "unknown")
+    # A previous-version writer can finish or recover a run created by this
+    # version without updating the additive columns. The original lifecycle
+    # fields remain authoritative for process completion across rollback.
+    code = out.get("return_code")
+    if recorded in {"running", "skipped", "interrupted"}:
+        process = recorded
+    elif code is not None:
+        process = "success" if code == 0 else "failed"
+    else:
+        process = str(out.get("process_status") or recorded)
+        if process == "running":
+            process = recorded
+    brain = str(out.get("brain_status") or "")
+    if brain == "pending" and process != "running":
+        brain = ""
+    if not brain:
+        brain = ("not_run" if recorded == "skipped" else "unknown") if out.get("job_name") == "trader" else "not_applicable"
+    status = recorded
+    if out.get("job_name") == "trader" and process == "success":
+        status = "failed" if brain == "failed" else "success" if brain == "ok" else "completed"
+    out.update(status=status, process_status=process, brain_status=brain,
+               brain_result_at=str(out.get("brain_result_at") or ""),
+               brain_detail=str(out.get("brain_detail") or ""))
+    return out
+
+
 class GatewayStore:
     def __init__(self, path: Path):
         self.path = path
@@ -127,6 +166,9 @@ class GatewayStore:
         job_columns = {row["name"] for row in connection.execute("PRAGMA table_info(job_runs)")}
         if "scheduled_at" not in job_columns:
             connection.execute("ALTER TABLE job_runs ADD COLUMN scheduled_at TEXT NOT NULL DEFAULT ''")
+        for name in ("process_status", "brain_status", "brain_result_at", "brain_detail"):
+            if name not in job_columns:
+                connection.execute(f"ALTER TABLE job_runs ADD COLUMN {name} TEXT NOT NULL DEFAULT ''")
 
     def _secure_files(self) -> None:
         for candidate in (self.path, Path(str(self.path)+"-wal"), Path(str(self.path)+"-shm")):
@@ -227,7 +269,10 @@ class GatewayStore:
     def begin_job(self, job_name: str, scheduled_at: str = "") -> int:
         now = datetime.now(BJ_TZ).strftime("%Y-%m-%d %H:%M:%S")
         with self.connect() as connection:
-            cursor = connection.execute("INSERT INTO job_runs(job_name,status,started_at,scheduled_at) VALUES (?,'running',?,?)", (job_name, now, scheduled_at))
+            cursor = connection.execute(
+                "INSERT INTO job_runs(job_name,status,started_at,scheduled_at,process_status,brain_status) VALUES (?,'running',?,?,'running',?)",
+                (job_name, now, scheduled_at, "pending" if job_name == "trader" else "not_applicable"),
+            )
             return int(cursor.lastrowid)
 
     def record_skipped_job(self, job_name: str, scheduled_at: str, reason: str) -> bool:
@@ -244,8 +289,8 @@ class GatewayStore:
             if previous:
                 return False
             connection.execute(
-                "INSERT INTO job_runs(job_name,status,started_at,finished_at,detail,scheduled_at) VALUES (?,'skipped',?,?,?,?)",
-                (job_name, now, now, reason, scheduled_at),
+                "INSERT INTO job_runs(job_name,status,started_at,finished_at,detail,scheduled_at,process_status,brain_status) VALUES (?,'skipped',?,?,?,?,'skipped',?)",
+                (job_name, now, now, reason, scheduled_at, "not_run" if job_name == "trader" else "not_applicable"),
             )
             return True
 
@@ -256,7 +301,7 @@ class GatewayStore:
         now = datetime.now(BJ_TZ).strftime("%Y-%m-%d %H:%M:%S")
         with self.connect() as connection:
             connection.execute(
-                "UPDATE job_runs SET status='skipped',finished_at=?,detail=? WHERE id=? AND status='running'",
+                "UPDATE job_runs SET status='skipped',process_status='skipped',brain_status=CASE WHEN job_name='trader' THEN 'not_run' ELSE 'not_applicable' END,finished_at=?,detail=? WHERE id=? AND status='running'",
                 (now, reason, run_id),
             )
 
@@ -267,7 +312,7 @@ class GatewayStore:
         now = timestamp.strftime("%Y-%m-%d %H:%M:%S")
         with self.connect() as connection:
             cursor = connection.execute(
-                "UPDATE job_runs SET status='interrupted', finished_at=?, detail='进程终止未收尾——worker 启动时收编僵尸 running 行'"
+                "UPDATE job_runs SET status='interrupted', process_status='interrupted', brain_status=CASE WHEN job_name='trader' THEN 'unknown' ELSE 'not_applicable' END, finished_at=?, detail='进程终止未收尾——worker 启动时收编僵尸 running 行'"
                 " WHERE status='running'", (now,))
             connection.execute(
                 "UPDATE model_requests SET status='cancelled', completed_at=?, error_type='WorkerInterrupted' "
@@ -276,14 +321,37 @@ class GatewayStore:
             )
             return cursor.rowcount
 
-    def finish_job(self, run_id: int, return_code: int, detail: str) -> None:
+    def finish_job(self, run_id: int, return_code: int, detail: str,
+                   brain_result: dict[str, Any] | None = None) -> None:
         timestamp = datetime.now(BJ_TZ)
         now = timestamp.strftime("%Y-%m-%d %H:%M:%S")
-        status = "success" if return_code == 0 else "failed"
+        process_status = "success" if return_code == 0 else "failed"
         with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            run = connection.execute("SELECT * FROM job_runs WHERE id=?", (run_id,)).fetchone()
+            if not run or run["status"] != "running":
+                return
+            brain_status = "unknown" if run["job_name"] == "trader" else "not_applicable"
+            brain_at = ""
+            brain_detail = ""
+            if run["job_name"] == "trader" and isinstance(brain_result, dict):
+                # IDs alone are not sufficient after a DB replacement. The
+                # scheduled slot is an independent part of this run's identity.
+                linked_id = brain_result.get("job_run_id")
+                linked = (not isinstance(linked_id, bool) and str(linked_id) == str(run_id)
+                          and bool(run["scheduled_at"])
+                          and brain_result.get("scheduled_at") == run["scheduled_at"])
+                candidate = brain_result.get("last_status")
+                if linked and isinstance(candidate, str) and candidate in {"ok", "failed", "skipped"}:
+                    brain_status = candidate
+                    brain_at = str(brain_result.get("last_at") or "")[:100]
+                    brain_detail = str(brain_result.get("last_error") or brain_result.get("reason") or "")[:300]
+            status = process_status
+            if run["job_name"] == "trader" and process_status == "success":
+                status = "failed" if brain_status == "failed" else "success" if brain_status == "ok" else "completed"
             connection.execute(
-                "UPDATE job_runs SET status=?, finished_at=?, return_code=?, detail=? WHERE id=?",
-                (status, now, return_code, detail[-2000:], run_id),
+                "UPDATE job_runs SET status=?, process_status=?, brain_status=?, brain_result_at=?, brain_detail=?, finished_at=?, return_code=?, detail=? WHERE id=?",
+                (status, process_status, brain_status, brain_at, brain_detail, now, return_code, detail[-2000:], run_id),
             )
             connection.execute(
                 "UPDATE model_requests SET status=?, completed_at=?, error_type=? WHERE job_run_id=? AND status='running'",
@@ -329,7 +397,17 @@ class GatewayStore:
     def job_runs(self, limit: int = 30) -> list[dict[str, Any]]:
         with self.connect() as connection:
             rows = connection.execute("SELECT * FROM job_runs ORDER BY id DESC LIMIT ?", (max(1, min(limit, 200)),)).fetchall()
-        return [dict(row) for row in rows]
+        return [job_run_outcome(dict(row)) for row in rows]
+
+    def latest_job_runs(self) -> list[dict[str, Any]]:
+        """One latest run per job, unaffected by higher-frequency job history."""
+        with self.connect() as connection:
+            rows = connection.execute(
+                "SELECT run.* FROM job_runs AS run JOIN "
+                "(SELECT job_name, MAX(id) AS id FROM job_runs GROUP BY job_name) AS latest "
+                "ON run.id=latest.id ORDER BY run.id DESC"
+            ).fetchall()
+        return [job_run_outcome(dict(row)) for row in rows]
 
     def record_model_call(self, record: dict[str, Any]) -> int:
         columns = (

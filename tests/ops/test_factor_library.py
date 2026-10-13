@@ -671,12 +671,28 @@ class CliEntryTests(_Base):
 
     def _run_as_main(self):
         import io
-        from contextlib import redirect_stdout
+        from contextlib import ExitStack, redirect_stdout
+        import importlib
         source = Path(FL.__file__).read_text(encoding="utf-8")
         namespace = {"__name__": "__main__", "__file__": str(FL.__file__),
                      "__package__": "scripts"}
         buffer = io.StringIO()
-        with redirect_stdout(buffer):
+        # exec imports dependency aliases again; patch those source modules,
+        # not just the already-loaded FL globals. All I/O remains mocked.
+        with ExitStack() as stack, redirect_stdout(buffer):
+            for module_name in ("market_data_service", "scripts.market_data_service"):
+                module = importlib.import_module(module_name)
+                for name, fake in (
+                    ("fetch_orderbook_depth", self.depth),
+                    ("fetch_candles", self.candles),
+                    ("fetch_indicators_batch", self.inds),
+                    ("fetch_ticker", lambda *a, **k: self._ticker()),
+                    ("fetch_funding_rate", lambda *a, **k: {}),
+                ):
+                    stack.enter_context(mock.patch.object(module, name, fake))
+            for module_name in ("instrument_pool", "scripts.instrument_pool"):
+                stack.enter_context(mock.patch.object(
+                    importlib.import_module(module_name), "load_instruments", self.instruments))
             exec(compile(source, str(FL.__file__), "exec"), namespace)  # noqa: S102
         return buffer.getvalue()
 

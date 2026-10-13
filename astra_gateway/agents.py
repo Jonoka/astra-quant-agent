@@ -4,6 +4,8 @@ import time
 from pathlib import Path
 from typing import Any
 
+from astra_gateway.store import job_run_outcome
+
 ROOT = Path(__file__).resolve().parents[1]
 
 AGENTS = (
@@ -18,16 +20,31 @@ AGENTS = (
 def agent_statuses(job_runs: list[dict[str, Any]]) -> list[dict[str, Any]]:
     latest_by_job: dict[str, dict[str, Any]] = {}
     for run in job_runs:
-        latest_by_job.setdefault(str(run.get("job_name")), run)
+        latest_by_job.setdefault(str(run.get("job_name")), job_run_outcome(run))
     result = []
     for agent in AGENTS:
         output = ROOT / "data" / agent["output"] if agent["output"] else None
         age = max(0, int(time.time() - output.stat().st_mtime)) if output and output.exists() else None
         run = latest_by_job.get(agent["job"], {})
         health = "healthy"
-        if run.get("status") == "failed":
-            health = "degraded"
         if agent["output"] and age is None:
             health = "cold"
-        result.append({**agent, "health": health, "output_age_seconds": age, "last_run_status": run.get("status", "not-run"), "last_run_at": run.get("started_at", "")})
+        if run.get("status") in {"failed", "interrupted"}:
+            health = "degraded"
+        elif agent["job"] == "trader" and run:
+            if run.get("status") == "running":
+                health = "running"
+            elif run.get("brain_status") != "ok":
+                health = "unknown" if run.get("brain_status") == "unknown" else "idle"
+        elif agent["job"] == "trader" and age is not None:
+            health = "unknown"
+        result.append({**agent, "health": health, "output_age_seconds": age,
+                       "last_run_status": run.get("status", "not-run"),
+                       "last_run_at": run.get("started_at", ""),
+                       "last_job_run_id": run.get("id"),
+                       "scheduled_at": run.get("scheduled_at", ""),
+                       "process_status": run.get("process_status", "not-run"),
+                       "brain_status": run.get("brain_status", "unknown" if agent["job"] == "trader" else "not_applicable"),
+                       "brain_result_at": run.get("brain_result_at", ""),
+                       "brain_detail": run.get("brain_detail", "")})
     return result

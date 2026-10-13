@@ -1,0 +1,231 @@
+{
+  "baseline": "0356bcdcf5ca58748b5ce42197b8cf4d9d1f32e6",
+  "baseline_tree": "3934feaac111f2138e79ff15f7f7a812d003a926",
+  "reviewed_patch_sha256": "a641878b7b83f87a46f01a5569c90c738e8bffd47dfb3e796e36efb6a0dba086",
+  "application": {
+    "astra_backend/README.md": {
+      "base_sha256": "5a70dcded1be834df17bf647ecbb54ac9c1fff152562793a893c9788ffa75ede",
+      "sha256": "f3458c7a81f30d448d9f57eb1f427fd0c80819af674164852b69c6b3a9f6610a"
+    },
+    "astra_backend/collection.py": {
+      "base_sha256": null,
+      "sha256": "d9360b76924be0aa2b1b01d9a09c4bec063c3383ac5a46e3f27cd42a0325f465"
+    },
+    "astra_backend/dashboard_payload/health.py": {
+      "base_sha256": "67d425136bf6f1672df783d0fdc6de785882ba7e9262957439de0c863da326e6",
+      "sha256": "7d076e1450c42f929bd8459eaadaea1eaf04c1397126ef2aa54645b27ae0250d"
+    },
+    "astra_backend/dashboard_payload/integrity_sidecars.py": {
+      "base_sha256": "0062de93466ee4bbccec1ed6e985c38c56bed178f37bb0084a401966a9b45781",
+      "sha256": "64b20f0e4c3c6f14f6d0da019e5b53a353e39d2d00b7a289f1c210c0b21bad2d"
+    },
+    "astra_backend/deadline.py": {
+      "base_sha256": "d27cb93e236a9eabb37f74c9073c0464ac43ee0805cc6ab649b369ec33a0ee36",
+      "sha256": "db01a9c95c8048ec3d26c27ef2eef39c704d7afbf55482b4fbdd81535302bdf4"
+    },
+    "astra_backend/http_deadline.py": {
+      "base_sha256": null,
+      "sha256": "2578221ddc4b147eb314020f27253bb3ce47e29b6dcf81ce92071c132f5005f9"
+    },
+    "astra_backend/routers/system.py": {
+      "base_sha256": "0bf14fca4827aea4f21240caa85047773957030428dd91464c87f085419704e9",
+      "sha256": "195fe6395ada877eed967e8efa80f9820283834ba702073c08c438143720693a"
+    },
+    "astra_gateway/agents.py": {
+      "base_sha256": "19d915d688c70725edfae3a4d9c9caf03dbb9899ffd5ca67f9b93815ea39f7e5",
+      "sha256": "83f181048e4c86fe9427939072e70e8d5d2f22dce876197410eb936fe8a4ac42"
+    },
+    "astra_gateway/scheduler.py": {
+      "base_sha256": "142e19c841ca4bd968c5cb3157048a27b650444a3ee820145a2483bee4e9ba06",
+      "sha256": "09aabcf67ff17222de2c7dba265efb66a0bd6977271a6fe0370b9660d3d0dc90"
+    },
+    "astra_gateway/store.py": {
+      "base_sha256": "024b4e5e841614444092297d44e640c23ef93aeb6d48c2a5bf2e005a4ad93295",
+      "sha256": "f6fe5f7b0b69d2cd3ff10cd42e9696d7e5c09aa8ce0f2a04d73d4c612d97fe06"
+    },
+    "env.example": {
+      "base_sha256": "f915e6277141d02fad9bfb424140a1eef93ded91ace50d6f92e4d1f380edaf9a",
+      "sha256": "24474774e6ddf1528b0f04694177ba6047442ecee74f2983a0f2e3423cec5bba"
+    },
+    "frontend/public/admin/legacy.html": {
+      "base_sha256": "9366279ae59e4ebdb772579101356d03dd92028a2ecc6d2a54903a77c579c4c9",
+      "sha256": "0407d56a27fd4a6be86ff81e4a4f2ba3a0e1926efc333ca62c0551caf60030d9"
+    },
+    "frontend/src/components/admin/README.md": {
+      "base_sha256": "70dbd2a4d924c8926cfa55a01553637f495382c8b5be5acea3825c55e9c5c4fc",
+      "sha256": "304c98fe2ee2c1a810ed3c3973ee6d8f9c5eb8b23fccee5940feb81cabd32fb3"
+    },
+    "frontend/src/locales/en/admin/agents.ts": {
+      "base_sha256": "c7a8476490e7944a38a3900529ee2e14eae001c231b2c4b57c29fe42b9fba730",
+      "sha256": "a5413a34e63e487071e9a9f33df02600a95ce947d45706484dcfdb3a3bccaa49"
+    },
+    "frontend/src/locales/en/admin/gateway.ts": {
+      "base_sha256": "fb37bab68593e3346fa95692f8e13a08bf6d049b66c0ef01809042e8b924bed4",
+      "sha256": "1350321638fab4200a166f9bc2f293eb7751bc65f3a8d35f2e13b22b3f36a78b"
+    },
+    "frontend/src/locales/en/dash/radar.ts": {
+      "base_sha256": "3764a576cb38639bc943b4936624abda5802afaee699ad3e8deb036424955f7c",
+      "sha256": "57e1d7237791f92d2ee4819a3e21dfc22c9f7df0d5177ef8a7ea1ee86a0b5247"
+    },
+    "frontend/src/locales/zh/admin/agents.ts": {
+      "base_sha256": "b4ebef3c9002d4692c4b9320af9e793bbd9e2205d8646e4768f686c4edce845c",
+      "sha256": "af3561acd13c4cd108027eee2e333e2ff5f4c21d301409eeca25fd986125e1b7"
+    },
+    "frontend/src/locales/zh/admin/gateway.ts": {
+      "base_sha256": "30ff093c743a16cc5ed2264719ab6b37e8c2589ee610cd9c4aa287780db238e0",
+      "sha256": "bf9dc7e9b68690b13183daee277bd728b62740d00d5829176bee899cf24e4875"
+    },
+    "frontend/src/locales/zh/dash/radar.ts": {
+      "base_sha256": "b48ba2cbd85fd4b7f799d314e593fa81aabaed0dd8e3a7ad70297e01bb3200df",
+      "sha256": "f2314c9a0f2095880b6185d6baddf5a2efd514e1f5855d9b26a3be665c877a16"
+    },
+    "frontend/src/utils/jobOutcome.ts": {
+      "base_sha256": null,
+      "sha256": "e4f13ab9e13d6e01af05ab0b6b91192532b5b957670b8768ad48785ed0b756b7"
+    },
+    "frontend/src/views/admin/AgentsPage.vue": {
+      "base_sha256": "cbd922d0899429e1e5bd4417bef864ae18c7cf214ac6b78685a92edd69f0d00d",
+      "sha256": "03dd6a7d2a3f672d0d78fd44a6b451a7019e2de3d4bd971d09242b2ce56a8d52"
+    },
+    "frontend/src/views/admin/GatewayPage.vue": {
+      "base_sha256": "638cc85250595ea4dc43f6480798ee24f32ac68e43b37ade8b950382266a3200",
+      "sha256": "79c6f60c7d73224fa2a79c79b4b346c0b3bd781e37a787ff217b06bc3dea9bc6"
+    },
+    "frontend/src/views/dashboard/RadarView.vue": {
+      "base_sha256": "9be40980034e19944e42e3f5d7173e5d4708f63ab231aa6d369003185d36d9a1",
+      "sha256": "fc63e167ff9059dd56e0e7abf2ebcbae680f804462ee59fd411e60e648c0105b"
+    },
+    "frontend/tests/jobOutcome.test.mjs": {
+      "base_sha256": null,
+      "sha256": "8e02f7d371d31f9a0c6c5e2a5b775dbbbab772b572b7894d794c5872b93b7e18"
+    },
+    "scripts/ai_brain_trader.py": {
+      "base_sha256": "48bc1c2d34948a712660af280c24db223c7cf3a8875fa27ee94ea1148d4d341b",
+      "sha256": "7fae97fff2e4ee50a3d076ecddc8b16808bd54f2713d69edd51d22d82594afc8"
+    },
+    "scripts/brain/packages.py": {
+      "base_sha256": "4f6e3751752d200e93c4d33506a9fd84767fe3f878cbcb744515979a8611c8d2",
+      "sha256": "95ecd568fd7be92d24db7b5ef6db49c1bafbaec419698a0166b7241496ee0ac8"
+    },
+    "scripts/brain/snapshots.py": {
+      "base_sha256": "edca5b6c590619172d713e097995b71507537891e9f464b7d0dec547723c89c6",
+      "sha256": "71ad302de73ce0d27633c98b2a3aeab1966ef75b7ad246bbad5a27abd1996c73"
+    },
+    "scripts/factor_library.py": {
+      "base_sha256": "7c16adb40962b23b2dd7b65a4c75dd3001ab10f5d70104afe5066bbbf45b6ae1",
+      "sha256": "9007b7e594f66c9253979928508fa401ae667907ab63c75e8ff511de816eff8a"
+    },
+    "scripts/factors/okx_quant_factors.py": {
+      "base_sha256": "dbedeccd639e74ac52388f1f2d77d8ddd4e21c3f90190a78e4c26b9bbfa7f770",
+      "sha256": "01933619069b65af0f29ff75553eb459463d64433aa928c7bbd00829884f9183"
+    },
+    "scripts/factors/smart_money.py": {
+      "base_sha256": "78ef086483931433f6b7c1a28d8cd624972c0bf4748028da128cf9933ae446f9",
+      "sha256": "123efaeb8ac3e1ee592aa4a6f76da4912641d87ad8e153f75cb13be77bf3e6be"
+    },
+    "scripts/market_data_service.py": {
+      "base_sha256": "08804599168e842fed3d273f66c1bcb917f825d52dea7c7dfa9bc0aea4c12a44",
+      "sha256": "965c9305157b280089a5e2fe80a6378de247c3197adf25dacb94c843d87bef31"
+    },
+    "scripts/okx_public.py": {
+      "base_sha256": "f850ce5c54d10bc44c8a9684e242b1281629521089f6abd0c280d5c2d57f01ce",
+      "sha256": "ff103bd25ef985d56046f497b910c04213e6990b840706e09a6ea58c17af823c"
+    },
+    "scripts/okx_rest.py": {
+      "base_sha256": "46de1177818d69641858864201c0b681a5b92d2f2324123a28a367a793100495",
+      "sha256": "338b2ce6ff5ebe47fb1a3f69df72c415d47d9c8fc342655aebd98f27e03ec94b"
+    },
+    "tests/core/test_collection_deadline.py": {
+      "base_sha256": null,
+      "sha256": "9633cd030b44b28e2eb61e033af0328ba38425a23575f71ea16a780bf502ecc9"
+    },
+    "tests/core/test_collection_regression.py": {
+      "base_sha256": null,
+      "sha256": "00b8d123ac667e70e5b84e92916e3a01072897c9785d2bbb38200747719de0d4"
+    },
+    "tests/core/test_module_tails.py": {
+      "base_sha256": "9c8ce952bd8d2e322ea4611fca2d3bd8739b701968afa3407ca8e0a0d864673c",
+      "sha256": "5913829dee147b8cfbd7f5b05d30b8905ca25dd5138181b8cf0d7bf7c062065b"
+    },
+    "tests/core/test_router_system.py": {
+      "base_sha256": "b9ab7321841c06eca02dc95c94f4f738dd13753be9c86b12afd79356e2399e07",
+      "sha256": "8404a332169fdc7d57042c60be8d7ffc5a2fa6800b71fd7ed3fc55026e95ef7f"
+    },
+    "tests/extraction/test_brain_package_extraction.py": {
+      "base_sha256": "01ec5ee6339fdc592a2ccffeddc78b2b2f5a51c8c9bf60737b05611275818846",
+      "sha256": "7fb0f441ce7c98d704dc6c9e429fa1b82512ed2ceead9406908226d27a9371a6"
+    },
+    "tests/extraction/test_brain_snapshots_extraction.py": {
+      "base_sha256": "3b87cd76b3f54f8caa0ca2a423889de12fc343eaa6fc4ccfcbab05c90b132f96",
+      "sha256": "6c549bc77d3833d3e4c34d8b346e89c670eb10c5cce1c522fbc11ba591cbb973"
+    },
+    "tests/extraction/test_dashboard_integrity_sidecars_extraction.py": {
+      "base_sha256": "1d922984811c70774476279de8777f5bfb5549f76668aa5ea26bdac311247f37",
+      "sha256": "370ce63435685e33da94b5905624a80aec7953d87db33a12332fe3d203f2fbbf"
+    },
+    "tests/ops/test_ai_brain_trader.py": {
+      "base_sha256": "403bc2bfcbd83f8cfe7923d5875ecf600854782e91b99b5529d3a722f861a881",
+      "sha256": "9694d710c3367cb864c090c843de1f12a4e2a68d1a499738215b09e77bd1ca9a"
+    },
+    "tests/ops/test_factor_library.py": {
+      "base_sha256": "d7bb2bae2cc8429e7b77479dcce8c7a593d7f12bbdd80b1a87b94102c25ad9c0",
+      "sha256": "85146857d919c83c04e87432c0cf5e43264fa8ee95a8ddb99ab01ef2c66c054d"
+    },
+    "tests/ops/test_gateway.py": {
+      "base_sha256": "724a5a34bdcb5307ea251ac06485ad441006666d7ec804748055c6c1dde39beb",
+      "sha256": "1ca84bc4ac11b2a3f029b85fa1940390533efc196951f639d217a153d9101f50"
+    },
+    "tests/ops/test_gateway_agents.py": {
+      "base_sha256": "86b53453fcf5eee3a306042efeebdeeff5741ee39559d5a9df54ddff62d84e6f",
+      "sha256": "b119941f3518f8e1f102ac73a6544d107e467619576a77b7696efff9932fc0cb"
+    },
+    "tests/ops/test_gateway_brain_outcome.py": {
+      "base_sha256": null,
+      "sha256": "3d3420f1ac0d4ec279eb51cee1f3d15270e2066c7cfe3e7b6fa1d78635a1e00d"
+    },
+    "tests/ui/test_dashboard_health_tails.py": {
+      "base_sha256": "89b3f211b185e332a5819128c9f7623fd68e97ed7299c30dd6790fd4c560b182",
+      "sha256": "6de25c8ed054185fdd2487c427f00bc655a31083f7adfac97e70f00773bfd0fb"
+    },
+    "tests/venues/test_collection_http_deadline.py": {
+      "base_sha256": null,
+      "sha256": "29a86318f36620bb677743b3759065cc6ef35c74703bac063ff1a49f85502aeb"
+    },
+    "tests/venues/test_okx_rest.py": {
+      "base_sha256": "7d3c11fff47734ad68b6c28bbe49fc83be6c2a8d6d99f28bf94132421beb2f45",
+      "sha256": "435a7dee86c34ea679710bcde429aed7073c47947c136f19bb12c7b25a57e62b"
+    }
+  },
+  "ci_paths": [
+    ".github/scripts/collection_source_contract.json",
+    ".github/scripts/node_offline_guard.mjs",
+    ".github/scripts/run_collection_frontend.mjs",
+    ".github/scripts/run_collection_regressions.py",
+    ".github/scripts/run_deployment_preflight.py",
+    ".github/scripts/runtime_release_upgrade.py",
+    ".github/scripts/test_collection_frontend_gate.mjs",
+    ".github/scripts/test_collection_regression_gate.py",
+    ".github/scripts/test_collection_status_compatibility.py",
+    ".github/scripts/test_runtime_release_upgrade.py",
+    ".github/scripts/test_verify_deployment_source.py",
+    ".github/scripts/verify_deployment_source.py",
+    ".github/workflows/test-taker-parsing.yml"
+  ],
+  "self_hash_exemptions": [
+    ".github/scripts/collection_source_contract.json",
+    ".github/scripts/verify_deployment_source.py"
+  ],
+  "ci_sha256": {
+    ".github/scripts/node_offline_guard.mjs": "1cd53644ab68c9824ac118cb00a8a1b6ca0f30172e4d2f57c53afecbeb1efe89",
+    ".github/scripts/run_collection_frontend.mjs": "edfc9f1fee5e3a0f529793b67af6b8010591a1d4075d65f9c95bc056eec87753",
+    ".github/scripts/run_collection_regressions.py": "410ae3a8b96017b14d4a5427d63be6e66b5b37cd537f82119f5aad909a6fc21e",
+    ".github/scripts/run_deployment_preflight.py": "0e866559ec836fa327052d3e5bae2feb679c34d4012cb84df96d30e261ef8c21",
+    ".github/scripts/runtime_release_upgrade.py": "6f396c9104081691d3ff4d74a481633a025493ba02bc307dd304acb5b0075291",
+    ".github/scripts/test_collection_frontend_gate.mjs": "c78cad7a4c2bd3d93f3d2883afb22ffc91423854a3c7beef0266cbff5d87b259",
+    ".github/scripts/test_collection_regression_gate.py": "b18ff2eb4dbcb1414dbe1fbf5a34467164c2a731487334ecf244f0c62a495afc",
+    ".github/scripts/test_collection_status_compatibility.py": "a65b1fc5fb17152232d88a2a24b94be11dc2006e276d050bbf14c407064b1827",
+    ".github/scripts/test_runtime_release_upgrade.py": "4e9d50b2c7d0e93909beb20151f3838d7de825e5c9e274e3be42743866b0b268",
+    ".github/scripts/test_verify_deployment_source.py": "633db7ca54176548730192dfc84bc090f165d294bfb3f374a86f9120ea9cb5dc",
+    ".github/workflows/test-taker-parsing.yml": "e435f725164a2ac18afcfe84539c9828caed29bb57f74d51d660ce146149379b"
+  }
+}

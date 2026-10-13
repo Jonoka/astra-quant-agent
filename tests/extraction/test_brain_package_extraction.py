@@ -9,12 +9,12 @@
 
 因此这里守三件事：
 
-1. **源码范围受控**：函数全文与已部署 f53e579 基线逐字相同，只允许本次精确的
-   taker 解析替换；旧搬运前夹具保留为历史证据，方向语义另做运行测试。
+1. **源码范围受控**：函数全文与已部署 f53e579 基线逐字相同，只允许精确的
+   taker 解析替换、共享行情校验和超时检查；每类差异另有正向断言。
 2. **门面确实在转发**：门面同名壳必须真的调用子模块，且把两个行情函数
    **按调用期注入**传下去 —— 若改回 import 期绑定，`patch.object(门面, …)` 会失效。
-3. **失败仍然是 fail-soft**：行情取不到时必须返回结构完整的包（`data_quality`
-   降级），绝不能抛 —— 这是原函数的语义，搬运不得改变。
+3. **普通失败仍然是 fail-soft**：行情取不到时返回结构完整的降级包；共享截止
+   时间耗尽则必须抛出 DeadlineExceeded，不能伪装成普通缺失继续采集。
 """
 from __future__ import annotations
 
@@ -27,6 +27,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import scripts.ai_brain_trader as abt
+from astra_backend.deadline import DeadlineExceeded
 from scripts.brain import packages as brain_packages
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -123,13 +124,14 @@ class MoveIsLosslessTest(unittest.TestCase):
         "pkg[\"quant_factors\"] = load_quant_factor_tiers(inst_id)",
     )
 
-    def test_body_matches_deployed_baseline_except_validated_taker_parser(self):
+    def test_body_matches_deployed_baseline_except_validated_repairs(self):
         """Pin all other function lines to deployed f53e579, including comments.
 
         The old pre-move comparison already fails on unmodified f53e579.
-        Its fixture remains historical evidence; the active guard permits only
-        the exact decimal-net parser replacement reviewed in this repair.
-        Sign and malformed-row behavior have separate runtime coverage.
+        Its fixture remains historical evidence. Reverse only exact reviewed
+        parser, deadline and shared-validator edits, retaining the old hash.
+        Positive AST/runtime guards below prevent normalization from masking
+        missing, moved or swallowed deadline checks.
         """
         source = "\n".join(_submodule_function_lines())
         parser_block = "\n".join([
@@ -144,11 +146,54 @@ class MoveIsLosslessTest(unittest.TestCase):
         ])
         self.assertEqual(source.count(parser_block), 1)
         normalised = source.replace(parser_block, deployed_block)
+        # Exactly 11 checks: entry, each of the nine fetch stages, and exit.
+        for indent, count in ((4, 2), (8, 4), (12, 3), (16, 2)):
+            check = " " * indent + "check_deadline()\n"
+            self.assertEqual(normalised.splitlines(keepends=True).count(check), count)
+            normalised = "".join(line for line in normalised.splitlines(keepends=True)
+                                 if line != check)
+        # Every broad fetch handler must first rethrow the cancellation signal.
+        for indent, count in ((4, 4), (8, 3), (12, 2)):
+            rethrow = (" " * indent + "except DeadlineExceeded:\n"
+                       + " " * (indent + 4) + "raise\n")
+            self.assertEqual(normalised.count(rethrow), count)
+            normalised = normalised.replace(rethrow, "")
+        shared_check = "    required_market_data = has_required_market_inputs(pkg)"
+        deployed_check = "\n".join([
+            "    required_market_data = (",
+            '        pkg["price"] > 0',
+            '        and pkg["bidPx"] > 0',
+            '        and pkg["askPx"] >= pkg["bidPx"]',
+            '        and len(pkg["recent_15m"]) >= 12',
+            '        and len(pkg["recent_1h"]) >= 8',
+            '        and len(pkg["recent_4h"]) >= 6',
+            "    )",
+        ])
+        self.assertEqual(normalised.count(shared_check), 1)
+        normalised = normalised.replace(shared_check, deployed_check)
         self.assertEqual(
             hashlib.sha256(normalised.encode("utf-8")).hexdigest(),
             "5d2d9ce1809e16adc5d28280def7af22f3f2b4e3f0721cdda9db3c47f9548e89",
-            "Unexpected changes beyond the validated taker parser",
+            "Unexpected changes beyond the validated parser/deadline/validator repairs",
         )
+
+    def test_deadline_checks_and_rethrows_cover_every_fetch_stage(self):
+        fn = ast.parse("\n".join(_submodule_function_lines())).body[0]
+        check = ast.dump(ast.parse("check_deadline()").body[0])
+        self.assertEqual(ast.dump(fn.body[1]), check, "Check before package construction")
+        self.assertEqual(ast.dump(fn.body[-2]), check, "Check before package return")
+        stages = [node for node in ast.walk(fn) if isinstance(node, ast.Try)]
+        self.assertEqual(len(stages), 9)
+        for stage in stages:
+            with self.subTest(line=stage.lineno):
+                self.assertEqual(ast.dump(stage.body[0]), check)
+                self.assertEqual(len(stage.handlers), 2)
+                first, fallback = stage.handlers
+                self.assertEqual(ast.dump(first.type), ast.dump(ast.Name(id="DeadlineExceeded", ctx=ast.Load())))
+                self.assertIsNone(first.name)
+                self.assertEqual([ast.dump(node) for node in first.body],
+                                 [ast.dump(ast.Raise())])
+                self.assertEqual(ast.dump(fallback.type), ast.dump(ast.Name(id="Exception", ctx=ast.Load())))
 
     def test_the_retired_calculus_tail_is_really_gone(self):
         """反向断言：搬运**之后**的退役动作必须真实发生（否则上面那条会空转）。"""
@@ -199,7 +244,12 @@ class MoveIsLosslessTest(unittest.TestCase):
 class FacadeDelegationTest(unittest.TestCase):
     def test_facade_imports_and_forwards(self):
         src = FACADE.read_text(encoding="utf-8")
-        self.assertIn("from scripts.brain.packages import fetch_single_instrument_package as _fetch_single_instrument_package", src)
+        imports = [(alias.name, alias.asname)
+                   for node in ast.walk(ast.parse(src))
+                   if isinstance(node, ast.ImportFrom) and node.module == "scripts.brain.packages"
+                   for alias in node.names]
+        self.assertEqual(imports.count(("fetch_single_instrument_package", "_fetch_single_instrument_package")), 1)
+        self.assertEqual(imports.count(("has_required_market_inputs", None)), 1)
         self.assertIn("fetch_candles=fetch_candles,", src)
         self.assertIn("fetch_single_indicator=fetch_single_indicator,", src)
 
@@ -212,6 +262,37 @@ class FacadeDelegationTest(unittest.TestCase):
         self.assertEqual(got["delegated"], sentinel)
         self.assertIs(got["fetch_candles"], abt.fetch_candles)
         self.assertIs(got["fetch_single_indicator"], abt.fetch_single_indicator)
+
+
+class DeadlineAndSharedValidatorContractTest(unittest.TestCase):
+    ITEM = {"instId": "FAKE-USDT-SWAP", "name": "FAKE", "type": "crypto", "ccy": "FAKE", "precision": 4}
+
+    def test_each_checkpoint_propagates_the_original_deadline_exception(self):
+        # All nine fetch stages are reached with empty responses. A deadline at
+        # any checkpoint must stop immediately, including inside fail-soft try blocks.
+        for checkpoint in range(1, 12):
+            with self.subTest(checkpoint=checkpoint):
+                expired = DeadlineExceeded("test collection deadline")
+                with patch.object(brain_packages, "check_deadline",
+                                  side_effect=[None] * (checkpoint - 1) + [expired]) as check, \
+                     patch.object(brain_packages, "public_json_get", return_value={}), \
+                     patch.object(brain_packages, "load_quant_factor_tiers", return_value={}):
+                    with self.assertRaises(DeadlineExceeded) as caught:
+                        brain_packages.fetch_single_instrument_package(
+                            self.ITEM, fetch_candles=lambda *a, **k: [],
+                            fetch_single_indicator=lambda *a, **k: {})
+                self.assertIs(caught.exception, expired)
+                self.assertEqual(check.call_count, checkpoint)
+
+    def test_package_uses_shared_required_market_input_validator(self):
+        with patch.object(brain_packages, "public_json_get", return_value={}), \
+             patch.object(brain_packages, "load_quant_factor_tiers", return_value={}), \
+             patch.object(brain_packages, "has_required_market_inputs", return_value=False) as required:
+            pkg = brain_packages.fetch_single_instrument_package(
+                self.ITEM, fetch_candles=lambda *a, **k: [],
+                fetch_single_indicator=lambda *a, **k: {})
+        required.assert_called_once_with(pkg)
+        self.assertEqual(pkg["data_quality"], "invalid")
 
 
 class FailSoftContractTest(unittest.TestCase):

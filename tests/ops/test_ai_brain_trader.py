@@ -323,12 +323,29 @@ class ExecuteBatchCycleTests(unittest.TestCase):
         return value
 
     def _wire_common(self, packages):
+        import scripts.factors.smart_money as smart_money
+        sm = patch.object(smart_money, "fetch_smart_money_for_symbol", return_value={})
+        sm.start()
+        self.addCleanup(sm.stop)
         # ⚠️ 一律用**显式函数**而不是 `lambda: self.calls.setdefault(k, v) or X` ——
         # setdefault 返回的是刚存进去的那个（非空）值，恒为真，`or X` 永不生效，
         # 于是桩会把它自己的 kwargs 当成返回值交出去。这类"真值陷阱"只会让
         # 断言以莫名其妙的方式失败（或更糟：静默通过）。
+        packages = [{"data_quality": "valid", "price": 100.0,
+                     "bidPx": 99.0, "askPx": 101.0,
+                     "recent_15m": [[100.0, 101.0, 99.0, 100.0, 1.0]] * 12,
+                     "recent_1h": [[100.0, 101.0, 99.0, 100.0, 1.0]] * 8,
+                     "recent_4h": [[100.0, 101.0, 99.0, 100.0, 1.0]] * 6,
+                     **pkg} for pkg in packages]
         def _fl(**kw):
+            from scripts.factors.defaults import build_default_factors
             self.calls["fl"] = kw
+            instruments = []
+            for pkg in packages:
+                factors = build_default_factors(pkg["instId"], "BTC")
+                factors["price"] = 100.0
+                instruments.append(factors)
+            return {"timestamp": __import__("time").time(), "instruments": instruments}
 
         def _prompt(*a, **kw):
             self.calls["prompt_args"] = (a, kw)
@@ -392,7 +409,7 @@ class ExecuteBatchCycleTests(unittest.TestCase):
 
         self.assertEqual(result, {"BTC-USDT-SWAP": {}})
         # 智能资金：无 ccy/name ⇒ 从 instId 前段推币种（不是空串去查）
-        self.assertEqual(seen_sm, [("BTC", 0.0)])
+        self.assertEqual(seen_sm, [("BTC", 100.0)])
         # 策略快照：传入的快照被原样带下去，返回的四元组被透传
         dispatch = self.calls["dispatch"]
         self.assertEqual(dispatch["policy_hash"], "HASH")

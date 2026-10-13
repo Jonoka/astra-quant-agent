@@ -275,7 +275,9 @@ class DeploymentSourceGuardTests(unittest.TestCase):
 class CollectionSourceGuardTests(unittest.TestCase):
     """Synthetic git responses exercise the contract, not real history proof."""
     def setUp(self):
-        self.root = Path(__file__).resolve().parents[2]
+        # Release tests exercise the unchanged historical PR contract against
+        # its archived reviewed source, never silently re-pin it to release bytes.
+        self.root = Path(os.environ.get("ASTRA_COLLECTION_REVIEWED_SOURCE", str(Path(__file__).resolve().parents[2])))
         self.base = baseline_root()
         self.contract = copy.deepcopy(guard.collection_contract())
         self.revision = "b" * 40

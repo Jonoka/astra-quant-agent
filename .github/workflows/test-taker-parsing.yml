@@ -35,7 +35,12 @@ jobs:
       - name: Run PR source, safety helpers, taker and collection regressions
         env:
           ASTRA_CI_EXPECTED_SHA: ${{ github.event.pull_request.head.sha }}
-        run: python .github/scripts/run_deployment_preflight.py --collection-pr
+        run: |
+          if test -f .github/scripts/collection_release_contract.json; then
+            python .github/scripts/run_deployment_preflight.py --release-pr
+          else
+            python .github/scripts/run_deployment_preflight.py --collection-pr
+          fi
       - uses: actions/setup-node@v4
         with:
           node-version: '24.19.0'
@@ -56,7 +61,10 @@ jobs:
           import os, sys
           from pathlib import Path
           sys.path.insert(0, '.github/scripts')
-          from verify_deployment_source import UPSTREAM_SHA, verify_collection_source
-          verify_collection_source(Path.cwd(), UPSTREAM_SHA, os.environ['ASTRA_CI_EXPECTED_SHA'])
+          from verify_deployment_source import UPSTREAM_SHA, verify_collection_source, verify_release_source
+          # Presence selects a strict gate, never grants approval. Removing the
+          # contract cannot make the extra release paths pass the old PR gate.
+          verifier = verify_release_source if Path('.github/scripts/collection_release_contract.json').is_file() else verify_collection_source
+          verifier(Path.cwd(), UPSTREAM_SHA, os.environ['ASTRA_CI_EXPECTED_SHA'])
           print('PR verification only; no image, production migration or release approval.')
           PY

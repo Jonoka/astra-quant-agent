@@ -34,7 +34,7 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 60
     steps:
       - name: Checkout Fork CI helpers
         uses: actions/checkout@v4
@@ -106,6 +106,10 @@ jobs:
         run: |
           git -C source worktree add --detach "$GITHUB_WORKSPACE/validation" "$SOURCE_SHA"
           test "$(git -C validation rev-parse HEAD)" = "$SOURCE_SHA"
+          # Historical source-guard fixtures must remain the original exact
+          # baseline and reviewed PR; never re-pin legacy tests to release bytes.
+          git -C source worktree add --detach "$GITHUB_WORKSPACE/collection-baseline" 0356bcdcf5ca58748b5ce42197b8cf4d9d1f32e6
+          git -C source worktree add --detach "$GITHUB_WORKSPACE/collection-reviewed" 15f5e39e0d3a62b51fec9b7a0834029840802d9e
           python ci/.github/scripts/verify_deployment_source.py validation "$UPSTREAM_SHA" "$SOURCE_SHA"
 
       - name: Require shared deployment and offline taker preflight
@@ -115,7 +119,29 @@ jobs:
           ASTRA_DEPLOYED_SOURCE: ${{ github.workspace }}/deployed
         run: python .github/scripts/run_deployment_preflight.py
 
+      - name: Set up exact frontend acceptance runtime
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24.19.0'
+          cache: npm
+          cache-dependency-path: source/frontend/package-lock.json
+
+      - name: Install exact frontend lock without lifecycle scripts
+        working-directory: source/frontend
+        run: npm ci --ignore-scripts --no-audit --no-fund
+
+      - name: Require frontend gate refusal cases for release
+        working-directory: source
+        run: node .github/scripts/run_collection_frontend.mjs --self-test
+
+      - name: Require 23 collection frontend tests, types and build for release
+        working-directory: source
+        run: node .github/scripts/run_collection_frontend.mjs
+
       - name: Run official migration and administrator tests
+        env:
+          ASTRA_COLLECTION_BASELINE: ${{ github.workspace }}/collection-baseline
+          ASTRA_COLLECTION_REVIEWED_SOURCE: ${{ github.workspace }}/collection-reviewed
         working-directory: validation
         shell: bash
         run: |

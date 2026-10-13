@@ -758,6 +758,13 @@ onMounted(() => {
   padding: 0 var(--ds-space-4);
   border-bottom: 1px solid var(--ds-color-border-default);
 }
+.gw-job > span:last-child .badge {
+  max-width: 100%;
+  height: auto;
+  min-height: 20px;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
 @media (max-width: 640px) {
   .gw-job {
     grid-template-columns: 6px minmax(0, 1fr) auto;

@@ -1,0 +1,295 @@
+{
+  "schema": 1,
+  "upstream": "e0b29fef1818e0ff9c6b210eb73234620e276a02",
+  "baseline": "0356bcdcf5ca58748b5ce42197b8cf4d9d1f32e6",
+  "baseline_tree": "3934feaac111f2138e79ff15f7f7a812d003a926",
+  "reviewed_commit": "15f5e39e0d3a62b51fec9b7a0834029840802d9e",
+  "reviewed_tree": "434cb3abfda1001772f83f31c3a2e64a3d0e1a1b",
+  "reviewed_paths": {
+    ".github/scripts/collection_source_contract.json": {
+      "sha256": "c6546b947d6ed176d5634216063d2a0b7f073d1fe1f7f3f1561b6f294f6e294a",
+      "mode": "100644"
+    },
+    ".github/scripts/node_offline_guard.mjs": {
+      "sha256": "1cd53644ab68c9824ac118cb00a8a1b6ca0f30172e4d2f57c53afecbeb1efe89",
+      "mode": "100644"
+    },
+    ".github/scripts/run_collection_frontend.mjs": {
+      "sha256": "edfc9f1fee5e3a0f529793b67af6b8010591a1d4075d65f9c95bc056eec87753",
+      "mode": "100644"
+    },
+    ".github/scripts/run_collection_regressions.py": {
+      "sha256": "410ae3a8b96017b14d4a5427d63be6e66b5b37cd537f82119f5aad909a6fc21e",
+      "mode": "100644"
+    },
+    ".github/scripts/run_deployment_preflight.py": {
+      "sha256": "0e866559ec836fa327052d3e5bae2feb679c34d4012cb84df96d30e261ef8c21",
+      "mode": "100644"
+    },
+    ".github/scripts/runtime_release_upgrade.py": {
+      "sha256": "6f396c9104081691d3ff4d74a481633a025493ba02bc307dd304acb5b0075291",
+      "mode": "100644"
+    },
+    ".github/scripts/test_collection_frontend_gate.mjs": {
+      "sha256": "c78cad7a4c2bd3d93f3d2883afb22ffc91423854a3c7beef0266cbff5d87b259",
+      "mode": "100644"
+    },
+    ".github/scripts/test_collection_regression_gate.py": {
+      "sha256": "b18ff2eb4dbcb1414dbe1fbf5a34467164c2a731487334ecf244f0c62a495afc",
+      "mode": "100644"
+    },
+    ".github/scripts/test_collection_status_compatibility.py": {
+      "sha256": "a65b1fc5fb17152232d88a2a24b94be11dc2006e276d050bbf14c407064b1827",
+      "mode": "100644"
+    },
+    ".github/scripts/test_runtime_release_upgrade.py": {
+      "sha256": "4e9d50b2c7d0e93909beb20151f3838d7de825e5c9e274e3be42743866b0b268",
+      "mode": "100644"
+    },
+    ".github/scripts/test_verify_deployment_source.py": {
+      "sha256": "633db7ca54176548730192dfc84bc090f165d294bfb3f374a86f9120ea9cb5dc",
+      "mode": "100644"
+    },
+    ".github/scripts/verify_deployment_source.py": {
+      "sha256": "87a09d997b9f15b26761515daabe4ab0cb1971701b6c3bbc030a86a1742d729f",
+      "mode": "100644"
+    },
+    ".github/workflows/test-taker-parsing.yml": {
+      "sha256": "e435f725164a2ac18afcfe84539c9828caed29bb57f74d51d660ce146149379b",
+      "mode": "100644"
+    },
+    "astra_backend/README.md": {
+      "sha256": "f3458c7a81f30d448d9f57eb1f427fd0c80819af674164852b69c6b3a9f6610a",
+      "mode": "100644"
+    },
+    "astra_backend/collection.py": {
+      "sha256": "d9360b76924be0aa2b1b01d9a09c4bec063c3383ac5a46e3f27cd42a0325f465",
+      "mode": "100644"
+    },
+    "astra_backend/dashboard_payload/health.py": {
+      "sha256": "7d076e1450c42f929bd8459eaadaea1eaf04c1397126ef2aa54645b27ae0250d",
+      "mode": "100644"
+    },
+    "astra_backend/dashboard_payload/integrity_sidecars.py": {
+      "sha256": "64b20f0e4c3c6f14f6d0da019e5b53a353e39d2d00b7a289f1c210c0b21bad2d",
+      "mode": "100644"
+    },
+    "astra_backend/deadline.py": {
+      "sha256": "db01a9c95c8048ec3d26c27ef2eef39c704d7afbf55482b4fbdd81535302bdf4",
+      "mode": "100644"
+    },
+    "astra_backend/http_deadline.py": {
+      "sha256": "2578221ddc4b147eb314020f27253bb3ce47e29b6dcf81ce92071c132f5005f9",
+      "mode": "100644"
+    },
+    "astra_backend/routers/system.py": {
+      "sha256": "195fe6395ada877eed967e8efa80f9820283834ba702073c08c438143720693a",
+      "mode": "100644"
+    },
+    "astra_gateway/agents.py": {
+      "sha256": "83f181048e4c86fe9427939072e70e8d5d2f22dce876197410eb936fe8a4ac42",
+      "mode": "100644"
+    },
+    "astra_gateway/scheduler.py": {
+      "sha256": "09aabcf67ff17222de2c7dba265efb66a0bd6977271a6fe0370b9660d3d0dc90",
+      "mode": "100644"
+    },
+    "astra_gateway/store.py": {
+      "sha256": "f6fe5f7b0b69d2cd3ff10cd42e9696d7e5c09aa8ce0f2a04d73d4c612d97fe06",
+      "mode": "100644"
+    },
+    "env.example": {
+      "sha256": "24474774e6ddf1528b0f04694177ba6047442ecee74f2983a0f2e3423cec5bba",
+      "mode": "100644"
+    },
+    "frontend/public/admin/legacy.html": {
+      "sha256": "0407d56a27fd4a6be86ff81e4a4f2ba3a0e1926efc333ca62c0551caf60030d9",
+      "mode": "100644"
+    },
+    "frontend/src/components/admin/README.md": {
+      "sha256": "304c98fe2ee2c1a810ed3c3973ee6d8f9c5eb8b23fccee5940feb81cabd32fb3",
+      "mode": "100644"
+    },
+    "frontend/src/locales/en/admin/agents.ts": {
+      "sha256": "a5413a34e63e487071e9a9f33df02600a95ce947d45706484dcfdb3a3bccaa49",
+      "mode": "100644"
+    },
+    "frontend/src/locales/en/admin/gateway.ts": {
+      "sha256": "1350321638fab4200a166f9bc2f293eb7751bc65f3a8d35f2e13b22b3f36a78b",
+      "mode": "100644"
+    },
+    "frontend/src/locales/en/dash/radar.ts": {
+      "sha256": "57e1d7237791f92d2ee4819a3e21dfc22c9f7df0d5177ef8a7ea1ee86a0b5247",
+      "mode": "100644"
+    },
+    "frontend/src/locales/zh/admin/agents.ts": {
+      "sha256": "af3561acd13c4cd108027eee2e333e2ff5f4c21d301409eeca25fd986125e1b7",
+      "mode": "100644"
+    },
+    "frontend/src/locales/zh/admin/gateway.ts": {
+      "sha256": "bf9dc7e9b68690b13183daee277bd728b62740d00d5829176bee899cf24e4875",
+      "mode": "100644"
+    },
+    "frontend/src/locales/zh/dash/radar.ts": {
+      "sha256": "f2314c9a0f2095880b6185d6baddf5a2efd514e1f5855d9b26a3be665c877a16",
+      "mode": "100644"
+    },
+    "frontend/src/utils/jobOutcome.ts": {
+      "sha256": "e4f13ab9e13d6e01af05ab0b6b91192532b5b957670b8768ad48785ed0b756b7",
+      "mode": "100644"
+    },
+    "frontend/src/views/admin/AgentsPage.vue": {
+      "sha256": "03dd6a7d2a3f672d0d78fd44a6b451a7019e2de3d4bd971d09242b2ce56a8d52",
+      "mode": "100644"
+    },
+    "frontend/src/views/admin/GatewayPage.vue": {
+      "sha256": "79c6f60c7d73224fa2a79c79b4b346c0b3bd781e37a787ff217b06bc3dea9bc6",
+      "mode": "100644"
+    },
+    "frontend/src/views/dashboard/RadarView.vue": {
+      "sha256": "fc63e167ff9059dd56e0e7abf2ebcbae680f804462ee59fd411e60e648c0105b",
+      "mode": "100644"
+    },
+    "frontend/tests/jobOutcome.test.mjs": {
+      "sha256": "8e02f7d371d31f9a0c6c5e2a5b775dbbbab772b572b7894d794c5872b93b7e18",
+      "mode": "100644"
+    },
+    "scripts/ai_brain_trader.py": {
+      "sha256": "7fae97fff2e4ee50a3d076ecddc8b16808bd54f2713d69edd51d22d82594afc8",
+      "mode": "100644"
+    },
+    "scripts/brain/packages.py": {
+      "sha256": "95ecd568fd7be92d24db7b5ef6db49c1bafbaec419698a0166b7241496ee0ac8",
+      "mode": "100644"
+    },
+    "scripts/brain/snapshots.py": {
+      "sha256": "71ad302de73ce0d27633c98b2a3aeab1966ef75b7ad246bbad5a27abd1996c73",
+      "mode": "100644"
+    },
+    "scripts/factor_library.py": {
+      "sha256": "9007b7e594f66c9253979928508fa401ae667907ab63c75e8ff511de816eff8a",
+      "mode": "100644"
+    },
+    "scripts/factors/okx_quant_factors.py": {
+      "sha256": "01933619069b65af0f29ff75553eb459463d64433aa928c7bbd00829884f9183",
+      "mode": "100644"
+    },
+    "scripts/factors/smart_money.py": {
+      "sha256": "123efaeb8ac3e1ee592aa4a6f76da4912641d87ad8e153f75cb13be77bf3e6be",
+      "mode": "100644"
+    },
+    "scripts/market_data_service.py": {
+      "sha256": "965c9305157b280089a5e2fe80a6378de247c3197adf25dacb94c843d87bef31",
+      "mode": "100644"
+    },
+    "scripts/okx_public.py": {
+      "sha256": "ff103bd25ef985d56046f497b910c04213e6990b840706e09a6ea58c17af823c",
+      "mode": "100644"
+    },
+    "scripts/okx_rest.py": {
+      "sha256": "338b2ce6ff5ebe47fb1a3f69df72c415d47d9c8fc342655aebd98f27e03ec94b",
+      "mode": "100644"
+    },
+    "tests/core/test_collection_deadline.py": {
+      "sha256": "9633cd030b44b28e2eb61e033af0328ba38425a23575f71ea16a780bf502ecc9",
+      "mode": "100644"
+    },
+    "tests/core/test_collection_regression.py": {
+      "sha256": "00b8d123ac667e70e5b84e92916e3a01072897c9785d2bbb38200747719de0d4",
+      "mode": "100644"
+    },
+    "tests/core/test_module_tails.py": {
+      "sha256": "5913829dee147b8cfbd7f5b05d30b8905ca25dd5138181b8cf0d7bf7c062065b",
+      "mode": "100644"
+    },
+    "tests/core/test_router_system.py": {
+      "sha256": "8404a332169fdc7d57042c60be8d7ffc5a2fa6800b71fd7ed3fc55026e95ef7f",
+      "mode": "100644"
+    },
+    "tests/extraction/test_brain_package_extraction.py": {
+      "sha256": "7fb0f441ce7c98d704dc6c9e429fa1b82512ed2ceead9406908226d27a9371a6",
+      "mode": "100644"
+    },
+    "tests/extraction/test_brain_snapshots_extraction.py": {
+      "sha256": "6c549bc77d3833d3e4c34d8b346e89c670eb10c5cce1c522fbc11ba591cbb973",
+      "mode": "100644"
+    },
+    "tests/extraction/test_dashboard_integrity_sidecars_extraction.py": {
+      "sha256": "370ce63435685e33da94b5905624a80aec7953d87db33a12332fe3d203f2fbbf",
+      "mode": "100644"
+    },
+    "tests/ops/test_ai_brain_trader.py": {
+      "sha256": "9694d710c3367cb864c090c843de1f12a4e2a68d1a499738215b09e77bd1ca9a",
+      "mode": "100644"
+    },
+    "tests/ops/test_factor_library.py": {
+      "sha256": "85146857d919c83c04e87432c0cf5e43264fa8ee95a8ddb99ab01ef2c66c054d",
+      "mode": "100644"
+    },
+    "tests/ops/test_gateway.py": {
+      "sha256": "1ca84bc4ac11b2a3f029b85fa1940390533efc196951f639d217a153d9101f50",
+      "mode": "100644"
+    },
+    "tests/ops/test_gateway_agents.py": {
+      "sha256": "b119941f3518f8e1f102ac73a6544d107e467619576a77b7696efff9932fc0cb",
+      "mode": "100644"
+    },
+    "tests/ops/test_gateway_brain_outcome.py": {
+      "sha256": "3d3420f1ac0d4ec279eb51cee1f3d15270e2066c7cfe3e7b6fa1d78635a1e00d",
+      "mode": "100644"
+    },
+    "tests/ui/test_dashboard_health_tails.py": {
+      "sha256": "6de25c8ed054185fdd2487c427f00bc655a31083f7adfac97e70f00773bfd0fb",
+      "mode": "100644"
+    },
+    "tests/venues/test_collection_http_deadline.py": {
+      "sha256": "29a86318f36620bb677743b3759065cc6ef35c74703bac063ff1a49f85502aeb",
+      "mode": "100644"
+    },
+    "tests/venues/test_okx_rest.py": {
+      "sha256": "435a7dee86c34ea679710bcde429aed7073c47947c136f19bb12c7b25a57e62b",
+      "mode": "100644"
+    }
+  },
+  "release_paths": {
+    ".github/scripts/run_deployment_preflight.py": {
+      "sha256": "9cc652ac3ca4536dea315aa3da433fc0ad2f327081b8b6e5535dc292e960f414",
+      "reviewed_sha256": "0e866559ec836fa327052d3e5bae2feb679c34d4012cb84df96d30e261ef8c21",
+      "mode": "100644"
+    },
+    ".github/scripts/test_release_source_contract.py": {
+      "sha256": "c8c7d9e7cda3593e90b65a80baf32c3e75116504776ed72f7f46d23c57a9d70c",
+      "reviewed_sha256": null,
+      "mode": "100644"
+    },
+    ".github/scripts/test_verify_deployment_source.py": {
+      "sha256": "e7aff3fb32026183717ccd92782149deba9b57a7b5db39cf7f6cec57c4a325e0",
+      "reviewed_sha256": "633db7ca54176548730192dfc84bc090f165d294bfb3f374a86f9120ea9cb5dc",
+      "mode": "100644"
+    },
+    ".github/workflows/build-release-image.yml": {
+      "sha256": "c37342884bc53ca7278072865263fc1ac63abee7b0e79ecbfb59e8164dad0aa3",
+      "reviewed_sha256": "d3cc034a19b1490f747fb1927628caa50b3ef708a3b90d39767dceaa3d60474e",
+      "mode": "100644"
+    },
+    ".github/workflows/test-taker-parsing.yml": {
+      "sha256": "00989c75165c7baccc36edd28bfc540f64f689064efb085f907e7fa4897ec4cf",
+      "reviewed_sha256": "e435f725164a2ac18afcfe84539c9828caed29bb57f74d51d660ce146149379b",
+      "mode": "100644"
+    },
+    "frontend/src/views/admin/AgentsPage.vue": {
+      "sha256": "34a13aa367dc505b8168a6927dd73e51298d8b79c03f662192653243d673f7e2",
+      "reviewed_sha256": "03dd6a7d2a3f672d0d78fd44a6b451a7019e2de3d4bd971d09242b2ce56a8d52",
+      "mode": "100644"
+    },
+    "frontend/src/views/admin/GatewayPage.vue": {
+      "sha256": "d771cd4990392f6ff73329fdc645cbb850eb6b0e107f598b7723a1cd21c05c8a",
+      "reviewed_sha256": "79c6f60c7d73224fa2a79c79b4b346c0b3bd781e37a787ff217b06bc3dea9bc6",
+      "mode": "100644"
+    }
+  },
+  "self_hash_exemptions": [
+    ".github/scripts/collection_release_contract.json",
+    ".github/scripts/verify_deployment_source.py"
+  ]
+}

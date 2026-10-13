@@ -1,6 +1,7 @@
 """Reject builds outside the reviewed council, OKX, deadline and alpha delta."""
 from __future__ import annotations
 
+import argparse
 import ast
 import hashlib
 import json
@@ -372,5 +373,151 @@ def verify_collection_source(source: Path, upstream: str, revision: str) -> None
     print("COLLECTION_PR_SOURCE_PASS head=" + revision + " baseline=" + COLLECTION_BASELINE + " release_eligibility=not_granted")
 
 
+# Separate release contract. The PR gate and all legacy pins above are unchanged.
+# This anchor is the remotely read-back, reviewed 61-path collection repair.
+REVIEWED_COLLECTION_SHA = "15f5e39e0d3a62b51fec9b7a0834029840802d9e"
+REVIEWED_COLLECTION_TREE = "434cb3abfda1001772f83f31c3a2e64a3d0e1a1b"
+RELEASE_CONTRACT_PATH = ".github/scripts/collection_release_contract.json"
+RELEASE_INCREMENT_PATHS = frozenset({
+    RELEASE_CONTRACT_PATH,
+    ".github/scripts/verify_deployment_source.py",
+    ".github/scripts/test_verify_deployment_source.py",
+    ".github/scripts/test_release_source_contract.py",
+    ".github/scripts/run_deployment_preflight.py",
+    ".github/workflows/build-release-image.yml",
+    ".github/workflows/test-taker-parsing.yml",
+    "frontend/src/views/admin/GatewayPage.vue",
+    "frontend/src/views/admin/AgentsPage.vue",
+})
+
+
+def release_contract():
+    """Fixed review contract, using the existing exact-Git-head trust model.
+
+    Like the PR contract, this manifest and the verifier cannot hash themselves.
+    Their approval requires independent code review and an external final commit
+    readback/freeze. This function does not grant publication or deployment
+    authority and is not independent proof of its own implementation.
+    """
+    raw = Path(__file__).with_name("collection_release_contract.json").read_bytes()
+    contract = json.loads(raw)
+    assert set(contract) == {"schema", "upstream", "baseline", "baseline_tree", "reviewed_commit",
+                             "reviewed_tree", "reviewed_paths", "release_paths", "self_hash_exemptions"}, "Invalid release contract fields"
+    assert contract["schema"] == 1 and contract["upstream"] == UPSTREAM_SHA, "Wrong release upstream/schema"
+    assert contract["baseline"] == COLLECTION_BASELINE and contract["baseline_tree"] == COLLECTION_BASELINE_TREE, "Wrong release baseline"
+    assert contract["reviewed_commit"] == REVIEWED_COLLECTION_SHA and contract["reviewed_tree"] == REVIEWED_COLLECTION_TREE, "Wrong reviewed collection anchor"
+    collection = collection_contract()
+    reviewed_paths = set(collection["application"]) | set(collection["ci_paths"])
+    assert len(reviewed_paths) == 61 and set(contract["reviewed_paths"]) == reviewed_paths, "Incomplete reviewed 61-path contract"
+    roots = {RELEASE_CONTRACT_PATH, ".github/scripts/verify_deployment_source.py"}
+    assert set(contract["self_hash_exemptions"]) == roots and len(contract["self_hash_exemptions"]) == 2, "Unreviewed release trust root"
+    assert set(contract["release_paths"]) == RELEASE_INCREMENT_PATHS - roots, "Unreviewed release increment paths"
+    for relative, pin in contract["reviewed_paths"].items():
+        assert set(pin) == {"sha256", "mode"}, "Invalid reviewed entry"
+        assert pin["mode"] == "100644" and re.fullmatch(r"[0-9a-f]{64}", pin["sha256"]), "Invalid reviewed pin or mode"
+        if relative in collection["application"]:
+            assert pin["sha256"] == collection["application"][relative]["sha256"], "Collection/release application pins differ"
+        if relative in collection["ci_sha256"]:
+            assert pin["sha256"] == collection["ci_sha256"][relative], "Collection/release CI pins differ"
+    for relative, pin in contract["release_paths"].items():
+        assert set(pin) == {"sha256", "reviewed_sha256", "mode"}, "Invalid release entry"
+        assert pin["mode"] == "100644" and re.fullmatch(r"[0-9a-f]{64}", pin["sha256"]), "Invalid release pin or mode"
+        assert pin["reviewed_sha256"] is None or re.fullmatch(r"[0-9a-f]{64}", pin["reviewed_sha256"]), "Invalid release predecessor pin"
+        if relative in contract["reviewed_paths"]:
+            assert pin["reviewed_sha256"] == contract["reviewed_paths"][relative]["sha256"], "Release predecessor differs from reviewed anchor"
+    return contract
+
+
+def verify_release_source(source: Path, upstream: str, revision: str) -> None:
+    """Verify the exact reviewed release increment, with the existing Git trust root."""
+    assert upstream == UPSTREAM_SHA, "Wrong release upstream"
+    assert re.fullmatch(r"[0-9a-f]{40}", revision), "Unpinned release source"
+    assert revision != REVIEWED_COLLECTION_SHA, "Collection PR alone is not a release"
+    contract = release_contract()
+    collection = collection_contract()
+
+    def git(*args):
+        return subprocess.run(["git", "-C", str(source), *args], check=True,
+                              capture_output=True, timeout=45).stdout
+
+    def changes(base, head):
+        return {p.decode() for p in git("diff", "--no-renames", "--name-only", "-z", base, head).split(b"\0") if p}
+
+    def read(rev, relative):
+        return git("show", f"{rev}:{relative}")
+
+    def check_hash(content, expected, message):
+        assert hashlib.sha256(content).hexdigest() == expected, message
+
+    assert git("rev-parse", "HEAD").decode().strip() == revision, "Wrong release source commit"
+    for rev, tree in ((COLLECTION_BASELINE, COLLECTION_BASELINE_TREE),
+                      (REVIEWED_COLLECTION_SHA, REVIEWED_COLLECTION_TREE)):
+        assert git("rev-parse", rev + "^{tree}").decode().strip() == tree, "Wrong release anchor tree"
+    for ancestor, descendant in ((upstream, COLLECTION_BASELINE), (PREVIOUS_SHA, COLLECTION_BASELINE),
+                                 (COLLECTION_BASELINE, REVIEWED_COLLECTION_SHA), (REVIEWED_COLLECTION_SHA, revision)):
+        git("merge-base", "--is-ancestor", ancestor, descendant)
+    legacy_delta = {p for p in changes(upstream, COLLECTION_BASELINE) if not p.startswith(".github/")}
+    assert legacy_delta == APPLICATION_PATCH, "Release baseline lost retained patch"
+    for relative, expected in {**TAKER_PATCH_SHA256, **ALPHA_PATCH_SHA256}.items():
+        check_hash(read(COLLECTION_BASELINE, relative), expected, f"Baseline reviewed source changed: {relative}")
+    verify_retained_regressions(lambda relative: read(COLLECTION_BASELINE, relative))
+    reviewed_paths = set(contract["reviewed_paths"])
+    assert changes(COLLECTION_BASELINE, REVIEWED_COLLECTION_SHA) == reviewed_paths, "Reviewed collection anchor delta changed"
+    verify_tree_modes(git, REVIEWED_COLLECTION_SHA, reviewed_paths)
+    for relative, pin in contract["reviewed_paths"].items():
+        check_hash(read(REVIEWED_COLLECTION_SHA, relative), pin["sha256"], f"Reviewed anchor bytes changed: {relative}")
+    for relative, pin in collection["application"].items():
+        exists = git("ls-tree", "--name-only", COLLECTION_BASELINE, "--", relative).decode().splitlines()
+        if pin["base_sha256"] is None:
+            assert not exists, f"New collection path exists in baseline: {relative}"
+        else:
+            assert exists == [relative], f"Collection baseline path missing: {relative}"
+            check_hash(read(COLLECTION_BASELINE, relative), pin["base_sha256"], f"Collection baseline source changed: {relative}")
+    assert changes(REVIEWED_COLLECTION_SHA, revision) == RELEASE_INCREMENT_PATHS, "Missing or unreviewed release increment"
+    application = {p for p in changes(upstream, revision) if not p.startswith(".github/")}
+    assert application == APPLICATION_PATCH | set(collection["application"]), "Missing retained patch or unreviewed release application"
+    verify_tree_modes(git, revision, reviewed_paths | RELEASE_INCREMENT_PATHS)
+    assert not git("status", "--porcelain", "--untracked-files=all"), "Release source changed after verification"
+    expected = {relative: pin["sha256"] for relative, pin in contract["reviewed_paths"].items()}
+    for relative, pin in contract["release_paths"].items():
+        exists = git("ls-tree", "--name-only", REVIEWED_COLLECTION_SHA, "--", relative).decode().splitlines()
+        if pin["reviewed_sha256"] is None:
+            assert not exists, f"New release path exists in reviewed anchor: {relative}"
+        else:
+            assert exists == [relative], f"Release predecessor path missing: {relative}"
+            check_hash(read(REVIEWED_COLLECTION_SHA, relative), pin["reviewed_sha256"], f"Release predecessor bytes changed: {relative}")
+        expected[relative] = pin["sha256"]
+    assert not git("ls-tree", "--name-only", REVIEWED_COLLECTION_SHA, "--", RELEASE_CONTRACT_PATH), "Release contract already exists in anchor"
+    expected.pop(".github/scripts/verify_deployment_source.py")
+    for relative, pin in expected.items():
+        path = source / relative
+        assert path.is_file() and not path.is_symlink(), f"Required release source missing: {relative}"
+        check_hash(read(revision, relative), pin, f"Unreviewed release tree bytes: {relative}")
+        check_hash(path.read_bytes(), pin, f"Unreviewed release working bytes: {relative}")
+    # These two roots cannot self-certify. Require exact checkout/commit bytes
+    # and the same independently reviewed executing verifier; never auto-pin.
+    for relative in contract["self_hash_exemptions"]:
+        path = source / relative
+        assert path.is_file() and not path.is_symlink(), f"Missing release trust root: {relative}"
+        assert path.read_bytes() == read(revision, relative), f"Release trust-root working bytes changed: {relative}"
+        assert path.read_bytes() == (Path(__file__).parent / Path(relative).name).read_bytes(), "Executing release trust root differs from source"
+
+    for relative, pin in {**TAKER_PATCH_SHA256, **ALPHA_PATCH_SHA256}.items():
+        if relative not in collection["application"]:
+            check_hash((source / relative).read_bytes(), pin, f"Retained reviewed source changed: {relative}")
+    verify_retained_regressions(lambda relative: (source / relative).read_bytes())
+    print("RELEASE_SOURCE_PASS head=" + revision + " reviewed_collection=" + REVIEWED_COLLECTION_SHA
+          + " deployment_authorization=not_granted")
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("source", type=Path)
+    parser.add_argument("upstream")
+    parser.add_argument("revision")
+    args = parser.parse_args()
+    verify_release_source(args.source.resolve(), args.upstream, args.revision)
+
+
 if __name__ == "__main__":
-    verify(Path(sys.argv[1]).resolve(), sys.argv[2], sys.argv[3])
+    main()

@@ -389,6 +389,13 @@ function ageText(a: any): string {
   border-bottom: 1px solid var(--ds-color-border-default);
   transition: background-color var(--dur-fast);
 }
+.ag-row > .badge {
+  max-width: 100%;
+  height: auto;
+  min-height: 20px;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
 .ag-row:last-child {
   border-bottom: 0;
 }

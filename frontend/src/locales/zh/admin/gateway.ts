@@ -28,6 +28,18 @@ export const zhAdminGateway = {
     normal: '正常',
     jobsEmpty: '暂无调度作业',
   },
+  runs: {
+    title: '任务执行记录',
+    desc: '巡检完成与本轮主脑结果分别记录；缺少关联结果时显示未确认。',
+    inspection: '巡检 / 进程',
+    brainLabel: '本轮主脑',
+    scheduledAt: '调度时间',
+    detail: '执行详情',
+    returnCode: '返回码',
+    status: { success: '成功', failed: '失败', completed: '巡检已完成', running: '运行中', skipped: '已跳过', interrupted: '已中断', unknown: '未确认' },
+    process: { success: '已完成', failed: '失败', running: '运行中', skipped: '已跳过', interrupted: '已中断', unknown: '未确认', 'not-run': '未运行' },
+    brain: { ok: '成功', failed: '失败', skipped: '已跳过', not_run: '未执行', pending: '等待结果', unknown: '结果未确认', not_applicable: '不适用' },
+  },
   deliveries: {
     title: '事件投递队列 (最近 50 条)',
     records: '{n} 记录',

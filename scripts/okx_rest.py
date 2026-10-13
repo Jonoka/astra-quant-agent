@@ -35,6 +35,9 @@ from typing import Any, Mapping, Sequence
 from urllib.request import Request, urlopen
 
 from scripts.okx_runtime import OKXEnvironment, current_environment
+from astra_backend.collection import endpoint_timing
+from astra_backend.http_deadline import open_with_deadline
+from astra_backend.deadline import DeadlineExceeded, check_deadline
 
 __all__ = [
     "DEFAULT_OKX_BROKER_TAG",
@@ -215,6 +218,7 @@ def request(
     """One signed V5 private request. GET params go into the query string and the
     prehash; POST/list bodies are compact JSON and the prehash. Never falls back
     to the removed CLI."""
+    check_deadline()
     selected = env or current_environment()
     if not selected.configured:
         raise OKXNotConfigured(
@@ -253,25 +257,32 @@ def request(
         headers=headers,
         method=method,
     )
-    try:
-        with urlopen(http_request, timeout=timeout) as response:
-            payload_json = json.loads(response.read().decode("utf-8") or "{}")
-    except Exception as exc:
-        raise RuntimeError(f"OKX V5 网络请求失败：{type(exc).__name__}: {exc}") from exc
-    if not isinstance(payload_json, dict):
-        raise RuntimeError("OKX V5 invalid response envelope")
-    data = payload_json.get("data") or []
-    if not isinstance(data, list):
-        data = [data]
-    rows = [row for row in data if isinstance(row, dict)]
-    failures = [row for row in rows if str(row.get("sCode", "0")) != "0"]
-    if failures:
-        raise RuntimeError(
-            f"OKX {failures[0].get('sCode')}: {failures[0].get('sMsg') or '业务请求失败'}"
-        )
-    if str(payload_json.get("code", "0")) != "0":
-        raise RuntimeError(f"OKX {payload_json.get('code')}: {payload_json.get('msg') or '请求失败'}")
-    return rows
+    with endpoint_timing(method, path, selected.base_url):
+        try:
+            with open_with_deadline(http_request, opener=urlopen, timeout=timeout) as response:
+                check_deadline()
+                payload_json = json.loads(response.read().decode("utf-8") or "{}")
+            check_deadline()
+        except DeadlineExceeded:
+            raise
+        except Exception as exc:
+            check_deadline()
+            raise RuntimeError(f"OKX V5 网络请求失败：{type(exc).__name__}") from None
+        if not isinstance(payload_json, dict):
+            raise RuntimeError("OKX V5 invalid response envelope")
+        data = payload_json.get("data") or []
+        if not isinstance(data, list):
+            data = [data]
+        rows = [row for row in data if isinstance(row, dict)]
+        failures = [row for row in rows if str(row.get("sCode", "0")) != "0"]
+        if failures:
+            raise RuntimeError(
+                f"OKX {failures[0].get('sCode')}: {failures[0].get('sMsg') or '业务请求失败'}"
+            )
+        if str(payload_json.get("code", "0")) != "0":
+            raise RuntimeError(f"OKX {payload_json.get('code')}: {payload_json.get('msg') or '请求失败'}")
+        check_deadline()
+        return rows
 
 
 # ---------------------------------------------------------------------------

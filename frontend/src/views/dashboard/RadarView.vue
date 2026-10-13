@@ -18,6 +18,7 @@ import DirTag from '../../components/base/DirTag.vue';
 import ConfBadge from '../../components/base/ConfBadge.vue';
 import RadarDrawer from '../../components/dashboard/RadarDrawer.vue';
 import CryptoLogo from '../../components/dashboard/CryptoLogo.vue';
+import { isSameJobRun, statusTone } from '../../utils/jobOutcome';
 
 const store = useDashboardStore();
 const { t } = useI18n();
@@ -110,6 +111,12 @@ function actionsOf(c: any): { inst: string; dir: string; conf: number; label?: s
 
       <!-- AI 决策健康指示状态 -->
       <div v-if="aiHealth" class="flex flex-wrap items-center gap-1.5">
+        <span class="badge" :class="statusTone(aiHealth.last_status || 'unknown')" :title="aiHealth.last_error || ''">
+          {{ t('admin.gateway.runs.brainLabel') }}: {{ t(`admin.gateway.runs.brain.${aiHealth.last_status || 'unknown'}`, t('admin.gateway.runs.brain.unknown')) }}
+        </span>
+        <span class="badge" :class="statusTone(aiHealth.process_status || 'unknown')">
+          {{ t('admin.gateway.runs.inspection') }}: {{ t(`admin.gateway.runs.process.${aiHealth.process_status || 'unknown'}`, t('admin.gateway.runs.process.unknown')) }}
+        </span>
         <span class="dsh-pill">
           <span class="text-[var(--ink-3)]">{{ t('dash.radar.health.decisionAge') }}:</span>
           <b class="num font-mono" :class="decisionAgeWarn ? 'text-[var(--down)]' : 'text-[var(--up)]'">{{ decisionAgeText }}</b>
@@ -128,6 +135,16 @@ function actionsOf(c: any): { inst: string; dir: string; conf: number; label?: s
         </span>
       </div>
     </div>
+
+    <p v-if="aiHealth?.job_run_id" class="text-xs text-[var(--ink-2)] font-mono">
+      #{{ aiHealth.job_run_id }} · {{ aiHealth.scheduled_at || '--' }}
+      <span v-if="aiHealth.last_error" role="status" aria-live="polite"> · {{ aiHealth.last_error }}</span>
+    </p>
+    <p v-if="aiHealth?.last_known_result?.last_at && !isSameJobRun(aiHealth.last_known_result, aiHealth)" class="text-xs text-[var(--ink-2)]">
+      {{ t('dash.radar.health.lastKnown') }}: {{ t(`admin.gateway.runs.brain.${aiHealth.last_known_result.last_status || 'unknown'}`, t('admin.gateway.runs.brain.unknown')) }}
+      · {{ aiHealth.last_known_result.last_at }}
+      <span v-if="aiHealth.last_known_result.last_error" role="status" aria-live="polite"> · {{ aiHealth.last_known_result.last_error }}</span>
+    </p>
 
     <DataGate>
       <!-- 决策周期时序卡片流 -->

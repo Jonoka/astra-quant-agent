@@ -16,6 +16,11 @@ from typing import Any, Dict, List, Optional
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
+from urllib3.util.timeout import Timeout
+
+from astra_backend.collection import endpoint_timing
+from astra_backend.deadline import (DeadlineExceeded, check_deadline,
+                                    current_deadline, sleep_with_deadline)
 
 logger = logging.getLogger("market_data_service")
 
@@ -40,12 +45,17 @@ def _call_kind(method: str, path: str) -> str:
 
     绝不把整条 URL/带参数的路径当标签：那会让基数随调用爆炸（Prometheus 反模式），
     也会把 query 里的内容（instId/limit…）带进监控面。OKX 公共路径是固定小集合
-    （ticker/candles/…），取最后一段即可 —— 故**先剥掉 query/fragment 再取尾段**。
+    （ticker/candles/…），仅允许固定端点的尾段；未知端点归为 unknown。
     """
     clean = str(path or "").split("?", 1)[0].split("#", 1)[0].rstrip("/")
-    tail = clean.rsplit("/", 1)[-1] or "unknown"
-    safe = "".join(ch if (ch.isalnum() or ch in "_-") else "_" for ch in tail)
-    return f"okx_public_{method}_{safe}"
+    fixed = {
+        "/api/v5/market/ticker", "/api/v5/market/tickers",
+        "/api/v5/market/books", "/api/v5/market/candles",
+        "/api/v5/aigc/mcp/indicators", "/api/v5/public/funding-rate",
+        "/api/v5/public/open-interest",
+    }
+    tail = clean.rsplit("/", 1)[-1] if clean in fixed else "unknown"
+    return f"okx_public_{method}_{tail}"
 
 
 class MarketDataResponseError(RuntimeError):
@@ -63,6 +73,7 @@ DEFAULT_HEADERS = {
 }
 
 _SESSION: Optional[requests.Session] = None
+_BOUNDED_SESSION: Optional[requests.Session] = None
 _SESSION_LOCK = threading.Lock()
 
 # OKX bar 合法字面量（大小写敏感：分钟小写 m，小时/天/周/月大写）
@@ -98,88 +109,128 @@ def normalize_bar(bar: str) -> str:
 
 
 def get_market_session() -> requests.Session:
-    """Thread-safe persistent connection-pooled requests session."""
-    global _SESSION
-    if _SESSION is None:
+    """Keep ordinary clients' retry policy; budgeted reads own their retries."""
+    global _SESSION, _BOUNDED_SESSION
+    bounded = current_deadline() is not None
+    session = _BOUNDED_SESSION if bounded else _SESSION
+    if session is None:
         with _SESSION_LOCK:
-            if _SESSION is None:
-                s = requests.Session()
-                s.headers.update(DEFAULT_HEADERS)
-                retries = Retry(
-                    total=2,
-                    backoff_factor=0.35,
-                    # 429：OKX 公共行情按 IP 限频 40req/2s，引擎+面板共出口 IP 的部署
-                    # 易触发——重试（尊重 Retry-After）吸收突发，避免 1H/4H K线偶发拿空
+            check_deadline()
+            session = _BOUNDED_SESSION if bounded else _SESSION
+            if session is None:
+                session = requests.Session()
+                session.headers.update(DEFAULT_HEADERS)
+                # urllib3 cannot recompute the remaining shared budget before
+                # retries/Retry-After. The deadline path retries explicitly below.
+                retries = Retry(total=0) if bounded else Retry(
+                    total=2, backoff_factor=0.35,
                     status_forcelist=[429, 500, 502, 503, 504],
                     raise_on_status=False,
                 )
-                adapter = HTTPAdapter(
-                    pool_connections=12,
-                    pool_maxsize=24,
-                    max_retries=retries,
-                    pool_block=False,
-                )
-                s.mount("https://", adapter)
-                s.mount("http://", adapter)
-                _SESSION = s
-    return _SESSION
+                adapter = HTTPAdapter(pool_connections=12, pool_maxsize=24,
+                                      max_retries=retries, pool_block=False)
+                session.mount("https://", adapter)
+                session.mount("http://", adapter)
+                if bounded:
+                    _BOUNDED_SESSION = session
+                else:
+                    _SESSION = session
+    check_deadline()
+    return session
 
 
-def _public_get(path: str, params: Optional[Dict[str, Any]] = None, timeout: float = 3.5) -> Optional[Dict[str, Any]]:
-    """Try primary then fallback OKX public endpoints."""
-    validate_public_path(path)
-    session = get_market_session()
-    kind = _call_kind("get", path)
-    for base in OKX_PUBLIC_HOSTS:
-        url = f"{base}{path}"
-        started = time.time()
+def _retry_delay(response, attempt: int) -> float:
+    """Match urllib3's retry delay without permitting an unbounded sleep."""
+    raw = response.headers.get("Retry-After") if response is not None else None
+    if raw:
         try:
-            resp = session.get(url, params=params, timeout=timeout)
-            if resp.status_code == 200:
-                data = resp.json()
-                if str(data.get("code", "0")) == "0":
-                    note_call(kind, time.time() - started, ok=True)
-                    return data
-                reason = f"code={data.get('code')} msg={str(data.get('msg'))[:80]}"
-            else:
-                reason = f"http={resp.status_code}"
-            note_call(kind, time.time() - started, ok=False)
-            note_failure(kind, MarketDataResponseError(reason))
-        except Exception as exc:
-            # 第 137 刀的教训：静默 `except` 会让"现价恒 0 / 30 小时无信号"。
-            # 取值行为一字不变（仍旧吞掉、仍旧换下一个 host），但**必须留痕**。
-            note_call(kind, time.time() - started, ok=False)
-            note_failure(kind, exc)
-            logger.debug("Public GET %s failed on %s: %s", path, base, exc)
+            return max(0.0, float(raw))
+        except (TypeError, ValueError):
+            from email.utils import parsedate_to_datetime
+            try:
+                return max(0.0, parsedate_to_datetime(str(raw)).timestamp() - time.time())
+            except (TypeError, ValueError, OverflowError):
+                pass
+    return 0.0 if attempt == 0 else 0.7
+
+
+def _public_request(method: str, path: str, *, params=None, payload=None,
+                    timeout: float) -> Optional[Dict[str, Any]]:
+    validate_public_path(path)
+    check_deadline()
+    session = get_market_session()
+    kind = _call_kind(method.lower(), path)
+    bounded = current_deadline() is not None
+    for base in OKX_PUBLIC_HOSTS:
+        for attempt in range(3 if bounded else 1):
+            check_deadline()
+            started = time.monotonic()
+            retry_response = None
+            retry = False
+            try:
+                with endpoint_timing(method, path, base) as trace:
+                    limit = min(timeout, check_deadline())
+                    options = {"timeout": Timeout(total=limit, connect=limit, read=limit)
+                               if bounded else limit}
+                    if bounded:
+                        # Redirects are additional requests and must not renew
+                        # the budget inside requests' own redirect loop.
+                        options["allow_redirects"] = False
+                    if method == "GET":
+                        resp = session.get(f"{base}{path}", params=params, **options)
+                    else:
+                        resp = session.post(f"{base}{path}", json=payload,
+                                            headers={"Content-Type": "application/json"},
+                                            **options)
+                    check_deadline()
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        check_deadline()
+                        if str(data.get("code", "0")) == "0":
+                            trace["result"] = "ok"
+                            note_call(kind, time.monotonic() - started, ok=True)
+                            return data
+                        trace["result"] = "code_error"
+                        code = str(data.get("code", ""))
+                        reason = ("code=" + code
+                                  if code.isascii() and code.isdigit() and len(code) <= 6
+                                  else "code_error")
+                    else:
+                        trace["result"] = f"http_{resp.status_code}"
+                        retry = bounded and resp.status_code in {429, 500, 502, 503, 504}
+                        retry_response = resp
+                        reason = f"http={resp.status_code}"
+                    note_call(kind, time.monotonic() - started, ok=False)
+                    # Health's once-only warning prints its exception. Supply a
+                    # fixed label or numeric exchange code, never msg/query/body.
+                    note_failure(kind, MarketDataResponseError(reason))
+            except DeadlineExceeded:
+                note_call(kind, time.monotonic() - started, ok=False)
+                note_failure(kind, DeadlineExceeded())
+                raise
+            except Exception as exc:
+                check_deadline()
+                note_call(kind, time.monotonic() - started, ok=False)
+                note_failure(kind, RuntimeError(type(exc).__name__))
+                retry = bounded and isinstance(
+                    exc, (requests.exceptions.ConnectionError, requests.exceptions.Timeout))
+            if not retry or attempt == 2:
+                break
+            sleep_with_deadline(_retry_delay(retry_response, attempt))
+    check_deadline()
     return None
 
 
-def _public_post(path: str, payload: Dict[str, Any], timeout: float = 4.0) -> Optional[Dict[str, Any]]:
-    """Try primary then fallback OKX public POST endpoints."""
-    validate_public_path(path)
-    session = get_market_session()
-    headers = {"Content-Type": "application/json"}
-    kind = _call_kind("post", path)
-    for base in OKX_PUBLIC_HOSTS:
-        url = f"{base}{path}"
-        started = time.time()
-        try:
-            resp = session.post(url, json=payload, headers=headers, timeout=timeout)
-            if resp.status_code == 200:
-                data = resp.json()
-                if str(data.get("code", "0")) == "0":
-                    note_call(kind, time.time() - started, ok=True)
-                    return data
-                reason = f"code={data.get('code')} msg={str(data.get('msg'))[:80]}"
-            else:
-                reason = f"http={resp.status_code}"
-            note_call(kind, time.time() - started, ok=False)
-            note_failure(kind, MarketDataResponseError(reason))
-        except Exception as exc:
-            note_call(kind, time.time() - started, ok=False)
-            note_failure(kind, exc)
-            logger.debug("Public POST %s failed on %s: %s", path, base, exc)
-    return None
+def _public_get(path: str, params: Optional[Dict[str, Any]] = None,
+                timeout: float = 3.5) -> Optional[Dict[str, Any]]:
+    """Try primary then fallback OKX public endpoints within one budget."""
+    return _public_request("GET", path, params=params, timeout=timeout)
+
+
+def _public_post(path: str, payload: Dict[str, Any],
+                 timeout: float = 4.0) -> Optional[Dict[str, Any]]:
+    """Try primary then fallback OKX public POST endpoints within one budget."""
+    return _public_request("POST", path, payload=payload, timeout=timeout)
 
 
 # ---------------------------------------------------------------------------
@@ -243,7 +294,9 @@ def _local_math_indicators(
     """末级兜底：当 OKX MCP 指标接口与 REST 均不可用时（部署环境常见），
     用本地蜡烛（自带 openapi→www 双域容灾）纯 Python 计算 ADX/KDJ/BBWIDTH/CMF。
     输出与 OKX 官方口径对齐的字符串数值；样本不足时返回空 dict 让上层维持缺省。"""
+    check_deadline()
     rows = fetch_candles(inst_id, bar=bar, limit=120)
+    check_deadline()
     if not rows:
         return {}
     try:
@@ -257,6 +310,7 @@ def _local_math_indicators(
 
     result: Dict[str, Dict[str, str]] = {}
     for ind in indicators:
+        check_deadline()
         key = _indicator_key(ind)
         try:
             if key == "ADX" and len(closes) >= 30:
@@ -309,8 +363,11 @@ def _local_math_indicators(
                     num += mf * vols[i]
                     den += vols[i]
                 result["CMF"] = {"cmf": f"{(num / den):.4f}" if den > 0 else "0.0000"}
-        except Exception as exc:
-            logger.debug("Local indicator %s failed for %s: %s", key, inst_id, exc)
+        except DeadlineExceeded:
+            raise
+        except Exception:
+            pass
+    check_deadline()
     return result
 
 
@@ -334,26 +391,34 @@ def fetch_indicators_batch(
     }
     
     data = _public_post("/api/v5/aigc/mcp/indicators", payload, timeout=timeout)
+    check_deadline()
     result: Dict[str, Dict[str, Any]] = {}
     
     if data and data.get("data"):
         try:
             tfs = data["data"][0].get("data", [{}])[0].get("timeframes", {}).get(bar, {}).get("indicators", {})
             for ind in indicators:
+                check_deadline()
                 key = _indicator_key(ind)
                 items = tfs.get(key, [])
                 if items and isinstance(items[0], dict):
                     result[key] = items[0].get("values", {})
             if result:
+                check_deadline()
                 return result
+        except DeadlineExceeded:
+            raise
         except Exception:
-            pass
+            check_deadline()
     
+    check_deadline()
     # If MCP endpoint failed, fallback to querying individual indicator via REST or local math
     for ind in indicators:
+        check_deadline()
         key = _indicator_key(ind)
         if key not in result:
             val = fetch_single_indicator(inst_id, ind, bar=bar, timeout=timeout)
+            check_deadline()
             if val:
                 result[key] = val
     
@@ -361,8 +426,10 @@ def fetch_indicators_batch(
     missing = [ind for ind in indicators if _indicator_key(ind) not in result]
     if missing:
         for k, v in _local_math_indicators(inst_id, missing, bar).items():
+            check_deadline()
             result.setdefault(k, v)
     
+    check_deadline()
     return result
 
 
@@ -381,16 +448,24 @@ def fetch_single_indicator(
         "indicators": {key: {}},
     }
     data = _public_post("/api/v5/aigc/mcp/indicators", payload, timeout=timeout)
+    check_deadline()
     if data and data.get("data"):
         try:
             tfs = data["data"][0].get("data", [{}])[0].get("timeframes", {}).get(bar, {}).get("indicators", {})
             items = tfs.get(key, [])
             if items and isinstance(items[0], dict):
-                return items[0].get("values", {})
+                values = items[0].get("values", {})
+                check_deadline()
+                return values
+        except DeadlineExceeded:
+            raise
         except Exception:
-            pass
+            check_deadline()
+    check_deadline()
     # 末级兜底：本地蜡烛 + 纯 Python 数学（MCP 端点不可达时的最后防线）
-    return _local_math_indicators(inst_id, [key], bar).get(key, {})
+    values = _local_math_indicators(inst_id, [key], bar).get(key, {})
+    check_deadline()
+    return values
 
 
 # ---------------------------------------------------------------------------

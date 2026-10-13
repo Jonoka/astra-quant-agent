@@ -28,6 +28,18 @@ export const enAdminGateway = {
     normal: 'Normal',
     jobsEmpty: 'No scheduled jobs',
   },
+  runs: {
+    title: 'Job execution history',
+    desc: 'Inspection completion and the correlated brain result are recorded separately; missing results stay unconfirmed.',
+    inspection: 'Inspection / process',
+    brainLabel: 'Brain this run',
+    scheduledAt: 'Scheduled time',
+    detail: 'Execution details',
+    returnCode: 'Exit code',
+    status: { success: 'Success', failed: 'Failed', completed: 'Inspection completed', running: 'Running', skipped: 'Skipped', interrupted: 'Interrupted', unknown: 'Unconfirmed' },
+    process: { success: 'Completed', failed: 'Failed', running: 'Running', skipped: 'Skipped', interrupted: 'Interrupted', unknown: 'Unconfirmed', 'not-run': 'Not run' },
+    brain: { ok: 'Success', failed: 'Failed', skipped: 'Skipped', not_run: 'Not executed', pending: 'Awaiting result', unknown: 'Result unconfirmed', not_applicable: 'Not applicable' },
+  },
   deliveries: {
     title: 'Event delivery queue (last 50)',
     records: '{n} records',

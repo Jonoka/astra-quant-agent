@@ -53,6 +53,11 @@ export const enAdminAgents = {
   cacheUnreportedTitle: 'Upstream reported no cache field on this route; hit/miss is undecidable',
 
   status: {
+    cold: 'Cold start',
+    unknown: 'Result unconfirmed',
+    completed: 'Inspection completed',
+    skipped: 'Skipped',
+    interrupted: 'Interrupted',
     healthy: 'Healthy',
     degraded: 'Degraded',
     down: 'Down',

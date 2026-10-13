@@ -54,6 +54,8 @@ except ImportError:                                    # pragma: no cover - scri
 from pathlib import Path
 
 from typing import Any, Dict
+from astra_backend.deadline import DeadlineExceeded, check_deadline, COLLECTION_MAX_SECONDS
+from scripts.factors.defaults import build_default_factors
 
 # 行情取数失败的可观测性（第 137 刀）：只计数 + 每类一次性告警，绝不改变取值行为。
 try:                      # 以脚本方式运行（SCRIPTS_DIR 在 sys.path 上）
@@ -74,32 +76,77 @@ QUANT_FACTOR_TIERS = (
 )
 
 
+# A current producer always supplies these keys, including explicit missing-source
+# values. Check structure, not invented trading thresholds or data availability.
+_FACTOR_TIER_KEYS = {
+    tier: frozenset(block)
+    for tier, block in build_default_factors("", "").items()
+    if tier in QUANT_FACTOR_TIERS
+}
+
+
 def _factor_snapshot_path() -> str:
     data_dir = os.environ.get("ASTRA_DATA_DIR") or str(_PROJECT_ROOT / "data")
     return os.path.join(data_dir, "factor_library_snapshot.json")
 
 
-def load_quant_factor_tiers(inst_id: str, *, path: str = None) -> Dict[str, Any]:
-    """按 `instId` 从因子引擎快照里取出各梯队因子块。
+_UNSET_SNAPSHOT = object()
 
-    **失败语义**：文件缺失/损坏/该标的缺席 ⇒ 返回空 dict（提示词侧据此
-    显示"因子快照缺失"，**绝不编造中性因子**）。本函数**永不抛异常** ——
-    它在每分钟一轮的主脑循环里，抛一次就毁掉整轮决策。
+
+def load_quant_factor_tiers(inst_id: str, *, path: str = None,
+                            snapshot=_UNSET_SNAPSHOT) -> Dict[str, Any]:
+    """Read tiers; only an explicitly supplied, complete fresh result is current.
+
+    File reads retain their legacy missing-data behavior and NOT_ASSESSED label.
+    Invalid current refresh inputs return an empty dict; cancellation propagates.
     """
-    target = path or _factor_snapshot_path()
-    try:
-        with open(target, "r", encoding="utf-8") as f:
-            snap = json.load(f)
-    except Exception:
-        return {}
+    check_deadline()
+    if snapshot is not _UNSET_SNAPSHOT:
+        snap = snapshot
+    else:
+        target = path or _factor_snapshot_path()
+        try:
+            with open(target, "r", encoding="utf-8") as f:
+                snap = json.load(f)
+        except DeadlineExceeded:
+            raise
+        except Exception:
+            return {}
+    check_deadline()
+    if snapshot is not _UNSET_SNAPSHOT:
+        timestamp = snap.get("timestamp") if isinstance(snap, dict) else None
+        try:
+            valid = (type(timestamp) in (int, float) and math.isfinite(timestamp)
+                     and timestamp > 0
+                     and -1 <= time.time() - timestamp <= COLLECTION_MAX_SECONDS)
+        except (ValueError, OverflowError):
+            valid = False
+        if not valid:
+            return {}
     instruments = snap.get("instruments") if isinstance(snap, dict) else None
     if not isinstance(instruments, list):
         return {}
+    if snapshot is not _UNSET_SNAPSHOT:
+        matches = [item for item in instruments
+                   if isinstance(item, dict) and item.get("instId") == inst_id]
+        if len(matches) != 1:
+            return {}
     for item in instruments:
         if not isinstance(item, dict):
             continue
         if item.get("instId") is None or str(item.get("instId")) != str(inst_id):
             continue
+        if snapshot is not _UNSET_SNAPSHOT:
+            price = item.get("price")
+            try:
+                usable = (type(price) in (int, float) and math.isfinite(price) and price > 0
+                          and all(isinstance(item.get(tier), dict)
+                                  and _FACTOR_TIER_KEYS[tier].issubset(item[tier])
+                                  for tier in QUANT_FACTOR_TIERS))
+            except (ValueError, OverflowError):
+                usable = False
+            if not usable:
+                return {}
         result = {tier: item[tier] for tier in QUANT_FACTOR_TIERS
                   if isinstance(item.get(tier), dict)}
         # Alpha is a scalar on this same instrument entry, not a tier dict.
@@ -124,17 +171,46 @@ def load_quant_factor_tiers(inst_id: str, *, path: str = None) -> Dict[str, Any]
                 "read_timestamp": read_timestamp,
                 "age_seconds_at_read": (read_timestamp - timestamp
                                         if timestamp is not None else None),
-                "freshness_status": "NOT_ASSESSED",
+                "freshness_status": "CURRENT_REFRESH" if snapshot is not _UNSET_SNAPSHOT else "NOT_ASSESSED",
                 "upstream_evidence_quality": "NOT_REPORTED",
             }
         return result
     return {}
 
 
+def has_required_market_inputs(pkg) -> bool:
+    """Require the ticker/BBO and finite OHLCV coverage used by the prompt.
+
+    The original 12/8/6 coverage and BBO criteria are unchanged. Missing or
+    non-finite prices/candles cannot establish usable market data; zero volume
+    is a legitimate reading and is preserved.
+    """
+    if not isinstance(pkg, dict):
+        return False
+    try:
+        prices = [pkg.get(key) for key in ("price", "bidPx", "askPx")]
+        if not (all(type(value) in (int, float) and math.isfinite(value) and value > 0
+                    for value in prices) and prices[2] >= prices[1]):
+            return False
+        for key, minimum in (("recent_15m", 12), ("recent_1h", 8), ("recent_4h", 6)):
+            rows = pkg.get(key)
+            if not isinstance(rows, list) or len(rows) < minimum:
+                return False
+            for row in rows:
+                if (not isinstance(row, (list, tuple)) or len(row) < 5
+                        or not all(type(value) in (int, float) and math.isfinite(value)
+                                   for value in row[:5])):
+                    return False
+        return True
+    except (ValueError, OverflowError):
+        return False
+
+
 def fetch_single_instrument_package(item: Dict[str, Any], *,
                                    fetch_candles,
                                    fetch_single_indicator) -> Dict[str, Any]:
     """装配单标的数据包；两个行情函数由门面在**调用时**注入（理由见模块 docstring）。"""
+    check_deadline()
     inst_id = item["instId"]
     name = item["name"]
     ccy = item.get("ccy", "")
@@ -181,6 +257,7 @@ def fetch_single_instrument_package(item: Dict[str, Any], *,
     # 1. Ticker
     t_okx0 = time.time()
     try:
+        check_deadline()
         d = public_json_get(f"/api/v5/market/ticker?instId={inst_id}", opener=urllib.request.urlopen,
                             timeout=3, user_agent=headers["User-Agent"])
         if d.get("code") == "0" and d.get("data"):
@@ -192,11 +269,14 @@ def fetch_single_instrument_package(item: Dict[str, Any], *,
             pkg["chg24h"] = round(((pkg["price"] - op) / op * 100) if op > 0 else 0, 2)
             pkg["vol24h"] = round(float(t.get("vol24h", 0) or 0), 2)
             pkg["okx_latency_ms"] = max(1, int(round((time.time() - t_okx0) * 1000)))
+    except DeadlineExceeded:
+        raise
     except Exception as exc:
         note_failure("okx_ticker", exc)
 
     # 2. 15M Candles (recent 24, about 6 hours) & Technical Indicators Calculation
     try:
+        check_deadline()
         d = {"data": fetch_candles(inst_id, bar="15m", limit=24)}
         if d["data"]:
             raw_candles = d["data"]
@@ -258,11 +338,14 @@ def fetch_single_instrument_package(item: Dict[str, Any], *,
                 pkg["obv_flow"] = "BULL_FLOW" if obv > 0 else ("BEAR_FLOW" if obv < 0 else "NEUTRAL")
         else:
             print(f"[AI Brain] ⚠️ {inst_id} 15m K线获取失败（openapi/www 双域容灾均未取回），本包 15M 微观指标降级缺省")
+    except DeadlineExceeded:
+        raise
     except Exception as exc:
         print(f"[AI Brain] ⚠️ {inst_id} 15m K线处理异常: {exc}")
 
     # 3. 1H Candles (recent 24, about 24 hours) & 1H ATR / 1H RSI
     try:
+        check_deadline()
         d = {"data": fetch_candles(inst_id, bar="1H", limit=24)}
         if d["data"]:
             raw_1h = d["data"]
@@ -301,11 +384,14 @@ def fetch_single_instrument_package(item: Dict[str, Any], *,
                         pkg["structure_1h"] = "1H_SWING_CHOP"
         else:
             print(f"[AI Brain] ⚠️ {inst_id} 1H K线获取失败（openapi/www 双域容灾均未取回），1H ATR/RSI/结构字段降级缺省")
+    except DeadlineExceeded:
+        raise
     except Exception as exc:
         print(f"[AI Brain] ⚠️ {inst_id} 1H K线处理异常: {exc}")
 
     # 4. 4H Candles (recent 16, about 64 hours) & 4H Macro Structure
     try:
+        check_deadline()
         d = {"data": fetch_candles(inst_id, bar="4H", limit=16)}
         if d["data"]:
             raw_4h = d["data"]
@@ -322,38 +408,50 @@ def fetch_single_instrument_package(item: Dict[str, Any], *,
                     pkg["macro_4h"] = "4H_MACRO_RANGE (大级别区间震荡)"
         else:
             print(f"[AI Brain] ⚠️ {inst_id} 4H K线获取失败（openapi/www 双域容灾均未取回），4H 宏观结构字段降级缺省")
+    except DeadlineExceeded:
+        raise
     except Exception as exc:
         print(f"[AI Brain] ⚠️ {inst_id} 4H K线处理异常: {exc}")
 
     # 5. Funding Rate & OI
     if item["type"] == "crypto":
         try:
+            check_deadline()
             d = public_json_get(f"/api/v5/public/funding-rate?instId={inst_id}", opener=urllib.request.urlopen,
                                 timeout=3, user_agent=headers["User-Agent"])
             if d.get("code") == "0" and d.get("data"):
                 pkg["fundingRate"] = round(float(d["data"][0].get("fundingRate", 0)) * 100, 4)
+        except DeadlineExceeded:
+            raise
         except Exception as exc:
             note_failure("okx_funding_rate", exc)
 
         try:
+            check_deadline()
             d = public_json_get(f"/api/v5/public/open-interest?instType=SWAP&instId={inst_id}", opener=urllib.request.urlopen,
                                 timeout=3, user_agent=headers["User-Agent"])
             if d.get("code") == "0" and d.get("data"):
                 usd = float(d["data"][0].get("oiUsd", 0) or 0)
                 pkg["oiUsd"] = f"{round(usd / 1e8, 2)}亿 U" if usd > 1e8 else f"{round(usd / 1e4, 1)}万 U"
+        except DeadlineExceeded:
+            raise
         except Exception as exc:
             note_failure("okx_open_interest", exc)
 
         if ccy:
             try:
+                check_deadline()
                 d = public_json_get(f"/api/v5/rubik/stat/contracts/long-short-account-ratio?ccy={ccy}&period=5m", opener=urllib.request.urlopen,
                                     timeout=3, user_agent=headers["User-Agent"])
                 if d.get("code") == "0" and d.get("data") and len(d["data"]) > 0:
                     pkg["lsRatio"] = float(d["data"][0][1])
+            except DeadlineExceeded:
+                raise
             except Exception as exc:
                 note_failure("okx_ls_ratio", exc)
 
             try:
+                check_deadline()
                 d = public_json_get(f"/api/v5/rubik/stat/taker-volume?ccy={ccy}&instType=CONTRACTS&period=5m", opener=urllib.request.urlopen,
                                     timeout=3, user_agent=headers["User-Agent"])
                 if d.get("code") == "0" and d.get("data") and len(d["data"]) > 0:
@@ -361,25 +459,23 @@ def fetch_single_instrument_package(item: Dict[str, Any], *,
                     if net_diff is None:
                         raise ValueError("Invalid OKX taker-volume row")
                     pkg["takerNetUsd"] = f"{round(net_diff / 1e4, 1)}万 U"
+            except DeadlineExceeded:
+                raise
             except Exception as exc:
                 note_failure("okx_taker_volume", exc)
 
         # 6. OKX ADX Trend Strength Indicator (1H) via direct REST (zero Node CLI fork)
         try:
+            check_deadline()
             adx_data = fetch_single_indicator(inst_id, "ADX", bar="1H")
             if adx_data and "adx" in adx_data:
                 pkg["adx_1h"] = float(adx_data.get("adx", 0.0) or 0.0)
+        except DeadlineExceeded:
+            raise
         except Exception as exc:
             note_failure("okx_adx_1h", exc)
 
-    required_market_data = (
-        pkg["price"] > 0
-        and pkg["bidPx"] > 0
-        and pkg["askPx"] >= pkg["bidPx"]
-        and len(pkg["recent_15m"]) >= 12
-        and len(pkg["recent_1h"]) >= 8
-        and len(pkg["recent_4h"]) >= 6
-    )
+    required_market_data = has_required_market_inputs(pkg)
     # 6. 已退役：微积分多周期引擎（2026-10 数理系统退场）。
     #    `pkg["calculus"]` 只保留**显式不可用**的默认占位 —— 键位不动，
     #    供 calculus_snapshot.json / 台账兜底读取链使用；**不再计算任何东西**。
@@ -400,4 +496,5 @@ def fetch_single_instrument_package(item: Dict[str, Any], *,
         pkg["market_regime"] = "TRANSITION"
     else:
         pkg["market_regime"] = None
+    check_deadline()
     return pkg

@@ -56,6 +56,11 @@ export const zhAdminAgents = {
   // 批 27：健康 / 运行状态 / 调用状态此前都是原样印后端枚举
   // （healthy、success、not-run），而同页 KPI 带写的是「健康 / 异常」。查表本地化。
   status: {
+    cold: '冷启动',
+    unknown: '结果未确认',
+    completed: '巡检已完成',
+    skipped: '已跳过',
+    interrupted: '已中断',
     healthy: '健康',
     degraded: '降级',
     down: '离线',

@@ -434,7 +434,7 @@ def admin_agents(x_astra_admin_token: str | None = Header(default=None)) -> dict
     require_admin_header(x_astra_admin_token)
     store = GatewayStore(GATEWAY_DB_PATH)
     return {
-        "agents": agent_statuses(store.job_runs(100)),
+        "agents": agent_statuses(store.latest_job_runs()),
         "model_stats": store.model_stats(),
         "model_calls": store.model_calls(50),
         "model_requests": store.recent_model_requests(100),

@@ -8,7 +8,11 @@ from __future__ import annotations
 
 import json
 import urllib.request
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
+from contextvars import copy_context
+
+from astra_backend.deadline import (DeadlineExceeded, cancellation_scope,
+                                    check_deadline, current_deadline)
 from typing import Any, Dict, List, Optional
 
 try:
@@ -32,7 +36,9 @@ def fetch_smart_money_for_symbol(
     if not base_ccy:
         return None
 
+    check_deadline()
     res_okx = _fetch_from_okx_rubik(base_ccy, price=price, timeout=timeout)
+    check_deadline()
     if res_okx and res_okx.get("longShortRatio"):
         return res_okx
 
@@ -53,9 +59,12 @@ def _fetch_from_okx_rubik(ccy: str, price: float = 0.0, timeout: float = 3.5) ->
             raw_ratio = float(d["data"][0][1])
             ls_ratio = raw_ratio
             w_long = round(raw_ratio / (1.0 + raw_ratio), 4)
+    except DeadlineExceeded:
+        raise
     except Exception:
-        pass
+        check_deadline()
 
+    check_deadline()
     if w_long is None:
         try:
             d2 = public_json_get(f"/api/v5/rubik/stat/contracts/long-short-account-ratio?ccy={ccy}&period=5m",
@@ -65,8 +74,10 @@ def _fetch_from_okx_rubik(ccy: str, price: float = 0.0, timeout: float = 3.5) ->
                 raw_ratio2 = float(d2["data"][0][1])
                 ls_ratio = raw_ratio2
                 w_long = round(raw_ratio2 / (1.0 + raw_ratio2), 4)
+        except DeadlineExceeded:
+            raise
         except Exception:
-            pass
+            check_deadline()
 
     if w_long is None:
         return None
@@ -83,9 +94,12 @@ def _fetch_from_okx_rubik(ccy: str, price: float = 0.0, timeout: float = 3.5) ->
                     if abs(net_notional_usd) >= 1e4
                     else f"{round(net_notional_usd, 0)} U"
                 )
+    except DeadlineExceeded:
+        raise
     except Exception:
-        pass
+        check_deadline()
 
+    check_deadline()
     return {
         "longShortRatio": {
             "weightedLongRatio": w_long,
@@ -113,14 +127,48 @@ def fetch_smart_money_pool(
         return pool
 
     def _fetch_one(item: Dict[str, Any]) -> tuple[str, Optional[Dict[str, Any]]]:
+        check_deadline()
         ccy = item.get("ccy") or item.get("name") or (item.get("instId", "").split("-")[0] if "-" in item.get("instId", "") else "")
         price = float(item.get("price") or 0.0)
         res = fetch_smart_money_for_symbol(ccy, price=price, timeout=timeout)
+        check_deadline()
         return ccy, res
 
-    with ThreadPoolExecutor(max_workers=min(max_workers, len(instruments))) as executor:
-        for ccy, sm in executor.map(_fetch_one, instruments):
-            if ccy and sm:
-                pool[ccy] = sm
+    check_deadline()
+    if current_deadline() is None:
+        # Preserve the unbounded API's map/order and patch seam, while copying
+        # caller and cancellation context even without an absolute deadline.
+        def _run_context(entry):
+            context, item = entry
+            return context.run(_fetch_one, item)
 
-    return pool
+        entries = [(copy_context(), item) for item in instruments]
+        with ThreadPoolExecutor(max_workers=min(max_workers, len(instruments))) as executor:
+            for ccy, sm in executor.map(_run_context, entries):
+                if ccy and sm:
+                    pool[ccy] = sm
+        return pool
+
+    with cancellation_scope():
+        executor = ThreadPoolExecutor(max_workers=min(max_workers, len(instruments)))
+        futures = []
+        try:
+            for item in instruments:
+                check_deadline()
+                futures.append(executor.submit(copy_context().run, _fetch_one, item))
+            for future in futures:
+                try:
+                    ccy, sm = future.result(timeout=check_deadline())
+                except FutureTimeout:
+                    raise DeadlineExceeded("shared execution deadline exhausted") from None
+                check_deadline()
+                if ccy and sm:
+                    pool[ccy] = sm
+        finally:
+            for future in futures:
+                future.cancel()
+            # A running socket cannot be killed. Its inherited deadline/cancellation
+            # checks prevent late follow-up calls and side effects when it returns.
+            executor.shutdown(wait=False, cancel_futures=True)
+        check_deadline()
+        return pool

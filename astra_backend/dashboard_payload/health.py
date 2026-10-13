@@ -10,6 +10,11 @@ import datetime
 import json
 import os
 import time
+import sqlite3
+from pathlib import Path
+from contextlib import closing
+
+from astra_gateway.store import job_run_outcome
 
 __all__ = ["load_trading_memory_md", "_memory_freshness_note",
            "build_ai_health", "_load_cross_venue_data"]
@@ -67,6 +72,18 @@ def _memory_freshness_note(data_dir: str | os.PathLike[str], ) -> str:
         return ""
 
 
+def _latest_trader_run(data_dir: str | os.PathLike[str]) -> dict | None:
+    """Read the current run without creating or migrating any runtime state."""
+    try:
+        db = Path(os.environ.get("ASTRA_GATEWAY_DB") or os.path.join(data_dir, "astra_gateway.db"))
+        with closing(sqlite3.connect(db.resolve().as_uri() + "?mode=ro", uri=True, timeout=0.1)) as connection:
+            connection.row_factory = sqlite3.Row
+            row = connection.execute("SELECT * FROM job_runs WHERE job_name='trader' ORDER BY id DESC LIMIT 1").fetchone()
+        return job_run_outcome(dict(row)) if row else None
+    except (OSError, sqlite3.Error, ValueError):
+        return None
+
+
 def build_ai_health(data_dir: str | os.PathLike[str], ai_history_list):
     """AI 决策健康度（2026-09-10）：用户反馈"委员会不能正常运行"却无从判断——
     把决策缓存年龄、委员会开关态、最近周期结果直接摆上推演页，失败可见。"""
@@ -92,6 +109,28 @@ def build_ai_health(data_dir: str | os.PathLike[str], ai_history_list):
         out["last_cycle_time"] = ai_history_list[0].get("time")
         _cs = ai_history_list[0].get("council_status")
         out["last_council_status"] = _cs if isinstance(_cs, dict) else None
+    # The history contains successful decisions only. Keep it as history, never
+    # use it (or a stale global sidecar) to declare the latest scheduled run OK.
+    out.update(last_status="unknown", process_status="unknown", result_source="unavailable")
+    try:
+        with open(os.path.join(data_dir, "ai_health.json"), encoding="utf-8") as handle:
+            sidecar = json.load(handle)
+        if isinstance(sidecar, dict):
+            out["last_known_result"] = {key: sidecar.get(key) for key in (
+                "last_status", "last_at", "last_error", "job_run_id", "scheduled_at",
+                "consecutive_failures", "total_failures")}
+    except (OSError, ValueError):
+        pass
+    run = _latest_trader_run(data_dir)
+    if run:
+        out.update(last_status=run["brain_status"], process_status=run["process_status"],
+                   job_run_status=run["status"], job_run_id=run["id"],
+                   scheduled_at=run.get("scheduled_at", ""),
+                   last_at=run["brain_result_at"], last_error=run["brain_detail"],
+                   result_source="gateway_run")
+    if out["last_status"] != "ok":
+        out["last_successful_council_status"] = out.get("last_council_status")
+        out["last_council_status"] = None
     return out
 
 

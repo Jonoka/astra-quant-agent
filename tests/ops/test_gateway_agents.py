@@ -6,7 +6,7 @@
 | 语义 | 口径 |
 |---|---|
 | ★ **取每个作业的"最新一条"靠的是输入顺序** | `setdefault` 只记**第一次遇到**的 job_name，所以调用方给的 `job_runs` 必须是**新的在前**。这个前提不在函数签名里，故专门钉一条 |
-| ★ **三档健康度的判定次序** | 先默认 `healthy`；`status == "failed"` ⇒ `degraded`（**覆盖** healthy）；再判「有产物但文件不存在」⇒ `cold`（**覆盖**前面两者，优先级最高）。三条各一测，含相互覆盖 |
+| ★ **健康度优先级** | 失败或中断 ⇒ `degraded`，优先于缺产物；主脑执行中 ⇒ `running`；无关联主脑结果 ⇒ `unknown`；已确认成功但无产物 ⇒ `cold`。历史产物不证明本轮成功 |
 | ★ **`not-run` 与空串是两种"没跑过"** | 没有运行记录时 `last_run_status` 是字面量 `not-run`，而 `last_run_at` 是**空串** —— 前端要能区分"没跑过"与"跑了但没记开始时间" |
 | ★ **产物年龄非负** | `max(0, ...)` —— 时钟回拨/未来 mtime 不许报出负数年龄 |
 | ★ **无产物作业永不 `cold`** | `backup_agent` 的 `output` 为空串，既不 stat 也不判冷 |
@@ -100,7 +100,7 @@ class OutputAgeTests(_Base):
         self._artifact("ai_brain_decisions.json", age_seconds=120)
         row = self._agent(self._statuses(), "trading_brain")
         self.assertEqual(row["output_age_seconds"], 120)
-        self.assertEqual(row["health"], "healthy")
+        self.assertEqual(row["health"], "unknown")
 
     def test_a_missing_artifact_is_cold(self):
         row = self._agent(self._statuses(), "trading_brain")
@@ -139,15 +139,15 @@ class HealthPrecedenceTests(_Base):
         self.assertEqual(row["health"], "degraded")
 
     def test_a_successful_run_without_an_artifact_is_still_cold(self):
-        row = self._agent(self._statuses([{"job_name": "trader", "status": "success"}]),
+        row = self._agent(self._statuses([{"job_name": "trader", "status": "success", "brain_status": "ok"}]),
                           "trading_brain")
         self.assertEqual(row["health"], "cold",
                          "产物文件不存在 ⇒ cold 覆盖 healthy")
 
-    def test_a_missing_artifact_outranks_a_failure(self):
-        """★ 优先级：`cold`（有产物但文件不在）**覆盖** `degraded`。"""
+    def test_a_failure_outranks_a_missing_artifact(self):
+        """主脑失败不可被缺少产物掩盖为 cold。"""
         runs = [{"job_name": "trader", "status": "failed"}]
-        self.assertEqual(self._agent(self._statuses(runs), "trading_brain")["health"], "cold")
+        self.assertEqual(self._agent(self._statuses(runs), "trading_brain")["health"], "degraded")
 
     def test_a_failure_outranks_a_fresh_artifact(self):
         self._artifact("ai_brain_decisions.json", age_seconds=5)
@@ -157,7 +157,7 @@ class HealthPrecedenceTests(_Base):
 
     def test_a_fresh_artifact_and_a_successful_run_is_healthy(self):
         self._artifact("ai_brain_decisions.json", age_seconds=5)
-        runs = [{"job_name": "trader", "status": "success"}]
+        runs = [{"job_name": "trader", "status": "success", "brain_status": "ok"}]
         self.assertEqual(self._agent(self._statuses(runs), "trading_brain")["health"],
                          "healthy")
 
@@ -166,13 +166,13 @@ class HealthPrecedenceTests(_Base):
         runs = [{"job_name": "trader", "status": "failed"}]
         payload = self._statuses(runs)
         self.assertEqual(self._agent(payload, "news_engine")["health"], "healthy")
-        self.assertEqual(self._agent(payload, "trading_brain")["health"], "cold")
+        self.assertEqual(self._agent(payload, "trading_brain")["health"], "degraded")
 
-    def test_an_unknown_status_is_treated_as_healthy(self):
+    def test_a_running_status_remains_running(self):
         self._artifact("ai_brain_decisions.json", age_seconds=5)
         runs = [{"job_name": "trader", "status": "running"}]
         self.assertEqual(self._agent(self._statuses(runs), "trading_brain")["health"],
-                         "healthy")
+                         "running")
 
 
 class LatestRunTests(_Base):
@@ -203,7 +203,7 @@ class LatestRunTests(_Base):
     def test_a_run_missing_a_job_name_does_not_break_lookup(self):
         runs = [{"status": "failed"}, {"job_name": "trader", "status": "success"}]
         self.assertEqual(self._agent(self._statuses(runs), "trading_brain")["last_run_status"],
-                         "success")
+                         "completed")
 
     def test_each_agent_reads_its_own_job_history(self):
         runs = [{"job_name": "news", "status": "failed"},

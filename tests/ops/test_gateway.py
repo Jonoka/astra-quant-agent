@@ -195,11 +195,13 @@ class JobRunTests(_TempStore):
         row = next(r for r in self.store.job_runs() if r["id"] == run_id)
         self.assertEqual(row["finished_at"], "")
 
-    def test_exit_code_zero_means_success(self):
+    def test_exit_code_zero_means_inspection_completed_brain_unconfirmed(self):
         run_id = self.store.begin_job("trader")
         self.store.finish_job(run_id, 0, "一切正常")
         row = next(r for r in self.store.job_runs() if r["id"] == run_id)
-        self.assertEqual(row["status"], "success")
+        self.assertEqual(row["status"], "completed")
+        self.assertEqual(row["process_status"], "success")
+        self.assertEqual(row["brain_status"], "unknown")
         self.assertEqual(row["return_code"], 0)
 
     def test_a_nonzero_exit_code_means_failed(self):
@@ -247,7 +249,7 @@ class StaleJobRunRecoveryTests(_TempStore):
         run_id = self.store.begin_job("trader")
         self.store.finish_job(run_id, 0, "ok")
         self.assertEqual(self.store.recover_stale_job_runs(), 0)
-        self.assertEqual(self.store.job_runs()[0]["status"], "success")
+        self.assertEqual(self.store.job_runs()[0]["status"], "completed")
 
     def test_it_returns_the_number_of_adopted_rows(self):
         self.store.begin_job("a")

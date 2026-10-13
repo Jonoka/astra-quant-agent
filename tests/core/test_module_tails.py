@@ -181,21 +181,33 @@ class WritePromptSnapshotTests(unittest.TestCase):
 
     def test_write_failure_is_swallowed(self):
         # ★ 第 76 行 `pass` —— 提示词快照是调试用观测，失败不许打挂主脑周期
-        def boom(path, src=None, dst=None):
-            raise OSError("read-only fs")
-        self.assertIsNone(self._run(os=SimpleNamespace(replace=boom)))
+        with patch.object(os, "replace", side_effect=OSError("read-only fs")) as replace:
+            self.assertIsNone(self._run())
+        replace.assert_called_once()
+        self.assertEqual(replace.call_args.args[1], self.path)
+        self.assertEqual(os.listdir(self.tmp.name), [])
 
-    def test_a_failed_atomic_write_leaves_the_temp_file_behind(self):
-        # ⚠️ 实测行为（本刀仅记录，**未改**）：第 69–74 行是 `写临时文件 → os.replace`，
-        #    但**没有 `finally` 清理** —— `os.replace` 失败时那个 `*.tmp` 会留在
-        #    data/ 目录里。与既有的 `_atomic_write_json lacks finally: unlink` 同族。
-        #    用例名与断言现在一致（左残留 = True）。
-        def boom(path, src=None, dst=None):
+    def test_a_failed_atomic_write_preserves_destination_and_cleans_unique_temp(self):
+        Path(self.path).write_text("EXISTING-PROMPT", encoding="utf-8")
+        attempted_sources = []
+
+        def boom(src, dst):
+            # Fail at the actual publication step, after a complete temp write.
+            self.assertEqual(dst, self.path)
+            self.assertEqual(Path(src).read_text(encoding="utf-8"), "PROMPT-BODY")
+            self.assertEqual(Path(src).parent, Path(self.tmp.name))
+            self.assertTrue(Path(src).name.startswith(".ai-prompt-"))
+            self.assertTrue(Path(src).name.endswith(".tmp"))
+            attempted_sources.append(src)
             raise OSError("read-only fs")
-        self._run(os=SimpleNamespace(replace=boom))
-        leftovers = [p for p in os.listdir(self.tmp.name) if p.endswith(".tmp")]
-        self.assertTrue(leftovers, "失败后 *.tmp 确实留在目录里")
-        self.assertFalse(os.path.exists(self.path), "目标文件不该被创建")
+
+        with patch.object(os, "replace", side_effect=boom) as replace:
+            self.assertIsNone(self._run())
+            self.assertIsNone(self._run())
+        self.assertEqual(replace.call_count, 2)
+        self.assertEqual(len(set(attempted_sources)), 2, "Each writer needs a unique temp file")
+        self.assertEqual(Path(self.path).read_text(encoding="utf-8"), "EXISTING-PROMPT")
+        self.assertEqual(os.listdir(self.tmp.name), ["last_prompt.txt"])
 
 
 # ───────────────────────── trader/scale_out.py ─────────────────────────
@@ -206,6 +218,10 @@ class ExecuteScaleOutTests(unittest.TestCase):
         self.actions: list = []
         self.trades: list = []
         self.records: list = []
+        # Successful fixture orders must never append to production data/.
+        writer = patch.object(scale_out, "_append_scale_out_event", side_effect=self.records.append)
+        self.event_writer = writer.start()
+        self.addCleanup(writer.stop)
 
     def _f(self, **over):
         f = {"instId": "BTC-USDT-SWAP", "name": "BTC", "price": 102.0,
@@ -267,6 +283,8 @@ class ExecuteScaleOutTests(unittest.TestCase):
         self.assertEqual(kwargs["pos_side"], "long")
         self.assertEqual(kwargs["td_mode"], "cross")
         self.assertEqual(self.order_calls[0][0][1], "sell", "多头平仓方向必须是 sell")
+        self.event_writer.assert_called_once()
+        self.assertEqual(len(self.records), 1)
 
     def test_exchange_exception_is_captured_into_the_action_log(self):
         # ★ 第 144/145 行：异常写进 `order_detail`，再由第 196 行带进 executed_actions；

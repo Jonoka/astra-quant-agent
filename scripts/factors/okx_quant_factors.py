@@ -86,6 +86,10 @@ import urllib.request
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from astra_backend.math_utils import safe_float as _sf
+from astra_backend.collection import endpoint_timing
+from astra_backend.http_deadline import open_with_deadline
+from astra_backend.deadline import (DeadlineExceeded, check_deadline,
+                                    commit_scope, current_deadline, sleep_with_deadline)
 
 __all__ = [
     "MACD_FAST", "MACD_SLOW", "MACD_SIGNAL",
@@ -160,18 +164,23 @@ _CACHE_LOCK = threading.Lock()
 
 
 def _cache_get(key: str, ttl: float) -> Any:
+    check_deadline()
     with _CACHE_LOCK:
+        check_deadline()
         hit = _CACHE.get(key)
     if not hit:
         return None
     ts, value = hit
     if time.time() - ts > ttl:
         return None
+    check_deadline()
     return value
 
 
 def _cache_put(key: str, value: Any) -> None:
-    with _CACHE_LOCK:
+    check_deadline()
+    with _CACHE_LOCK, commit_scope():
+        check_deadline()
         _CACHE[key] = (time.time(), value)
 
 
@@ -215,19 +224,30 @@ def _throttle_rubik(path: str) -> None:
        同一进程内每测一次都要真睡 0.42s —— 实测把 `tests/ops/test_factor_library.py`
        从 3 秒拖到 **5 分钟**（user CPU 只有 1.8s，全在 `time.sleep`）。
     """
+    check_deadline()
     if "/rubik/" not in path:
         return
-    with _RUBIK_LOCK:
+    if current_deadline() is None:
+        _RUBIK_LOCK.acquire()
+    elif not _RUBIK_LOCK.acquire(timeout=check_deadline()):
+        raise DeadlineExceeded("shared execution deadline exhausted")
+    try:
+        check_deadline()
         wait = _RUBIK_MIN_INTERVAL - (time.time() - _RUBIK_LAST_AT[0])
         if wait > 0:
-            time.sleep(wait)
+            sleep_with_deadline(wait)
+        check_deadline()
+    finally:
+        _RUBIK_LOCK.release()
 
 
 def _mark_rubik_called(path: str) -> None:
     """记录一次"确实到达服务器"的 Rubik 调用（本地失败不记，见上）。"""
+    check_deadline()
     if "/rubik/" not in path:
         return
-    with _RUBIK_LOCK:
+    with _RUBIK_LOCK, commit_scope():
+        check_deadline()
         _RUBIK_LAST_AT[0] = time.time()
 
 
@@ -241,6 +261,7 @@ def _public_get(path: str, params: Optional[Dict[str, Any]] = None,
     只缓存**成功**结果 —— 失败不缓存，下一轮会重试（不许把一次抖动固化 5 分钟）。
     """
     validate_public_path(path)
+    check_deadline()
     if cache_key:
         hit = _cache_get(cache_key, ttl)
         if hit is not None:
@@ -250,30 +271,41 @@ def _public_get(path: str, params: Optional[Dict[str, Any]] = None,
         query = "?" + "&".join(f"{k}={v}" for k, v in params.items())
     for host in _OKX_HOSTS:
         url = f"{host}{path}{query}"
-        # 429（按 IP 限频）**指数退避重试**：直接吞掉会静默退化成"因子为 0/中性"
-        # （实盘已观测到 1H taker 长期取空）。三次尝试后仍失败才走下一个主机。
-        for attempt, backoff in enumerate((0.0, 0.5, 1.5, 0.0)):
+        # Every host, retry and pacing wait shares the caller's original budget.
+        for attempt, backoff in enumerate((0.0, 0.5, 1.5)):
+            check_deadline()
             if backoff:
-                time.sleep(backoff)
+                sleep_with_deadline(backoff)
             _throttle_rubik(path)
             try:
-                req = urllib.request.Request(url, headers=_HEADERS)
-                with urllib.request.urlopen(req, timeout=timeout) as resp:
-                    payload = json.loads(resp.read().decode("utf-8"))
-                _mark_rubik_called(path)      # 服务器确实收到了这次请求
-                if str(payload.get("code")) == "0":
-                    data = payload.get("data")
-                    if isinstance(data, list) and cache_key:
-                        _cache_put(cache_key, data)
-                    return data if isinstance(data, list) else None
+                with endpoint_timing("GET", path, host) as trace:
+                    req = urllib.request.Request(url, headers=_HEADERS)
+                    with open_with_deadline(req, opener=urllib.request.urlopen, timeout=timeout) as resp:
+                        check_deadline()
+                        payload = json.loads(resp.read().decode("utf-8"))
+                    check_deadline()
+                    _mark_rubik_called(path)
+                    if str(payload.get("code")) == "0":
+                        data = payload.get("data")
+                        if isinstance(data, list) and cache_key:
+                            _cache_put(cache_key, data)
+                        trace["result"] = "ok" if isinstance(data, list) else "invalid_data"
+                        check_deadline()
+                        return data if isinstance(data, list) else None
+                    trace["result"] = "code_error"
                 break
+            except DeadlineExceeded:
+                raise
             except urllib.error.HTTPError as exc:
-                _mark_rubik_called(path)      # 有状态码 ⇒ 也到了服务器（如 429）
+                check_deadline()
+                _mark_rubik_called(path)
                 if exc.code == 429 and attempt < 2:
                     continue
                 break
             except Exception:
-                break                       # 本地失败 ⇒ 不记账、不占用限频额度
+                check_deadline()
+                break  # Local failures do not consume the server's rate quota.
+    check_deadline()
     return None
 
 
@@ -1200,6 +1232,7 @@ def fetch_derivatives_snapshot(ccy: str, inst_id: str, ul_y: str, *,
         details = rows[0].get("details")
         if isinstance(details, list):
             snap["liquidation_details"] = details
+    check_deadline()
     return snap
 
 
@@ -1255,7 +1288,9 @@ def fetch_quarterly_basis_inputs(ccy: str, *, timeout: float = 4.0) -> Dict[str,
                     "index_px": _sf(idx[0].get("idxPx")),
                     "exp_time_ms": _sf(contract.get("expTime")),
                 }
-    _cache_put(cache_key, result)
+    if result:
+        _cache_put(cache_key, result)
+    check_deadline()
     return result
 
 
@@ -1285,7 +1320,9 @@ def fetch_option_snapshot(inst_family: str, ccy: str = "", *,
                           {"instType": "OPTION", "instFamily": family}, timeout)
     if oi_rows:
         out["opt_oi_rows"] = oi_rows
-    _cache_put(cache_key, out)
+    if out:
+        _cache_put(cache_key, out)
+    check_deadline()
     return out
 
 
@@ -1303,7 +1340,9 @@ def fetch_loan_rate_snapshot(*, timeout: float = 4.0) -> Dict[str, Any]:
                 if isinstance(row, dict) and str(row.get("ccy")) in ("USDT", "USD"):
                     out["loan_rate_usdt"] = _sf(row.get("rate"))
                     break
-    _cache_put("loan", out)
+    if out:
+        _cache_put("loan", out)
+    check_deadline()
     return out
 
 

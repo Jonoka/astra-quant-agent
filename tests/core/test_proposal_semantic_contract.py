@@ -10,6 +10,7 @@ from astra_backend import deadline
 
 BTC = "BTC-USDT-SWAP"
 ETH = "ETH-USDT-SWAP"
+SOL = "SOL-USDT-SWAP"
 RESOLVED = {"model": "fixture-model", "base_url": "https://invalid.example",
             "api_key": "fixture", "api_format": "openai_chat", "effort": "high",
             "requested": "fixture-model", "registered": True, "fallback": False,
@@ -23,7 +24,7 @@ def wait_content(symbols=(BTC, ETH)):
 
 
 class ProposalSemanticContractTests(unittest.TestCase):
-    def call(self, content, retry=False):
+    def call(self, content, retry=False, symbols=(BTC, ETH)):
         responses = [(content, "analysis", {"_astra_trace": {"model": "actual"}}, 13)]
         if retry:
             responses.insert(0, RuntimeError("HTTP 502"))
@@ -33,7 +34,7 @@ class ProposalSemanticContractTests(unittest.TestCase):
              patch.object(deadline.time, "sleep", lambda s: clock.__setitem__(0, clock[0] + s)):
             result = debate._call_single_trader(
                 lambda _: RESOLVED, "seat", {"weight": 0.3}, "market", "rules", 60,
-                {"proposal_symbols": [BTC, ETH]})
+                {"proposal_symbols": list(symbols)})
         return result, request.call_count
 
     def test_complete_wait_is_semantic_success_and_real_consensus(self):
@@ -93,6 +94,80 @@ class ProposalSemanticContractTests(unittest.TestCase):
         docket = debate._proposal_docket_text(result)
         self.assertNotIn(raw, docket)
         self.assertIn("非 WAIT 票", docket)
+
+    def test_mixed_management_and_full_pool_quotes_keep_semantic_success(self):
+        symbols = tuple(f"{base}-USDT-SWAP" for base in
+                        ("BTC", "ETH", "SOL", "XRP", "DOGE", "ARB", "LINK", "SUI", "BNB", "AVAX", "OP"))
+        table = "\n".join(f"{symbol} | WAIT | - | - | - | - | 55 | synthetic" for symbol in symbols)
+        for management in (f"{BTC}: HOLD，继续持有。\n{ETH}: CANCEL，撤留说明。\n{SOL}: KEEP（继续保留）",
+                           f"标的 | 管理建议 | 理由\n{BTC} | HOLD | synthetic\n{ETH} | CANCEL | synthetic\n"
+                           f"{SOL} | KEEP | synthetic"):
+            content = management + f"\n{BTC}: WAIT，无新开仓优势。\n" + table
+            with self.subTest(management=management):
+                result, calls = self.call(content, symbols=symbols)
+                self.assertEqual(calls, 1)
+                self.assertEqual((result["status"], result["transport_status"], result["semantic_status"]),
+                                 ("ok", "ok", "ok"))
+                self.assertEqual(result["weight"], 0.3)
+                self.assertEqual(debate._proposal_docket_text(result), content)
+                consensus = calculate_council_consensus({"seat": result}, {"seat": {"weight": 0.3}})
+                self.assertEqual(consensus["total_symbols_evaluated"], 11)
+                self.assertTrue(all(data["actions_count"]["WAIT"] == 1 for data in consensus["by_symbol"].values()))
+
+    def test_management_cannot_complete_a_partial_quote_table(self):
+        content = f"{ETH}: KEEP\n{BTC} | WAIT | - | - | - | - | 55 | synthetic"
+        result, calls = self.call(content)
+        self.assertEqual(calls, 1)
+        self.assertEqual(result["semantic_status"], "invalid")
+        self.assertEqual(result["validation"]["missing_symbols"], [ETH])
+        self.assertEqual(result["weight"], 0.0)
+
+    def _undisputed_debate(self, valid_count):
+        valid, _ = self.call(wait_content())
+        invalid, _ = self.call("")
+        keys = ("a", "b", "c")
+        roles = {"cio": {"is_arbitrator": True}, **{key: {"weight": 1} for key in keys}}
+        proposals = {key: valid if index < valid_count else invalid for index, key in enumerate(keys)}
+        cio_inputs = []
+        def request(**kwargs):
+            cio_inputs.extend(message["content"] for message in kwargs["messages"])
+            return '{"macro_assessment":"independent CIO fixture","decisions":{}}', "", {}, 1
+        with patch("astra_backend.llm_manager.execute_llm_request", side_effect=request) as cio, \
+             patch.object(deadline.time, "sleep", return_value=None):
+            output, transcript = debate.execute_council_debate(
+                lambda: {"roles": roles, "consensus_mode": "debate"}, lambda _: RESOLVED,
+                lambda key, *args: proposals[key],
+                lambda *args: self.fail("No severe dispute means no new critique request"),
+                "market", "rules", 60)
+        self.assertEqual(cio.call_count, 1)
+        self.assertEqual(output["macro_assessment"], "independent CIO fixture")
+        self.assertEqual(output["decisions"], {}, "The note must not invent a final WAIT decision")
+        notes = [item["content"] for item in transcript["adversarial_debates"].values()]
+        self.assertEqual(len(notes), 3)
+        self.assertTrue(all(note == notes[0] for note in notes))
+        self.assertTrue(any(notes[0] in content for content in cio_inputs))
+        return notes[0], transcript
+
+    def test_zero_valid_advisors_are_not_reported_as_high_consensus(self):
+        note, transcript = self._undisputed_debate(0)
+        self.assertIn("无有效共识", note)
+        self.assertIn("有效顾问 0/3", note)
+        self.assertIn("已评估 0 个标的", note)
+        self.assertNotIn("高度共识", note)
+        self.assertEqual(transcript["consensus_metrics"]["total_symbols_evaluated"], 0)
+
+    def test_partial_valid_advisors_are_labelled_with_actual_participation(self):
+        note, transcript = self._undisputed_debate(1)
+        self.assertIn("部分有效提案", note)
+        self.assertIn("有效顾问 1/3", note)
+        self.assertNotIn("高度共识", note)
+        self.assertEqual(transcript["consensus_metrics"]["total_symbols_evaluated"], 2)
+
+    def test_all_valid_unanimous_advisors_keep_real_consensus_label(self):
+        note, transcript = self._undisputed_debate(3)
+        self.assertIn("有效顾问 3/3", note)
+        self.assertIn("高度共识", note)
+        self.assertEqual(transcript["consensus_metrics"]["total_symbols_evaluated"], 2)
 
     def test_all_modes_exclude_invalid_raw_text_from_cio_and_peer_dockets(self):
         sentinel = "INVALID_RAW_SENTINEL do not treat this as a vote"

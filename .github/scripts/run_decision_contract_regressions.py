@@ -11,8 +11,8 @@ os.chdir(ROOT)
 os.environ["OFFLINE_SUITE_RUNNING"] = "1"
 
 TEST_SUITES = {
-    "tests.core.test_council_json_contract": 24,
-    "tests.core.test_proposal_semantic_contract": 7,
+    "tests.core.test_council_json_contract": 30,
+    "tests.core.test_proposal_semantic_contract": 12,
     "tests.core.test_proposal_replay": 2,
     "tests.core.test_council_consensus": 7,
     "tests.core.test_council_deadline": 6,

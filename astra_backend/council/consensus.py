@@ -30,6 +30,7 @@ def _clean_token(text: str) -> str:
 
 _SYMBOL = re.compile(r"[A-Z0-9]{1,20}-USDT(?:-SWAP)?", re.IGNORECASE)
 _ACTIONS = {"BUY_LONG", "SELL_SHORT", "WAIT"}
+_MANAGEMENT_ACTIONS = {"HOLD", "CLOSE_MARKET", "UPDATE_SL", "CANCEL", "KEEP"}
 _TABLE_ACTIONS = {
     "BUY": "BUY_LONG", "LONG": "BUY_LONG", "多": "BUY_LONG", "做多": "BUY_LONG",
     "SELL": "SELL_SHORT", "SHORT": "SELL_SHORT", "空": "SELL_SHORT", "做空": "SELL_SHORT",
@@ -163,6 +164,10 @@ def _legacy_quotes(text, errors):
         parts = [_clean_token(part) for part in line.strip("|").split("|")]
         if not parts or not _SYMBOL.fullmatch(parts[0]):
             continue
+        # Position/order management is requested separately from entry quotes.
+        # Preserve that advice in the raw docket, but never turn it into a vote.
+        if len(parts) > 1 and parts[1].upper() in _MANAGEMENT_ACTIONS:
+            continue
         saw_table = True
         if len(parts) < 6:
             errors.append(f"line {index}: incomplete quote table row")
@@ -172,19 +177,31 @@ def _legacy_quotes(text, errors):
         quote = _normalise_quote(parts[0], item, f"line {index}", errors, table=True)
         if quote is not None:
             quotes.append(quote)
-    # Only explicit symbol/action lines are proposals. Narrative mentioning a
-    # symbol, an unknown action or a JSON string must never become a WAIT vote.
+    # A quote table is authoritative for fields and symbol coverage. Matching
+    # shorthand is commentary, not another partial quote with invented defaults.
+    # Explicit contradictory entry actions still fail closed. Other prose is
+    # not an entry record; unknown actions in actual quote rows remain invalid.
     pattern = re.compile(
-        r"^\s*(?:[-*]\s+)?([A-Z0-9]{1,20}-USDT(?:-SWAP)?)\s*[:：]\s*([^\s,，。;；]+)",
+        r"^\s*(?:[-*]\s+)?([A-Z0-9]{1,20}-USDT(?:-SWAP)?)\s*[:：]\s*([^\s,，。;；(（]+)",
         re.IGNORECASE,
     )
     for index, line in enumerate(text.splitlines(), 1):
         match = pattern.match(line)
         if match:
-            quote = _normalise_quote(match.group(1), {"action": match.group(2)},
+            action = _clean_token(match.group(2)).upper()
+            if action in _MANAGEMENT_ACTIONS:
+                continue
+            if saw_table and _TABLE_ACTIONS.get(action, action) not in _ACTIONS:
+                continue
+            quote = _normalise_quote(match.group(1), {"action": action},
                                      f"line {index}", errors, table=True)
             if quote is not None:
-                quotes.append(quote)
+                if saw_table:
+                    if any(row["symbol"] == quote["symbol"] and row["action"] != quote["action"]
+                           for row in quotes):
+                        errors.append(f"line {index}: narrative action conflicts with quote table")
+                else:
+                    quotes.append(quote)
     return quotes, "table" if saw_table else "text"
 
 

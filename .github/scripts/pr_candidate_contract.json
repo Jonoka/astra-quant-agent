@@ -12,7 +12,7 @@
     },
     ".github/scripts/run_decision_contract_regressions.py": {
       "base_sha256": null,
-      "sha256": "57b06ed1ff55a8ac4bda5d977380384b803c75fa077dd15917d9b64a9a87bd5a",
+      "sha256": "6e0b7ba9c1f364c24719cfa5abb1da6922c5dbb16305af9482f5b98a3adba36c",
       "base_mode": null,
       "mode": "100644"
     },
@@ -24,7 +24,7 @@
     },
     ".github/scripts/test_decision_regression_gate.py": {
       "base_sha256": null,
-      "sha256": "dd43c4a2802601b3b5e8037f79473fdf5a29a070868f787fd1bfc64cfdd0703c",
+      "sha256": "1a94559ae302fed0b7867e5ad4142c179d6bc6755a2c6d977f0605fd7ec325de",
       "base_mode": null,
       "mode": "100644"
     },
@@ -48,19 +48,19 @@
     },
     "astra_backend/council/consensus.py": {
       "base_sha256": "da9360c95ecdc30300a644d0e74e5ef37c24fc961145a7d728657f6fda413df5",
-      "sha256": "0bb2b40af53197384f5e5c3142d8f406a5e53523a794b784ab670af542256058",
+      "sha256": "a6abd7dd83ecd6dc1d95b06ce5690ede51149d8d5dbb8050e807e61c1fad295e",
       "base_mode": "100644",
       "mode": "100644"
     },
     "astra_backend/council/debate.py": {
       "base_sha256": "5547fdb9dbbeca97b3b0cc8c05ea4f7a5a6714d7ab53796fe58c8064695d6500",
-      "sha256": "9a60ebba18959cf911fe3d280b2a850813a23300d336dd07fa93263db2f9c2b5",
+      "sha256": "12e4df194d055edbba2587bf1abf47061f9023560c6d5d5a547a85c482fc1f78",
       "base_mode": "100644",
       "mode": "100644"
     },
     "docs/DECISION_CONTRACT_REPAIR.md": {
       "base_sha256": null,
-      "sha256": "5145f00d583b2f8e9426dd34decdbb892788f2a105aafa04cd0636b388391cff",
+      "sha256": "99a254572260846791a0cbfdf832c803899ccf128c8e537f1545cfc0ea86d720",
       "base_mode": null,
       "mode": "100644"
     },
@@ -102,7 +102,7 @@
     },
     "scripts/trader/signal_snapshot.py": {
       "base_sha256": "d67333373bf0d3e87d6b0ac9d12d666b7c65e23ff3ef26c22e2bbbce5a1f76ec",
-      "sha256": "c8d8d8a5b74e87c9b61e0e5432ba02c3ee7adc299255197d85c0c24fc3a704d5",
+      "sha256": "422b3833d0e5a584e862294b4ef8406b546ff0d32122fe86813cc139e80dd045",
       "base_mode": "100644",
       "mode": "100644"
     },
@@ -114,7 +114,7 @@
     },
     "tests/core/test_council_json_contract.py": {
       "base_sha256": null,
-      "sha256": "2d3fc2b68e0b016e2cfcf38d632c332d2f094e8d98b6913349e1945a5daf05e5",
+      "sha256": "d5c19f2aa84aa1a3e9f9de7704bf3981f78ecbada073a35244615956e09a33cf",
       "base_mode": null,
       "mode": "100644"
     },
@@ -132,7 +132,7 @@
     },
     "tests/core/test_proposal_semantic_contract.py": {
       "base_sha256": null,
-      "sha256": "b3fc9b7e5575b39e7bc7c4a67a006309cfc46eb6975c859ed0d814e0045a5a1e",
+      "sha256": "5d8f89afef522022f9764c98b6d0c450f97c4529c8da2e4da6c80bb73941aa6d",
       "base_mode": null,
       "mode": "100644"
     },

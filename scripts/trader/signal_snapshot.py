@@ -149,8 +149,9 @@ def build_signal_snapshot(f: dict, *, data_dir: str) -> dict:
     snap = {
         "price": f.get("price"),
         "atr": f.get("atr"),
-        # Preserve the actual decision-time candle source. A newer library file
-        # cannot reconstruct an earlier entry confirmation after the fact.
+        # Preserve this trader observation's candle source and timestamps.
+        # This is not a copy of the brain prompt's earlier input, and a newer
+        # library file cannot reconstruct that earlier input after the fact.
         "closed_candle_contract": validate_closed_candle_contracts(
             f.get("closed_candle_contract"), inst_id=f.get("instId")),
         # ---- 2026-10 新证据链：7 梯队因子（复盘归因的真实可观测字段）----

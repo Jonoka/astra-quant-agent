@@ -219,10 +219,68 @@ class TraderJSONContractTests(unittest.TestCase):
                      "BTC-USDT-SWAP | BUY_LONG | bad | 90 | 120 | 10 | 80",
                      "BTC-USDT-SWAP | WAIT | - | - | - | - | NaN",
                      "BTC-USDT-SWAP: UNKNOWN",
-                     "BTC-USDT-SWAP | WAIT | - | - | - | - | 50\nETH-USDT-SWAP: UNKNOWN",
+                     "BTC-USDT-SWAP | WAIT | - | - | - | - | 50\nETH-USDT-SWAP | UNKNOWN | - | - | - | - | 50",
                      "BTC-USDT-SWAP | WAIT | - | - | - | - | 50\nBTC-USDT-SWAP: BUY_LONG"):
             with self.subTest(text=text):
                 self.assertInvalid(text)
+
+    def test_management_narratives_do_not_poison_valid_quote_table(self):
+        table = f"{BTC} | WAIT | - | - | - | - | 55 | 已有持仓"
+        for action in ("HOLD", "CLOSE_MARKET", "UPDATE_SL", "CANCEL", "KEEP"):
+            for suffix in ("，仅管理说明。", "（仅管理说明）"):
+                with self.subTest(action=action, suffix=suffix):
+                    parsed = parse_trader_proposal(f"{BTC}: {action}{suffix}\n{table}", [BTC])
+                    self.assertTrue(parsed["valid"], parsed)
+                    self.assertEqual(len(parsed["quotes"]), 1)
+                    self.assertEqual(parsed["quotes"][0]["confidence"], 55)
+
+    def test_management_tables_are_not_quote_votes(self):
+        for action in ("HOLD", "CLOSE_MARKET", "UPDATE_SL", "CANCEL", "KEEP"):
+            text = (f"标的 | 管理建议 | 理由\n{BTC} | {action} | 管理说明\n"
+                    f"{BTC} | WAIT | - | - | - | - | 55 | 暂无新开仓优势")
+            with self.subTest(action=action):
+                parsed = parse_trader_proposal(text, [BTC])
+                self.assertTrue(parsed["valid"], parsed)
+                self.assertEqual([q["action"] for q in parsed["quotes"]], ["WAIT"])
+
+    def test_matching_narrative_does_not_override_quote_fields(self):
+        for action in ("WAIT", "BUY_LONG", "SELL_SHORT"):
+            table = f"{BTC} | {action} | 100 | 90 | 120 | 10 | 82 | 报价依据"
+            parsed = parse_trader_proposal(f"{BTC}: {action}，摘要。\n{table}", [BTC])
+            self.assertTrue(parsed["valid"], parsed)
+            self.assertEqual(len(parsed["quotes"]), 1)
+            quote = parsed["quotes"][0]
+            self.assertEqual((quote["limit_price"], quote["margin"], quote["confidence"], quote["reason"]),
+                             (100, 10, 82, "报价依据"))
+        for narrative in ("当前趋势偏弱", "RSI 为54", "UNKNOWN 仅为分析文字"):
+            text = f"{BTC}: {narrative}\n{BTC} | WAIT | - | - | - | - | 55 | 报价依据"
+            parsed = parse_trader_proposal(text, [BTC])
+            self.assertTrue(parsed["valid"], parsed)
+            self.assertEqual(len(parsed["quotes"]), 1)
+            self.assertEqual(parsed["quotes"][0]["confidence"], 55)
+
+    def test_management_and_narrative_cannot_fill_missing_quote_symbols(self):
+        table = f"{BTC} | WAIT | - | - | - | - | 55 | 无优势"
+        for other in (f"{ETH}: HOLD", f"{ETH}: WAIT", f"{ETH}: UNKNOWN 分析文字", f"{ETH} | KEEP | 管理说明"):
+            with self.subTest(other=other):
+                parsed = self.assertInvalid(other + "\n" + table, [BTC, ETH])
+                self.assertEqual(parsed["missing_symbols"], [ETH])
+                self.assertEqual([q["symbol"] for q in parsed["quotes"]], [BTC])
+
+    def test_management_without_quotes_is_not_a_wait_proposal(self):
+        for action in ("HOLD", "CLOSE_MARKET", "UPDATE_SL", "CANCEL", "KEEP"):
+            self.assertInvalid(f"{BTC}: {action}，仅管理说明。")
+            self.assertInvalid(f"{BTC} | {action} | 仅管理说明")
+
+    def test_management_does_not_hide_invalid_or_conflicting_quote_rows(self):
+        for prefix in (f"{BTC}: HOLD\n", f"{BTC} | KEEP | 管理说明\n"):
+            for quote in (f"{BTC} | UNKNOWN | - | - | - | - | 55",
+                          f"{BTC} | BUY_LONG | 100",
+                          f"{BTC} | WAIT | - | - | - | - | 55\n"
+                          f"{BTC} | SELL_SHORT | 100 | 110 | 80 | 10 | 82",
+                          f"{BTC} | WAIT | - | - | - | - | 55\n{BTC}: BUY_LONG"):
+                with self.subTest(prefix=prefix, quote=quote):
+                    self.assertInvalid(prefix + quote)
 
     def test_invalid_partial_json_is_rejected_atomically(self):
         self.assertInvalid(proposal({BTC: trade(), ETH: {"action": "UNKNOWN"}}))

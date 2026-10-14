@@ -34,6 +34,16 @@ trade frequency/profitability.
    algorithm was changed. A genuine all-WAIT proposal remains valid; an absent
    proposal is not a synthetic WAIT vote. Missing numeric entry data stays missing.
    The pre-existing confidence default of 50 is retained when omitted.
+   Position/order management (`HOLD`, `CLOSE_MARKET`, `UPDATE_SL`, `CANCEL`,
+   `KEEP`) remains in the raw advice but is not an entry vote. When a quote table
+   exists it alone supplies fields and symbol coverage; matching shorthand and
+   ordinary analysis do not create extra rows or overwrite prices/confidence.
+   Explicit contradictory entry shorthand, malformed/unknown table actions and
+   conflicting quote rows still invalidate the proposal. Management or prose
+   cannot supply a missing quote-table symbol.
+   Debate skip notes distinguish zero, partial and complete valid participation;
+   no-data is not described as unanimous agreement. This wording does not change
+   CIO independence or manufacture final WAIT decisions.
 3. Existing candle fetches now retain a bounded, versioned evidence contract:
    instrument, source, bar, observation timestamp, up to three oldest-first raw
    OHLCV rows per 15m/1H/4H period, candle start/end UTC milliseconds, and the
@@ -49,6 +59,12 @@ trade frequency/profitability.
    names. Existing Alpha handling and numerical indicators remain unchanged;
    missing Alpha or candle values are never manufactured.
 
+Brain prompt evidence and trader signal-journal evidence are independently
+collected observations. The journal does not preserve or prove the exact candle
+inputs used by an earlier brain decision. Only the latest full prompt is retained;
+older prompt history is compacted. Neither closed-candle path reconstructs
+historical candle evidence from a newer factor-library snapshot.
+
 ## Reproduce
 
 With the repository dependencies already available:
@@ -61,7 +77,7 @@ git diff --check
 
 The focused runner uses the repository's network/resource guard and reports test
 counts, attempted egress, protected writes and configuration fingerprints. It is
-not a full repository test run. Final local result: **463 tests passed**, with zero
+not a full repository test run. Final local result: **474 tests passed**, with zero
 network attempts, protected writes, or configuration fingerprint changes.
 The extraction tests retain all old numerical
 parity checks, excluding only the additive observation contract; new tests assert
@@ -105,7 +121,9 @@ the candidate at test runtime.
 
 The candidate route runs the unchanged historical preflight on an isolated
 checkout of `60133ce`, then the existing taker/Alpha/collection/retained gates
-and the 463-test decision gate on the candidate. Focused runner and mode-boundary
+and the focused decision gate on the candidate (463 tests at initial remote
+review; 474 after the management/narrative and participation-note regressions).
+Focused runner and mode-boundary
 refusal tests reject missing discovery, skipped tests, expected failures and
 source tampering. Existing frontend checks and a final exact-source verification
 remain in the same workflow. The original selected mode is retained for the

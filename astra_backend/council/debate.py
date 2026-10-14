@@ -549,12 +549,26 @@ def execute_council_debate(load_config: Callable[[], Dict[str, Any]], resolve_se
                     "latency_ms": 0,
                 }
         elif not disputed_symbols:
+            by_symbol = early_consensus.get("by_symbol", {})
+            participants = {seat["role_id"] for data in by_symbol.values()
+                            for seat in data.get("seat_details", [])}
+            coverage = f"有效顾问 {len(participants)}/{len(trader_keys)}，已评估 {len(by_symbol)} 个标的"
+            if not by_symbol or not participants:
+                reason = f"无有效共识（{coverage}），不能将缺席视为一致意见"
+            elif len(participants) < len(trader_keys):
+                reason = f"仅依据部分有效提案（{coverage}），未发现严重多空撕裂标的"
+            elif all(data.get("status") == "STRONG_CONSENSUS"
+                     and len(data.get("seat_details", [])) == len(trader_keys)
+                     for data in by_symbol.values()):
+                reason = f"全员提案高度共识（{coverage}），无严重多空撕裂标的"
+            else:
+                reason = f"{coverage}，未发现严重多空撕裂标的"
             for k in trader_keys:
                 trader_debates[k] = {
                     "role_id": k,
                     "role_name": roles[k].get("name", k),
                     "status": "skipped",
-                    "content": "全员提案高度共识，无严重多空撕裂标的，自动跳过第二轮红蓝对抗辩论",
+                    "content": reason + "；跳过第二轮红蓝对抗辩论，CIO 仍按原规则独立审查",
                     "latency_ms": 0,
                 }
         else:

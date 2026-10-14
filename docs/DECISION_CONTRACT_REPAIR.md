@@ -3,7 +3,7 @@
 ## Scope and provenance
 
 Base: `60133ce82d4a0b91f94bc0c613a07e24aff049f5` (PR #8 merged).
-This branch is a local repair candidate. It does not deploy, change runtime
+This branch is a draft-PR repair candidate. It does not deploy, change runtime
 configuration, change leverage/risk thresholds, or execute orders. PR #6 is not
 included.
 
@@ -84,6 +84,38 @@ An expanded legacy council run also has eight already-failing baseline tests
 fail against the deployed baseline. They were not weakened to claim a full green
 suite; detailed results are retained with the local validation evidence. The
 focused contract gate is reported separately.
+
+## Ordinary-PR verification and release boundary
+
+The first PR run stopped before application tests with
+`AssertionError: Missing or unreviewed release increment` in the historical
+release source verifier. That verifier correctly rejected the new source delta;
+its collection and release hashes describe previously reviewed historical
+evidence and are not updated to make this ordinary source repair pass.
+
+The existing PR workflow and preflight entry point now have an explicit
+`--candidate-pr` mode, restricted to `pull_request` events. The independent
+`pr_candidate_contract.json` pins the exact deployed baseline and tree, the
+complete candidate delta, each predecessor/current SHA-256 and Git file mode.
+Only the candidate contract and its verifier are self-hash exemptions; their
+exact committed bytes require independent review and remote tree readback.
+Unknown files, missing/deleted paths, wrong hashes/modes, dirty checkouts and
+unexpected trust roots are rejected. Approval hashes are never derived from
+the candidate at test runtime.
+
+The candidate route runs the unchanged historical preflight on an isolated
+checkout of `60133ce`, then the existing taker/Alpha/collection/retained gates
+and the 463-test decision gate on the candidate. Focused runner and mode-boundary
+refusal tests reject missing discovery, skipped tests, expected failures and
+source tampering. Existing frontend checks and a final exact-source verification
+remain in the same workflow. The original selected mode is retained for the
+final check, so removing a contract cannot downgrade verification.
+
+Neither historical source contract nor `build-release-image.yml` is changed.
+The default preflight remains the original release verifier and cannot fall
+back to candidate approval. Candidate success is marked
+`release_eligibility=not_granted`: it is not release, deployment, or merge
+authorization, and the historical release gate still rejects this candidate.
 
 ## Direction conflict requires a separate decision
 

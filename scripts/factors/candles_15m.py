@@ -37,6 +37,8 @@ Theory"，把 15M 的 `closes/highs/lows/vols` 喂给 `calculate_calculus` 并�
 
 from __future__ import annotations
 
+import math
+import time
 from typing import Any, Dict, List, Tuple
 
 __all__ = ["derive_candle_series", "compute_15m_indicators"]
@@ -46,6 +48,144 @@ _COL_HIGH = 2
 _COL_LOW = 3
 _COL_CLOSE = 4
 _COL_VOL = 5
+
+# An evidence window, not a new trading rule. Never infer closure from position
+# in the response ([-2]), a ticker price, or elapsed time without OKX confirm=1.
+_BAR_MS = {"15m": 900_000, "1H": 3_600_000, "4H": 14_400_000}
+_CLOSED_WINDOW = 3
+_CANDLE_SOURCE = "OKX:/api/v5/market/candles"
+
+
+def _timestamp_ms(value):
+    if type(value) is str and value.isascii() and value.isdigit():
+        try:
+            value = int(value)
+        except ValueError:
+            return None
+    return value if type(value) is int and value > 0 else None
+
+
+def build_closed_candle_contract(raw_candles, *, inst_id, bar, observed_at_ms=None):
+    """Keep at most three verified closed OHLCV rows, oldest first.
+
+    All price/volume fields retain their source representation. Timestamps are
+    UTC epoch milliseconds; end_ts_ms is derived from the documented bar width.
+    STALE means the last completed interval is absent, not an invented age limit.
+    Existing indicator calculations and execution gates do not consume this.
+    """
+    observed = _timestamp_ms(observed_at_ms if observed_at_ms is not None
+                             else int(time.time() * 1000))
+    duration = _BAR_MS.get(bar)
+    result = {"schema": "okx_closed_candles_v1", "source": _CANDLE_SOURCE,
+              "instId": inst_id, "bar": bar, "observed_at_ms": observed,
+              "status": "MISSING", "available": False, "window_complete": False,
+              "order": "oldest_first", "candles": [], "latest_end_ts_ms": None,
+              "age_ms": None, "excluded": {"unconfirmed": 0, "unknown_confirm": 0,
+                                             "invalid": 0}}
+    if not isinstance(inst_id, str) or not inst_id or duration is None or observed is None:
+        result["status"] = "INVALID_SOURCE"
+        return result
+    if not isinstance(raw_candles, (list, tuple)):
+        result["status"] = "INVALID_SOURCE"
+        return result
+    if not raw_candles:
+        return result
+    candidates, seen, conflicts = {}, {}, set()
+    for row in raw_candles:
+        # Inconsistent rows for the same interval are not a choice of which
+        # price/confirmation to trust, even if only one version says confirm=1.
+        ts = _timestamp_ms(row[0]) if isinstance(row, (list, tuple)) and row else None
+        if ts is not None:
+            signature = [(type(value), value) for value in
+                         list(row[:6]) + [row[8] if len(row) >= 9 else None]]
+            if ts in seen and seen[ts] != signature:
+                conflicts.add(ts)
+                result["excluded"]["invalid"] += 1
+            seen[ts] = signature
+        if not isinstance(row, (list, tuple)) or len(row) < 9:
+            result["excluded"]["unknown_confirm"] += 1
+            continue
+        confirm = row[8]
+        if type(confirm) not in (str, int) or confirm not in ("1", 1):
+            kind = "unconfirmed" if type(confirm) in (str, int) and confirm in ("0", 0) else "unknown_confirm"
+            result["excluded"][kind] += 1
+            continue
+        try:
+            values = [float(value) if type(value) in (str, int, float) else float("nan")
+                      for value in row[1:6]]
+            op, high, low, close, volume = values
+            valid = (ts is not None and ts % duration == 0 and ts + duration <= observed
+                     and all(math.isfinite(value) for value in values)
+                     and min(op, high, low, close) > 0 and volume >= 0
+                     and low <= min(op, close) <= max(op, close) <= high)
+        except (TypeError, ValueError, OverflowError):
+            valid = False
+        if not valid:
+            result["excluded"]["invalid"] += 1
+            continue
+        candle = {"ts_ms": ts, "end_ts_ms": ts + duration,
+                  "open": row[1], "high": row[2], "low": row[3],
+                  "close": row[4], "volume": row[5], "confirm": confirm}
+        candidates[ts] = candle
+    rows = [candidates[ts] for ts in sorted(candidates) if ts not in conflicts][-_CLOSED_WINDOW:]
+    result["candles"] = rows
+    result["available"] = bool(rows)
+    result["window_complete"] = (len(rows) == _CLOSED_WINDOW and all(
+        right["ts_ms"] - left["ts_ms"] == duration for left, right in zip(rows, rows[1:])))
+    result["status"] = "NO_CONFIRMED_CANDLES"
+    if rows:
+        end = rows[-1]["end_ts_ms"]
+        result["latest_end_ts_ms"] = end
+        result["age_ms"] = observed - end
+        result["status"] = ("CONFIRMED_CURRENT" if end == observed // duration * duration
+                            else "STALE")
+    return result
+
+
+def validate_closed_candle_contracts(contracts, *, inst_id, now_ms=None):
+    """Recheck provenance, closure and age before prompt/journal transport.
+
+    No fallback to recent_* (which lost confirm/timestamps), price, or a later
+    factor-library snapshot. An absent contract remains explicitly missing.
+    """
+    now = _timestamp_ms(now_ms if now_ms is not None else int(time.time() * 1000))
+    contracts = contracts if isinstance(contracts, dict) else {}
+    output = {}
+    for bar in _BAR_MS:
+        source = contracts.get(bar)
+        missing = build_closed_candle_contract([], inst_id=inst_id, bar=bar, observed_at_ms=now)
+        if source is None:
+            output[bar] = missing
+            continue
+        observed = _timestamp_ms(source.get("observed_at_ms")) if isinstance(source, dict) else None
+        if (not isinstance(source, dict) or source.get("schema") != "okx_closed_candles_v1"
+                or source.get("source") != _CANDLE_SOURCE or source.get("instId") != inst_id
+                or source.get("bar") != bar or observed is None or now is None or observed > now
+                or not isinstance(source.get("candles"), list)):
+            missing["status"] = "INVALID_SOURCE"
+            output[bar] = missing
+            continue
+        raw = [[row.get("ts_ms"), row.get("open"), row.get("high"), row.get("low"),
+                row.get("close"), row.get("volume"), None, None, row.get("confirm")]
+               if isinstance(row, dict) else [] for row in source["candles"]]
+        checked = build_closed_candle_contract(raw, inst_id=inst_id, bar=bar, observed_at_ms=observed)
+        # Preserve honest missing/invalid counts even after filtering at collection.
+        excluded = source.get("excluded")
+        if isinstance(excluded, dict):
+            for key in checked["excluded"]:
+                count = excluded.get(key)
+                if type(count) is int and count >= 0:
+                    checked["excluded"][key] += count
+        if not checked["candles"] and any(checked["excluded"].values()):
+            checked["status"] = "NO_CONFIRMED_CANDLES"
+        checked["assessed_at_ms"] = now
+        if checked["candles"]:
+            end = checked["latest_end_ts_ms"]
+            checked["age_ms"] = now - end
+            checked["status"] = ("CONFIRMED_CURRENT" if end == now // _BAR_MS[bar] * _BAR_MS[bar]
+                                 else "STALE")
+        output[bar] = checked
+    return output
 
 
 def derive_candle_series(raw_candles: List[Any], *, safe_float
@@ -69,6 +209,8 @@ def compute_15m_indicators(raw_candles: List[Any], factors: Dict[str, Any], *,
 
     调用方保证 `raw_candles` 非空且 `len >= 15`（门面里的判断是 `>= 15`）。
     """
+    factors.setdefault("closed_candle_contract", {})["15m"] = build_closed_candle_contract(
+        raw_candles, inst_id=factors.get("instId"), bar="15m")
     closes, highs, lows, vols = derive_candle_series(raw_candles, safe_float=safe_float)
 
     # ATR 14
@@ -132,6 +274,8 @@ def mark_15m_missing(factors: Dict[str, Any]) -> None:
     `vwap_bias_pct=0.0`（"正好贴在 VWAP 上"）、`atr/atr_pct/vol_ratio/obv_flow`。
     这里与 `okx_quant_factors.mark_momentum_missing` 同纪律：数值 `None`、状态缺失。
     """
+    factors.setdefault("closed_candle_contract", {})["15m"] = build_closed_candle_contract(
+        [], inst_id=factors.get("instId"), bar="15m")
     tm = factors.setdefault("trend_momentum", {})
     for key in ("rsi_14", "vwap_bias_pct", "vol_ratio", "ema21_slope_pct"):
         tm[key] = None
@@ -142,4 +286,5 @@ def mark_15m_missing(factors: Dict[str, Any]) -> None:
     mf["obv_flow"] = "INSUFFICIENT_DATA"
 
 
-__all__ = ["derive_candle_series", "compute_15m_indicators", "mark_15m_missing"]
+__all__ = ["derive_candle_series", "compute_15m_indicators", "mark_15m_missing",
+           "build_closed_candle_contract", "validate_closed_candle_contracts"]

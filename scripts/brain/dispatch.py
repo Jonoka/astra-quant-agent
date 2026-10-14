@@ -131,7 +131,7 @@ def dispatch_llm_and_persist_decisions(*,
                         "consensus_mode": council_transcript.get("consensus_mode"),
                         "advisors_ok": sum(
                             1 for v in (council_transcript.get("advisors") or {}).values()
-                            if isinstance(v, dict) and v.get("status") != "error"
+                            if isinstance(v, dict) and v.get("status") == "ok"
                         ),
                         "advisors_total": len(council_transcript.get("advisors") or {}),
                     }

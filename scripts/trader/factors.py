@@ -45,6 +45,7 @@ from astra_backend.execution import (
     effective_risk_per_trade,
     quantize_size,
 )
+from scripts.factors.candles_15m import build_closed_candle_contract
 
 
 def fetch_single_instrument_data(item, all_positions, usdt_available, *,
@@ -154,6 +155,8 @@ def fetch_single_instrument_data(item, all_positions, usdt_available, *,
     #   （见 `calc_ema` 的缺失语义），而 `signals.py` 用 `px >= ema55*0.994`
     #   判定"顺势回踩"的入场位置 ⇒ 那个条件会恒真。取 60 根后 EMA55 是真指标。
     raw_15m = fetch_candles_direct(inst_id, "15m", 60)
+    f["closed_candle_contract"] = {
+        "15m": build_closed_candle_contract(raw_15m, inst_id=inst_id, bar="15m")}
     if raw_15m:
         candles_15m = list(reversed(raw_15m))
         closes = [float(c[4]) for c in candles_15m]
@@ -255,6 +258,8 @@ def fetch_single_instrument_data(item, all_positions, usdt_available, *,
 
     # 2. Fetch 1H & 4H Trend Confluence
     raw_1h = fetch_candles_direct(inst_id, "1H", 35)
+    f["closed_candle_contract"]["1H"] = build_closed_candle_contract(
+        raw_1h, inst_id=inst_id, bar="1H")
     if raw_1h:
         c_1h = list(reversed(raw_1h))
         closes_1h = [float(c[4]) for c in c_1h]
@@ -302,6 +307,8 @@ def fetch_single_instrument_data(item, all_positions, usdt_available, *,
                 f["structure_1h"] = "CHOP"
     
     raw_4h = fetch_candles_direct(inst_id, "4H", 25)
+    f["closed_candle_contract"]["4H"] = build_closed_candle_contract(
+        raw_4h, inst_id=inst_id, bar="4H")
     if raw_4h:
         c_4h = list(reversed(raw_4h))
         closes_4h = [float(c[4]) for c in c_4h]

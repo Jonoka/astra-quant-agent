@@ -56,6 +56,7 @@ from pathlib import Path
 from typing import Any, Dict
 from astra_backend.deadline import DeadlineExceeded, check_deadline, COLLECTION_MAX_SECONDS
 from scripts.factors.defaults import build_default_factors
+from scripts.factors.candles_15m import build_closed_candle_contract
 
 # 行情取数失败的可观测性（第 137 刀）：只计数 + 每类一次性告警，绝不改变取值行为。
 try:                      # 以脚本方式运行（SCRIPTS_DIR 在 sys.path 上）
@@ -251,6 +252,10 @@ def fetch_single_instrument_package(item: Dict[str, Any], *,
         "recent_15m": [],
         "recent_1h": [],
         "recent_4h": [],
+        "closed_candle_contract": {
+            bar: build_closed_candle_contract([], inst_id=inst_id, bar=bar)
+            for bar in ("15m", "1H", "4H")
+        },
         "data_quality": "invalid"
     }
 
@@ -278,6 +283,8 @@ def fetch_single_instrument_package(item: Dict[str, Any], *,
     try:
         check_deadline()
         d = {"data": fetch_candles(inst_id, bar="15m", limit=24)}
+        pkg["closed_candle_contract"]["15m"] = build_closed_candle_contract(
+            d["data"], inst_id=inst_id, bar="15m")
         if d["data"]:
             raw_candles = d["data"]
             pkg["recent_15m"] = [[float(c[1]), float(c[2]), float(c[3]), float(c[4]), round(float(c[5]), 1)] for c in raw_candles[:12]]
@@ -347,6 +354,8 @@ def fetch_single_instrument_package(item: Dict[str, Any], *,
     try:
         check_deadline()
         d = {"data": fetch_candles(inst_id, bar="1H", limit=24)}
+        pkg["closed_candle_contract"]["1H"] = build_closed_candle_contract(
+            d["data"], inst_id=inst_id, bar="1H")
         if d["data"]:
             raw_1h = d["data"]
             pkg["recent_1h"] = [[float(c[1]), float(c[2]), float(c[3]), float(c[4]), round(float(c[5]), 1)] for c in raw_1h[:12]]
@@ -393,6 +402,8 @@ def fetch_single_instrument_package(item: Dict[str, Any], *,
     try:
         check_deadline()
         d = {"data": fetch_candles(inst_id, bar="4H", limit=16)}
+        pkg["closed_candle_contract"]["4H"] = build_closed_candle_contract(
+            d["data"], inst_id=inst_id, bar="4H")
         if d["data"]:
             raw_4h = d["data"]
             pkg["recent_4h"] = [[float(c[1]), float(c[2]), float(c[3]), float(c[4]), round(float(c[5]), 1)] for c in raw_4h[:8]]

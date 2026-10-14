@@ -134,6 +134,23 @@ class MoveIsLosslessTest(unittest.TestCase):
         missing, moved or swallowed deadline checks.
         """
         source = "\n".join(_submodule_function_lines())
+        # New observation-only evidence transport has dedicated end-to-end
+        # tests in test_closed_candle_contract. Remove only these exact added
+        # blocks, keeping every existing calculation and the original hash.
+        candle_init = '\n'.join([
+            '        "closed_candle_contract": {',
+            '            bar: build_closed_candle_contract([], inst_id=inst_id, bar=bar)',
+            '            for bar in ("15m", "1H", "4H")',
+            '        },',
+        ]) + '\n'
+        self.assertEqual(source.count(candle_init), 1)
+        source = source.replace(candle_init, '')
+        for bar in ("15m", "1H", "4H"):
+            candle_block = (
+                f'        pkg["closed_candle_contract"]["{bar}"] = build_closed_candle_contract(\n'
+                f'            d["data"], inst_id=inst_id, bar="{bar}")\n')
+            self.assertEqual(source.count(candle_block), 1)
+            source = source.replace(candle_block, '')
         parser_block = "\n".join([
             '                    net_diff = latest_taker_net(d["data"])',
             '                    if net_diff is None:',

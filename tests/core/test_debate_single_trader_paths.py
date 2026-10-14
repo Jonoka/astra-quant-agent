@@ -15,6 +15,8 @@ from unittest.mock import patch
 
 from astra_backend.council.debate import _call_single_trader
 
+VALID_PROPOSAL = "BTC-USDT-SWAP | WAIT | - | - | - | - | 55 | no confirmation"
+
 SPEC = {"name": "老张", "prompt": "身份", "temperature": 0.2, "weight": 1.7}
 
 
@@ -56,9 +58,9 @@ class SeatOutcomeTest(unittest.TestCase):
                                    runtime_context=None)
 
     def test_success_strips_text_and_surfaces_the_resolution_facts(self):
-        out = self._call([("  正文  ", "  思考  ", {}, 12.5)], timeout=20.0)
+        out = self._call([("  " + VALID_PROPOSAL + "  ", "  思考  ", {}, 12.5)], timeout=20.0)
         self.assertEqual(out["status"], "ok")
-        self.assertEqual(out["content"], "正文", "去空白")
+        self.assertEqual(out["content"], VALID_PROPOSAL, "去空白")
         self.assertEqual(out["reasoning"], "思考")
         self.assertEqual(out["weight"], 1.7, "权重取自角色规格")
         self.assertEqual((out["model_requested"], out["model_registered"],
@@ -68,12 +70,12 @@ class SeatOutcomeTest(unittest.TestCase):
         self.assertFalse(self.calls[0]["allow_fallback"], "首次调用不允许回落（优先登记模型）")
 
     def test_missing_model_falls_back_to_the_active_runtime(self):
-        out = self._call([("x", "", {}, 1.0)], resolved={**_resolved(), "model": ""})
+        out = self._call([(VALID_PROPOSAL, "", {}, 1.0)], resolved={**_resolved(), "model": ""})
         self.assertEqual(out["model_used"], "M-active", "无覆盖 ⇒ 当前活跃模型")
         self.assertEqual(out["reasoning"], "", "空思考给空串（不是 None）")
 
     def test_empty_reasoning_is_normalised_to_empty_string(self):
-        out = self._call([("x", None, {}, 1.0)], timeout=20.0)
+        out = self._call([(VALID_PROPOSAL, None, {}, 1.0)], timeout=20.0)
         self.assertEqual(out["reasoning"], "")
 
     def test_short_timeout_is_not_retried(self):
@@ -90,10 +92,10 @@ class SeatOutcomeTest(unittest.TestCase):
 
     def test_long_timeout_gateway_error_retries_once_with_lower_effort(self):
         """★ 退避重试的**全部参数**都要对：降强度、收紧预算、允许回落。"""
-        out = self._call([RuntimeError("502 bad gateway"), ("重试正文", "", {}, 3.0)],
+        out = self._call([RuntimeError("502 bad gateway"), (VALID_PROPOSAL, "", {}, 3.0)],
                          timeout=60.0)
         self.assertEqual(out["status"], "ok")
-        self.assertEqual(out["content"], "重试正文")
+        self.assertEqual(out["content"], VALID_PROPOSAL)
         self.assertEqual(len(self.calls), 2)
         retry = self.calls[1]
         self.assertEqual(retry["reasoning_effort"], "medium", "high ⇒ 降为 medium")
@@ -102,7 +104,7 @@ class SeatOutcomeTest(unittest.TestCase):
         self.assertTrue(self.sleep_mock.called, "先退避")
 
     def test_medium_effort_is_not_downgraded_further(self):
-        out = self._call([RuntimeError("504"), ("ok", "", {}, 1.0)], timeout=60.0,
+        out = self._call([RuntimeError("504"), (VALID_PROPOSAL, "", {}, 1.0)], timeout=60.0,
                          resolved={**_resolved(), "effort": "medium"})
         self.assertEqual(self.calls[1]["reasoning_effort"], "medium", "非 high 保持原强度")
 

@@ -123,6 +123,61 @@ def _render_seat_prompt(prompt: str, runtime_context: Optional[Dict[str, Any]]) 
     return render_variables(prompt, runtime_context)
 
 
+def _validate_proposal(content, runtime_context=None):
+    """Validate response semantics separately from a completed LLM request.
+
+    This checks the proposal contract, not strategy eligibility. Missing rows
+    never become synthetic WAIT votes; a genuine complete WAIT proposal is valid.
+    """
+    import math
+    from astra_backend.council.consensus import parse_trader_proposal
+
+    expected = (runtime_context or {}).get("proposal_symbols")
+    result = parse_trader_proposal(content, expected_symbols=expected)
+    errors = list(result["errors"])
+    for quote in result["quotes"]:
+        if quote["action"] not in {"BUY_LONG", "SELL_SHORT"}:
+            continue
+        for field in ("limit_price", "stop_loss", "take_profit", "margin"):
+            value = quote.get(field)
+            if type(value) not in (int, float) or not math.isfinite(value) or value <= 0:
+                errors.append(f"{quote['symbol']}.{field}: positive finite value required for entry")
+    return {**result, "valid": not errors, "status": "invalid" if errors else "ok",
+            "errors": errors}
+
+
+def _proposal_result(content, reasoning, usage, latency, *, role_id, role_name,
+                     proposal_id, resolved, override_model, role_spec, runtime_context):
+    from astra_backend.llm_manager import get_active_llm_runtime
+
+    validation = _validate_proposal(content, runtime_context)
+    valid = validation["valid"]
+    return {
+        "proposal_id": proposal_id, "role_id": role_id, "role_name": role_name,
+        "model_used": (usage or {}).get("_astra_trace", {}).get("model") or override_model
+                      or get_active_llm_runtime().get("model", "default"),
+        "model_requested": resolved["requested"],
+        "model_registered": resolved["registered"],
+        "model_fallback": resolved["fallback"], "model_note": resolved["reason"],
+        "status": "ok" if valid else "error",
+        "transport_status": "ok", "semantic_status": validation["status"],
+        "validation": validation,
+        "content": content.strip() if isinstance(content, str) else "",
+        "reasoning": reasoning.strip() if isinstance(reasoning, str) else "",
+        "latency_ms": latency, "weight": role_spec.get("weight", 1.0) if valid else 0.0,
+    }
+
+
+def _proposal_docket_text(proposal, missing_text="（该交易员本轮未提交有效提案）"):
+    """Keep invalid raw output in the transcript, never present it as a vote."""
+    if proposal.get("status") != "ok":
+        validation = proposal.get("validation") or {}
+        errors = validation.get("errors") or [proposal.get("reason") or "proposal_unavailable"]
+        return "（本席未提交有效提案，不计入共识；非 WAIT 票）" + "; ".join(errors)
+    content = proposal.get("content")
+    return content if isinstance(content, str) and content.strip() else missing_text
+
+
 @_budgeted("council.proposal")
 def _call_single_trader(resolve_seat: Callable[..., Any], 
     role_id: str,
@@ -193,21 +248,11 @@ def _call_single_trader(resolve_seat: Callable[..., Any],
             timeout=check_deadline(),
             allow_fallback=False,  # 委员会成员优先以其登记模型作答
         )
-        return {
-            "proposal_id": proposal_id,
-            "role_id": role_id,
-            "role_name": role_name,
-            "model_used": (usage or {}).get("_astra_trace", {}).get("model") or override_model or get_active_llm_runtime().get("model", "default"),
-            "model_requested": resolved["requested"],
-            "model_registered": resolved["registered"],
-            "model_fallback": resolved["fallback"],
-            "model_note": resolved["reason"],
-            "status": "ok",
-            "content": content.strip(),
-            "reasoning": reasoning.strip() if reasoning else "",
-            "latency_ms": latency,
-            "weight": role_spec.get("weight", 1.0),
-        }
+        return _proposal_result(
+            content, reasoning, usage, latency, role_id=role_id, role_name=role_name,
+            proposal_id=proposal_id, resolved=resolved, override_model=override_model,
+            role_spec=role_spec, runtime_context=runtime_context,
+        )
     except Exception as e:
         # 遇网关并发 504/502 超时，退避 1.5s 后自适应降低强度并重试一次，保住席位
         err_str = str(e)
@@ -227,21 +272,11 @@ def _call_single_trader(resolve_seat: Callable[..., Any],
                     timeout=check_deadline(),
                     allow_fallback=True,
                 )
-                return {
-                    "proposal_id": proposal_id,
-                    "role_id": role_id,
-                    "role_name": role_name,
-                    "model_used": (retry_usage or {}).get("_astra_trace", {}).get("model") or override_model or get_active_llm_runtime().get("model", "default"),
-                    "model_requested": resolved["requested"],
-                    "model_registered": resolved["registered"],
-                    "model_fallback": resolved["fallback"],
-                    "model_note": resolved["reason"],
-                    "status": "ok",
-                    "content": c_retry.strip(),
-                    "reasoning": r_retry.strip() if r_retry else "",
-                    "latency_ms": lat_retry,
-                    "weight": role_spec.get("weight", 1.0),
-                }
+                return _proposal_result(
+                    c_retry, r_retry, retry_usage, lat_retry, role_id=role_id, role_name=role_name,
+                    proposal_id=proposal_id, resolved=resolved, override_model=override_model,
+                    role_spec=role_spec, runtime_context=runtime_context,
+                )
             except Exception as retry_exc:
                 e = retry_exc
 
@@ -458,7 +493,7 @@ def execute_council_debate(load_config: Callable[[], Dict[str, Any]], resolve_se
         else:
             round2_budget = max(2.0, min(rem * 0.40, rem - min(CIO_MIN_ARBITRATION_TIME, max(MIN_SAFE_REASONING_TIME, rem * 0.5))))
             def args_for_critique(k, left):
-                my_prop = trader_proposals.get(k, {}).get("content", "（该交易员第一轮未提交有效提案）")
+                my_prop = _proposal_docket_text(trader_proposals.get(k, {}), "（该交易员第一轮未提交有效提案）")
                 peers_text_list = []
                 for pk in trader_keys:
                     if pk != k:
@@ -467,7 +502,7 @@ def execute_council_debate(load_config: Callable[[], Dict[str, Any]], resolve_se
                         p_name = p_res.get("role_name", pk)
                         peers_text_list.append(
                             f"=== 【{p_name}】(提案标识: {p_id}) ===\n"
-                            f"{p_res.get('content', '（未提交）')}"
+                            f"{_proposal_docket_text(p_res, '（未提交）')}"
                         )
                 peers_text = "\n\n".join(peers_text_list) if peers_text_list else "（无其他同行提案）"
                 return (k, roles[k], my_prop, peers_text,
@@ -526,7 +561,7 @@ def execute_council_debate(load_config: Callable[[], Dict[str, Any]], resolve_se
             round2_budget = max(2.0, min(rem * 0.40, rem - min(CIO_MIN_ARBITRATION_TIME, max(MIN_SAFE_REASONING_TIME, rem * 0.5))))
             dispute_header = f"【核心争议对抗标的清单】: {', '.join(disputed_symbols)}（多空存在严重方向撕裂）"
             def args_for_critique(k, left):
-                my_prop = trader_proposals.get(k, {}).get("content", "（该交易员第一轮未提交有效提案）")
+                my_prop = _proposal_docket_text(trader_proposals.get(k, {}), "（该交易员第一轮未提交有效提案）")
                 debate_peers_list = [dispute_header]
                 for pk in trader_keys:
                     if pk != k:
@@ -535,7 +570,7 @@ def execute_council_debate(load_config: Callable[[], Dict[str, Any]], resolve_se
                         p_name = p_res.get("role_name", pk)
                         debate_peers_list.append(
                             f"=== 【{p_name}】(提案标识: {p_id}) ===\n"
-                            f"{p_res.get('content', '（未提交）')}"
+                            f"{_proposal_docket_text(p_res, '（未提交）')}"
                         )
                 peers_text = "\n\n".join(debate_peers_list)
                 return (k, roles[k], my_prop, peers_text,
@@ -572,7 +607,7 @@ def execute_council_debate(load_config: Callable[[], Dict[str, Any]], resolve_se
         transcript_blocks.append(
             f"=== 【{res.get('role_name', k)}】实操审查与作战提案 [提案标识: {p_id}]（模型：{res.get('model_used', 'default')}"
             f"{'（⚠ 席位绑定模型未登记，本席由主脑代答）' if res.get('model_fallback') else ''}{weight_str}）===\n"
-            f"{res.get('content', '（该交易员本轮未提交有效提案）')}\n"
+            f"{_proposal_docket_text(res)}\n"
         )
     compiled_proposals = "\n".join(transcript_blocks) if transcript_blocks else "（无其他交易员提交方案，首席投资官独立决策）"
 

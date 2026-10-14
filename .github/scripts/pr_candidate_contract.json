@@ -1,0 +1,168 @@
+{
+  "schema": 1,
+  "purpose": "ordinary_pull_request_only",
+  "baseline": "60133ce82d4a0b91f94bc0c613a07e24aff049f5",
+  "baseline_tree": "64059d6490d5734a3e764c5b742cf4fad2f8016a",
+  "candidate_paths": {
+    ".github/scripts/pr_candidate_contract.json": {
+      "base_sha256": null,
+      "sha256": null,
+      "base_mode": null,
+      "mode": "100644"
+    },
+    ".github/scripts/run_decision_contract_regressions.py": {
+      "base_sha256": null,
+      "sha256": "6e0b7ba9c1f364c24719cfa5abb1da6922c5dbb16305af9482f5b98a3adba36c",
+      "base_mode": null,
+      "mode": "100644"
+    },
+    ".github/scripts/run_deployment_preflight.py": {
+      "base_sha256": "9cc652ac3ca4536dea315aa3da433fc0ad2f327081b8b6e5535dc292e960f414",
+      "sha256": "bd953194eabcc782c4ead77653a7771bdf8937935d00e96f6e6793b0a1bc9af8",
+      "base_mode": "100644",
+      "mode": "100644"
+    },
+    ".github/scripts/test_decision_regression_gate.py": {
+      "base_sha256": null,
+      "sha256": "1a94559ae302fed0b7867e5ad4142c179d6bc6755a2c6d977f0605fd7ec325de",
+      "base_mode": null,
+      "mode": "100644"
+    },
+    ".github/scripts/test_pr_candidate_contract.py": {
+      "base_sha256": null,
+      "sha256": "a6e57ae46f14859582a45d76009ac83ae9d30dea5b4b59a4a6395f715311da1a",
+      "base_mode": null,
+      "mode": "100644"
+    },
+    ".github/scripts/verify_pr_candidate.py": {
+      "base_sha256": null,
+      "sha256": null,
+      "base_mode": null,
+      "mode": "100644"
+    },
+    ".github/workflows/test-taker-parsing.yml": {
+      "base_sha256": "00989c75165c7baccc36edd28bfc540f64f689064efb085f907e7fa4897ec4cf",
+      "sha256": "c71f6c7d0a5730d622d2c74168c0c89a2a0b5ef6ef4c3044438fcd7368d2e24b",
+      "base_mode": "100644",
+      "mode": "100644"
+    },
+    "astra_backend/council/consensus.py": {
+      "base_sha256": "da9360c95ecdc30300a644d0e74e5ef37c24fc961145a7d728657f6fda413df5",
+      "sha256": "a6abd7dd83ecd6dc1d95b06ce5690ede51149d8d5dbb8050e807e61c1fad295e",
+      "base_mode": "100644",
+      "mode": "100644"
+    },
+    "astra_backend/council/debate.py": {
+      "base_sha256": "5547fdb9dbbeca97b3b0cc8c05ea4f7a5a6714d7ab53796fe58c8064695d6500",
+      "sha256": "12e4df194d055edbba2587bf1abf47061f9023560c6d5d5a547a85c482fc1f78",
+      "base_mode": "100644",
+      "mode": "100644"
+    },
+    "docs/DECISION_CONTRACT_REPAIR.md": {
+      "base_sha256": null,
+      "sha256": "99a254572260846791a0cbfdf832c803899ccf128c8e537f1545cfc0ea86d720",
+      "base_mode": null,
+      "mode": "100644"
+    },
+    "scripts/brain/dispatch.py": {
+      "base_sha256": "7ad5add7ff705bf732c452ccf06724668970d8adbc86b95fc8ce0afcee4db150",
+      "sha256": "7b8c32a30871e9a84661435cffb782b3381e6e1867dcd0abbd7d582fdd19ebe2",
+      "base_mode": "100644",
+      "mode": "100644"
+    },
+    "scripts/brain/packages.py": {
+      "base_sha256": "95ecd568fd7be92d24db7b5ef6db49c1bafbaec419698a0166b7241496ee0ac8",
+      "sha256": "b834c94110c3b570396fdecdcea556d91f20a429dcbe6967f5432185fa0766db",
+      "base_mode": "100644",
+      "mode": "100644"
+    },
+    "scripts/brain/prompt.py": {
+      "base_sha256": "b9db0dc842c3c8aa2112f445e216e46d9c69274ca6a20e3dfb20217232838e32",
+      "sha256": "8062c3751394d02bde27d9ee3b36c7cf3fdd70a1b4cc4380e3aaf9b030908c76",
+      "base_mode": "100644",
+      "mode": "100644"
+    },
+    "scripts/factors/candles_15m.py": {
+      "base_sha256": "47315295ed12537cf7a605924f5eee2cf28b2db67f1bd5565ed43f9203598d12",
+      "sha256": "3840e259ecd18f95010de44627807962c2d7eb0d96fcc2f24191511b33e87565",
+      "base_mode": "100644",
+      "mode": "100644"
+    },
+    "scripts/replay_proposal_contract.py": {
+      "base_sha256": null,
+      "sha256": "c4bce3ef7f03c07d354e39b532bba79c51189c620bef0683e06f4177f31adb2e",
+      "base_mode": null,
+      "mode": "100644"
+    },
+    "scripts/trader/factors.py": {
+      "base_sha256": "62cb78e660b7c206fc50809f511c5e58d1e48819328ad95639cb0060fd7a484f",
+      "sha256": "b0df7f1024f301ff8db5f9f5d45e2533ef77cd1bc456b04fe7a2a2056d594f1d",
+      "base_mode": "100644",
+      "mode": "100644"
+    },
+    "scripts/trader/signal_snapshot.py": {
+      "base_sha256": "d67333373bf0d3e87d6b0ac9d12d666b7c65e23ff3ef26c22e2bbbce5a1f76ec",
+      "sha256": "422b3833d0e5a584e862294b4ef8406b546ff0d32122fe86813cc139e80dd045",
+      "base_mode": "100644",
+      "mode": "100644"
+    },
+    "tests/core/test_council_deadline.py": {
+      "base_sha256": "8e8003591088d7d93433e5b83b7da1cd5c5414ece6f6fb8cd9020663e6a975f2",
+      "sha256": "322f7099f6d769c15a56b65d419876cb949eaf75b048404a765c23700324814c",
+      "base_mode": "100644",
+      "mode": "100644"
+    },
+    "tests/core/test_council_json_contract.py": {
+      "base_sha256": null,
+      "sha256": "d5c19f2aa84aa1a3e9f9de7704bf3981f78ecbada073a35244615956e09a33cf",
+      "base_mode": null,
+      "mode": "100644"
+    },
+    "tests/core/test_debate_single_trader_paths.py": {
+      "base_sha256": "a9fee81838635b1d8ee0541fcd318c2fd9dfd71c6c03f73ad9146f0e9569c29f",
+      "sha256": "1651eb3361ec2ac9ea876fe164e17d0644d3e784730e5aaf98b1a69797675232",
+      "base_mode": "100644",
+      "mode": "100644"
+    },
+    "tests/core/test_proposal_replay.py": {
+      "base_sha256": null,
+      "sha256": "04695d69856f69cbf4d4408cab0532f76e79eb0920b653825ef8a919019a14df",
+      "base_mode": null,
+      "mode": "100644"
+    },
+    "tests/core/test_proposal_semantic_contract.py": {
+      "base_sha256": null,
+      "sha256": "5d8f89afef522022f9764c98b6d0c450f97c4529c8da2e4da6c80bb73941aa6d",
+      "base_mode": null,
+      "mode": "100644"
+    },
+    "tests/data/proposal_contract_synthetic.json": {
+      "base_sha256": null,
+      "sha256": "d82c48f23e2fb70c4de66eef17267ab8b6edb895b75a2d8429146da7fd090444",
+      "base_mode": null,
+      "mode": "100644"
+    },
+    "tests/extraction/test_brain_package_extraction.py": {
+      "base_sha256": "7fb0f441ce7c98d704dc6c9e429fa1b82512ed2ceead9406908226d27a9371a6",
+      "sha256": "f8b6b7913f2277feeadfb2d452c16a8f66101f5d3665c1b5b91f0927adaeb0aa",
+      "base_mode": "100644",
+      "mode": "100644"
+    },
+    "tests/extraction/test_factors_candles_15m_extraction.py": {
+      "base_sha256": "5b73aa3b92b95e5880adf501d6a41a1e28bcb7b162d8f81a0405500286d81777",
+      "sha256": "b1e5936753ab97681479dce863c5998843baebe69f60379a2c3a8a05cd71d058",
+      "base_mode": "100644",
+      "mode": "100644"
+    },
+    "tests/llm/test_closed_candle_contract.py": {
+      "base_sha256": null,
+      "sha256": "56466bfb169f2878982d3b2c6d9a02d5d4d6bb1e8eb3e627fab4c9f490de689e",
+      "base_mode": null,
+      "mode": "100644"
+    }
+  },
+  "self_hash_exemptions": [
+    ".github/scripts/pr_candidate_contract.json",
+    ".github/scripts/verify_pr_candidate.py"
+  ]
+}

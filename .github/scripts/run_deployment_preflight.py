@@ -1,4 +1,4 @@
-"""Shared safety regressions; --collection-pr is explicitly not release approval."""
+"""Shared safety regressions; PR modes never grant release approval."""
 import argparse
 import os
 from pathlib import Path
@@ -28,9 +28,67 @@ SUITES = {
 }
 
 
+def run_candidate_preflight(source, revision):
+    """Preserve historical helper fixtures; exercise application gates on HEAD."""
+    from verify_pr_candidate import BASELINE, CONTRACT_PATH, verify_pr_candidate
+    from run_collection_regressions import clean_environment
+
+    if os.environ.get('GITHUB_EVENT_NAME') != 'pull_request':
+        raise RuntimeError('Candidate preflight is restricted to pull_request events')
+    contract = source / CONTRACT_PATH
+    verify_pr_candidate(source, contract, revision)
+    env = clean_environment(os.environ)
+    env['ASTRA_CI_EXPECTED_SHA'] = revision
+    # Run the unchanged source, helper and regression suites against their exact
+    # historical release fixture. Neither their pins nor their positive tests
+    # are weakened to accept the new ordinary-PR application changes.
+    with tempfile.TemporaryDirectory(prefix='astra-candidate-baseline-') as temporary:
+        baseline = Path(temporary) / 'source'
+        subprocess.run(['git', '-C', str(source), 'worktree', 'add', '--detach', str(baseline), BASELINE],
+                       check=True, env=env, timeout=60)
+        try:
+            historical = dict(env, ASTRA_CI_EXPECTED_SHA=BASELINE)
+            subprocess.run([sys.executable, str(baseline / '.github/scripts/run_deployment_preflight.py'), '--release-pr'],
+                           check=True, env=historical, timeout=1200, cwd=baseline)
+        finally:
+            subprocess.run(['git', '-C', str(source), 'worktree', 'remove', '--force', str(baseline)],
+                           check=True, env=env, timeout=60)
+    loader = '''import sys,unittest
+from pathlib import Path
+sys.path.insert(0,str(Path(sys.argv[1]).parent))
+from run_taker_regressions import require_complete_result
+p=Path(sys.argv[1]); minimum=int(sys.argv[2]); loader=unittest.TestLoader()
+suite=loader.discover(str(p.parent),pattern=p.name)
+if loader.errors or suite.countTestCases()<minimum: raise RuntimeError('Incomplete candidate gate discovery')
+result=unittest.TextTestRunner(verbosity=2).run(suite)
+require_complete_result(result,minimum)
+'''
+    for name, minimum in CANDIDATE_SUITES.items():
+        subprocess.run([sys.executable, '-c', loader, str(source / '.github/scripts' / name), str(minimum)],
+                       check=True, env=env, timeout=180, cwd=source)
+    for name, arguments, timeout in (
+        ('run_taker_regressions.py', [], 360),
+        ('run_taker_regressions.py', ['--alpha'], 120),
+        ('run_collection_regressions.py', [], 480),
+        ('run_collection_regressions.py', ['--retained'], 480),
+        ('run_decision_contract_regressions.py', [], 480),
+    ):
+        subprocess.run([sys.executable, str(source / '.github/scripts' / name), *arguments],
+                       check=True, env=env, timeout=timeout, cwd=source)
+    verify_pr_candidate(source, contract, revision)
+    print('PR_CANDIDATE_PREFLIGHT_PASS source=' + revision + ' release_eligibility=not_granted', flush=True)
+
+
+CANDIDATE_SUITES = {
+    'test_pr_candidate_contract.py': 46,
+    'test_decision_regression_gate.py': 13,
+}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     mode = parser.add_mutually_exclusive_group()
+    mode.add_argument('--candidate-pr', action='store_true', help='Exact ordinary-PR source and regressions; no release eligibility')
     mode.add_argument('--collection-pr', action='store_true')
     mode.add_argument('--release-pr', action='store_true', help='Exact release-source checks without publication or deployment approval')
     args = parser.parse_args()
@@ -38,6 +96,9 @@ def main():
         raise RuntimeError('Shared deployment preflight requires Linux')
     source = Path(__file__).resolve().parents[2]
     revision = os.environ['ASTRA_CI_EXPECTED_SHA']
+    if args.candidate_pr:
+        run_candidate_preflight(source, revision)
+        return
     def source_verifier(source, upstream, revision):
         if args.collection_pr:
             verify_collection_source(source, upstream, revision)

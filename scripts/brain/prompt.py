@@ -136,7 +136,7 @@ def construct_full_market_prompt(packages: List[Dict[str, Any]], pos_summary: st
         sl_atr_desc = f"{sl_atr_mult_for(p):g}x 1H ATR（与执行层同源）"
 
         # ------------------------------------------------------------------
-        # 2026-10 重构：**彻底移除**原始 K 线与数理噱头，改为 7 梯队量化因子。
+        # 2026-10 重构：移除无确认契约的大段 K 线与数理噱头，改为 7 梯队量化因子。
         #
         # 删掉的是：
         #   - 15M/1H/4H 倒序原始 K 线浮点数组（每标的 ~32 根 [O,H,L,C,V]）；
@@ -166,6 +166,24 @@ def construct_full_market_prompt(packages: List[Dict[str, Any]], pos_summary: st
             "| freshness_status=NOT_ASSESSED | upstream_evidence_quality=NOT_REPORTED "
             "（0 仅保留上游数值，不证明信号有效；缺失不补 0）"
         )
+        # Bounded raw evidence for the strategy's existing closed-candle rule.
+        # Keep the import local for the AST-isolated renderer tests.
+        from scripts.factors.candles_15m import validate_closed_candle_contracts
+        candle_contracts = validate_closed_candle_contracts(
+            p.get("closed_candle_contract"), inst_id=p.get("instId"))
+        candle_lines = ["- 已闭合K线证据:"]
+        for bar, contract in candle_contracts.items():
+            # Full dictionaries stay in the package/journal; only the model
+            # view uses a shared column legend to avoid repeating 99 row keys.
+            view = {key: contract.get(key) for key in (
+                "status", "observed_at_ms", "assessed_at_ms", "age_ms",
+                "window_complete", "excluded")}
+            view["rows"] = [[row[key] for key in (
+                "ts_ms", "end_ts_ms", "open", "high", "low", "close", "volume", "confirm")]
+                for row in contract["candles"]]
+            candle_lines.append(
+                f"  {bar}: {json.dumps(view, ensure_ascii=False, separators=(',', ':'), allow_nan=False)}")
+        candle_block = "\n".join(candle_lines)
         tm = qf_tiers.get("trend_momentum") if isinstance(qf_tiers.get("trend_momentum"), dict) else {}
         mf = qf_tiers.get("volume_money_flow") if isinstance(qf_tiers.get("volume_money_flow"), dict) else {}
         ms = qf_tiers.get("microstructure") if isinstance(qf_tiers.get("microstructure"), dict) else {}
@@ -277,11 +295,26 @@ def construct_full_market_prompt(packages: List[Dict[str, Any]], pos_summary: st
 - 🏛️ 三重滤网宏观结构: 4H宏观大势={(p.get('macro_4h') or '--')} | 1H波段结构={(p.get('structure_1h') or '--')} | 标的体制={regime_desc}
 {tier_block}
 {alpha_line}
+{candle_block}
 - 💰 T2 期限与资金成本: 季度基差年化={_t(smd, 'basis_annualized_pct')}% | 杠杆借贷利率={_t(smd, 'loan_rate_usdt')}%
 - 👑 顶级聪明钱 (SmartMoney Top100 加权流): {("加权做多占比=" + str(sm.get('weighted_long_pct')) + "% | 24H净流入=" + str(sm.get('net_flow_usdt', '--')) + " | 多头均价=" + str(sm.get('avg_long_entry', '--')) + " | 空头均价=" + str(sm.get('avg_short_entry', '--')) + " | " + str(sm.get('top_win_rate', ''))) if sm.get('available') else "该项（Top100 加权多空比/净流）无公开 V5 等价接口 ⇒ 本行不构成证据；**持仓方向的替代证据见 T0 的「精英账户比 / 精英持仓比 / 精英背离」**（OKX 官方 top-trader 端点，真实可得）。禁止臆测填充"}"""
         market_lines.append(info)
 
     all_market_str = "\n".join(market_lines)
+    if packages:
+        # One legend for the entire market matrix, kept inside this function
+        # so AST-isolated renderer tests use the exact production contract.
+        all_market_str = (
+            "【已闭合K线确认契约】schema=okx_closed_candles_v1；"
+            "source=OKX:/api/v5/market/candles；各块归属其标的标题。"
+            "rows列=[ts_ms,end_ts_ms,O,H,L,C,V,confirm]；时间戳为UTC毫秒，"
+            "end_ts_ms由bar宽度推导；OHLC为原始报价，V=OKX raw vol（衍生品:contracts；"
+            "SPOT/MARGIN:base_ccy），仅作同标的量能证据，不作仓位或跨标的金额比较，"
+            "不是USDT成交额，不换算。"
+            "仅confirm=1且收盘时间已到的原始OHLCV，每周期最多3根，oldest_first。"
+            "CONFIRMED_CURRENT只证明最近应闭合根已取到，不等于形态成立；"
+            "STALE/缺失/未确认不得充当本轮确认；window_complete=false表示短窗口不足或不连续。"
+            "现价与派生指标不能代替收盘确认。\n" + all_market_str)
 
     # Format Active Positions / Pending Limit Orders
     # （阶段 4·B3 第三十刀：两段文本装配迁至 scripts/brain/account_text.py。
@@ -399,6 +432,9 @@ def construct_full_market_prompt(packages: List[Dict[str, Any]], pos_summary: st
     runtime_vars.update({
         "timestamp": now_bj_str, "timezone": "Asia/Shanghai",
         "active_instruments": ",".join(str(p.get("name") or p.get("instId") or "") for p in packages),
+        "proposal_symbols": list(dict.fromkeys(
+            p["instId"] for p in packages
+            if isinstance(p.get("instId"), str) and p["instId"].strip())),
         "strategy_version": policy_ver,
         "policy_version": policy_ver,
         "policy_hash": policy_hash,

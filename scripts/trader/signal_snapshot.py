@@ -21,6 +21,7 @@ from __future__ import annotations
 import json
 import math
 import os
+from scripts.factors.candles_15m import validate_closed_candle_contracts
 
 #: 快照键 ← 因子库快照 `factor_library_snapshot.json` 的取数表（2026-10 修复）。
 #:
@@ -148,6 +149,11 @@ def build_signal_snapshot(f: dict, *, data_dir: str) -> dict:
     snap = {
         "price": f.get("price"),
         "atr": f.get("atr"),
+        # Preserve this trader observation's candle source and timestamps.
+        # This is not a copy of the brain prompt's earlier input, and a newer
+        # library file cannot reconstruct that earlier input after the fact.
+        "closed_candle_contract": validate_closed_candle_contracts(
+            f.get("closed_candle_contract"), inst_id=f.get("instId")),
         # ---- 2026-10 新证据链：7 梯队因子（复盘归因的真实可观测字段）----
         "macd_hist": trend.get("macd_hist"),
         "macd_accel": trend.get("macd_accel"),

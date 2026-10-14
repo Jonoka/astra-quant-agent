@@ -33,12 +33,18 @@ jobs:
       - name: Install test dependencies
         run: python -m pip install -r requirements.txt PyYAML==6.0.2
       - name: Run PR source, safety helpers, taker and collection regressions
+        id: preflight
         env:
           ASTRA_CI_EXPECTED_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
-          if test -f .github/scripts/collection_release_contract.json; then
+          if test -f .github/scripts/pr_candidate_contract.json; then
+            echo 'mode=candidate' >> "$GITHUB_OUTPUT"
+            python .github/scripts/run_deployment_preflight.py --candidate-pr
+          elif test -f .github/scripts/collection_release_contract.json; then
+            echo 'mode=release' >> "$GITHUB_OUTPUT"
             python .github/scripts/run_deployment_preflight.py --release-pr
           else
+            echo 'mode=collection' >> "$GITHUB_OUTPUT"
             python .github/scripts/run_deployment_preflight.py --collection-pr
           fi
       - uses: actions/setup-node@v4
@@ -56,15 +62,25 @@ jobs:
       - name: Reverify exact PR source after all checks
         env:
           ASTRA_CI_EXPECTED_SHA: ${{ github.event.pull_request.head.sha }}
+          ASTRA_PR_MODE: ${{ steps.preflight.outputs.mode }}
         run: |
           PYTHONDONTWRITEBYTECODE=1 python - <<'PY'
           import os, sys
           from pathlib import Path
           sys.path.insert(0, '.github/scripts')
           from verify_deployment_source import UPSTREAM_SHA, verify_collection_source, verify_release_source
-          # Presence selects a strict gate, never grants approval. Removing the
-          # contract cannot make the extra release paths pass the old PR gate.
-          verifier = verify_release_source if Path('.github/scripts/collection_release_contract.json').is_file() else verify_collection_source
-          verifier(Path.cwd(), UPSTREAM_SHA, os.environ['ASTRA_CI_EXPECTED_SHA'])
+          # Reuse the original selected gate; contract removal cannot downgrade
+          # the final check. Candidate source never receives release eligibility.
+          mode = os.environ['ASTRA_PR_MODE']
+          if mode == 'candidate':
+              if os.environ.get('GITHUB_EVENT_NAME') != 'pull_request':
+                  raise RuntimeError('Candidate verification requires a pull_request event')
+              from verify_pr_candidate import CONTRACT_PATH, verify_pr_candidate
+              verify_pr_candidate(Path.cwd(), Path.cwd() / CONTRACT_PATH, os.environ['ASTRA_CI_EXPECTED_SHA'])
+          elif mode in ('release', 'collection'):
+              verifier = verify_release_source if mode == 'release' else verify_collection_source
+              verifier(Path.cwd(), UPSTREAM_SHA, os.environ['ASTRA_CI_EXPECTED_SHA'])
+          else:
+              raise RuntimeError('Missing or invalid original PR verification mode')
           print('PR verification only; no image, production migration or release approval.')
           PY

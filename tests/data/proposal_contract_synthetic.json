@@ -1,0 +1,68 @@
+{
+  "provenance": "synthetic contract reconstruction from de-identified production shape descriptions; original response bytes unavailable; not historical production replay or market backtest data",
+  "rounds": [
+    {
+      "cycle_id": "synthetic-complete-json",
+      "expected_symbols": [
+        "BTC-USDT-SWAP",
+        "ETH-USDT-SWAP",
+        "SOL-USDT-SWAP",
+        "XRP-USDT-SWAP",
+        "DOGE-USDT-SWAP",
+        "ARB-USDT-SWAP",
+        "LINK-USDT-SWAP",
+        "SUI-USDT-SWAP",
+        "BNB-USDT-SWAP",
+        "AVAX-USDT-SWAP",
+        "OP-USDT-SWAP"
+      ],
+      "proposals": {
+        "seat_a": "{\"macro_assessment\": \"synthetic\", \"position_management\": [], \"decisions\": {\"BTC-USDT-SWAP\": {\"action\": \"WAIT\", \"confidence\": 55, \"summary_reason\": \"synthetic\"}, \"ETH-USDT-SWAP\": {\"action\": \"WAIT\", \"confidence\": 55, \"summary_reason\": \"synthetic\"}, \"SOL-USDT-SWAP\": {\"action\": \"WAIT\", \"confidence\": 55, \"summary_reason\": \"synthetic\"}, \"XRP-USDT-SWAP\": {\"action\": \"WAIT\", \"confidence\": 55, \"summary_reason\": \"synthetic\"}, \"DOGE-USDT-SWAP\": {\"action\": \"WAIT\", \"confidence\": 55, \"summary_reason\": \"synthetic\"}, \"ARB-USDT-SWAP\": {\"action\": \"WAIT\", \"confidence\": 55, \"summary_reason\": \"synthetic\"}, \"LINK-USDT-SWAP\": {\"action\": \"WAIT\", \"confidence\": 55, \"summary_reason\": \"synthetic\"}, \"SUI-USDT-SWAP\": {\"action\": \"WAIT\", \"confidence\": 55, \"summary_reason\": \"synthetic\"}, \"BNB-USDT-SWAP\": {\"action\": \"WAIT\", \"confidence\": 55, \"summary_reason\": \"synthetic\"}, \"AVAX-USDT-SWAP\": {\"action\": \"WAIT\", \"confidence\": 55, \"summary_reason\": \"synthetic\"}, \"OP-USDT-SWAP\": {\"action\": \"WAIT\", \"confidence\": 55, \"summary_reason\": \"synthetic\"}}}",
+        "seat_b": "```json\n{\"macro_assessment\": \"synthetic\", \"position_management\": [], \"decisions\": {\"BTC-USDT-SWAP\": {\"action\": \"WAIT\", \"confidence\": 55, \"summary_reason\": \"synthetic\"}, \"ETH-USDT-SWAP\": {\"action\": \"WAIT\", \"confidence\": 55, \"summary_reason\": \"synthetic\"}, \"SOL-USDT-SWAP\": {\"action\": \"WAIT\", \"confidence\": 55, \"summary_reason\": \"synthetic\"}, \"XRP-USDT-SWAP\": {\"action\": \"WAIT\", \"confidence\": 55, \"summary_reason\": \"synthetic\"}, \"DOGE-USDT-SWAP\": {\"action\": \"WAIT\", \"confidence\": 55, \"summary_reason\": \"synthetic\"}, \"ARB-USDT-SWAP\": {\"action\": \"WAIT\", \"confidence\": 55, \"summary_reason\": \"synthetic\"}, \"LINK-USDT-SWAP\": {\"action\": \"WAIT\", \"confidence\": 55, \"summary_reason\": \"synthetic\"}, \"SUI-USDT-SWAP\": {\"action\": \"WAIT\", \"confidence\": 55, \"summary_reason\": \"synthetic\"}, \"BNB-USDT-SWAP\": {\"action\": \"WAIT\", \"confidence\": 55, \"summary_reason\": \"synthetic\"}, \"AVAX-USDT-SWAP\": {\"action\": \"WAIT\", \"confidence\": 55, \"summary_reason\": \"synthetic\"}, \"OP-USDT-SWAP\": {\"action\": \"WAIT\", \"confidence\": 55, \"summary_reason\": \"synthetic\"}}}\n```",
+        "seat_c": "{\"macro_assessment\": \"synthetic\", \"position_management\": [], \"decisions\": {\"BTC-USDT-SWAP\": {\"action\": \"WAIT\", \"confidence\": 55, \"summary_reason\": \"synthetic\"}, \"ETH-USDT-SWAP\": {\"action\": \"WAIT\", \"confidence\": 55, \"summary_reason\": \"synthetic\"}, \"SOL-USDT-SWAP\": {\"action\": \"WAIT\", \"confidence\": 55, \"summary_reason\": \"synthetic\"}, \"XRP-USDT-SWAP\": {\"action\": \"WAIT\", \"confidence\": 55, \"summary_reason\": \"synthetic\"}, \"DOGE-USDT-SWAP\": {\"action\": \"WAIT\", \"confidence\": 55, \"summary_reason\": \"synthetic\"}, \"ARB-USDT-SWAP\": {\"action\": \"WAIT\", \"confidence\": 55, \"summary_reason\": \"synthetic\"}, \"LINK-USDT-SWAP\": {\"action\": \"WAIT\", \"confidence\": 55, \"summary_reason\": \"synthetic\"}, \"SUI-USDT-SWAP\": {\"action\": \"WAIT\", \"confidence\": 55, \"summary_reason\": \"synthetic\"}, \"BNB-USDT-SWAP\": {\"action\": \"WAIT\", \"confidence\": 55, \"summary_reason\": \"synthetic\"}, \"AVAX-USDT-SWAP\": {\"action\": \"WAIT\", \"confidence\": 55, \"summary_reason\": \"synthetic\"}, \"OP-USDT-SWAP\": {\"action\": \"WAIT\", \"confidence\": 55, \"summary_reason\": \"synthetic\"}}}"
+      }
+    },
+    {
+      "cycle_id": "synthetic-empty-truncated-partial",
+      "expected_symbols": [
+        "BTC-USDT-SWAP",
+        "ETH-USDT-SWAP",
+        "SOL-USDT-SWAP",
+        "XRP-USDT-SWAP",
+        "DOGE-USDT-SWAP",
+        "ARB-USDT-SWAP",
+        "LINK-USDT-SWAP",
+        "SUI-USDT-SWAP",
+        "BNB-USDT-SWAP",
+        "AVAX-USDT-SWAP",
+        "OP-USDT-SWAP"
+      ],
+      "proposals": {
+        "seat_a": "",
+        "seat_b": "{\"macro_assessment\":\"synthetic\",\"position_management\":[],\"decisions\":{\"BTC-USDT-SWAP\":{\"action\": \"WAIT\", \"confidence\": 55, \"summary_reason\": \"synthetic\"},\"ETH-USDT-SWAP\":{\"action\": \"WAIT\", \"confidence\": 55, \"summary_reason\": \"synthetic\"},\"SOL-USDT-SWAP\":{\"action\": \"WAIT\", \"confidence\": 55, \"summary_reason\": \"synthetic\"},\"XRP-USDT-SWAP\":{\"action\":\"WAIT\"",
+        "seat_c": "{\"macro_assessment\": \"synthetic\", \"position_management\": [], \"decisions\": {\"BTC-USDT-SWAP\": {\"action\": \"WAIT\", \"confidence\": 55, \"summary_reason\": \"synthetic\"}, \"ETH-USDT-SWAP\": {\"action\": \"WAIT\", \"confidence\": 55, \"summary_reason\": \"synthetic\"}, \"SOL-USDT-SWAP\": {\"action\": \"WAIT\", \"confidence\": 55, \"summary_reason\": \"synthetic\"}}}"
+      }
+    },
+    {
+      "cycle_id": "synthetic-mixed-validity",
+      "expected_symbols": [
+        "BTC-USDT-SWAP",
+        "ETH-USDT-SWAP",
+        "SOL-USDT-SWAP",
+        "XRP-USDT-SWAP",
+        "DOGE-USDT-SWAP",
+        "ARB-USDT-SWAP",
+        "LINK-USDT-SWAP",
+        "SUI-USDT-SWAP",
+        "BNB-USDT-SWAP",
+        "AVAX-USDT-SWAP",
+        "OP-USDT-SWAP"
+      ],
+      "proposals": {
+        "seat_a": "BTC-USDT-SWAP | WAIT | - | - | - | - | 55 | synthetic\nETH-USDT-SWAP | WAIT | - | - | - | - | 55 | synthetic\nSOL-USDT-SWAP | WAIT | - | - | - | - | 55 | synthetic\nXRP-USDT-SWAP | WAIT | - | - | - | - | 55 | synthetic\nDOGE-USDT-SWAP | WAIT | - | - | - | - | 55 | synthetic\nARB-USDT-SWAP | WAIT | - | - | - | - | 55 | synthetic\nLINK-USDT-SWAP | WAIT | - | - | - | - | 55 | synthetic\nSUI-USDT-SWAP | WAIT | - | - | - | - | 55 | synthetic\nBNB-USDT-SWAP | WAIT | - | - | - | - | 55 | synthetic\nAVAX-USDT-SWAP | WAIT | - | - | - | - | 55 | synthetic\nOP-USDT-SWAP | WAIT | - | - | - | - | 55 | synthetic",
+        "seat_b": "{\"macro_assessment\": \"synthetic\", \"position_management\": [], \"decisions\": {\"BTC-USDT-SWAP\": {\"action\": \"WAIT\", \"confidence\": 55, \"summary_reason\": \"synthetic\"}, \"ETH-USDT-SWAP\": {\"action\": \"WAIT\", \"confidence\": 55, \"summary_reason\": \"synthetic\"}, \"SOL-USDT-SWAP\": {\"action\": \"WAIT\", \"confidence\": 55, \"summary_reason\": \"synthetic\"}, \"XRP-USDT-SWAP\": {\"action\": \"WAIT\", \"confidence\": 55, \"summary_reason\": \"synthetic\"}, \"DOGE-USDT-SWAP\": {\"action\": \"WAIT\", \"confidence\": 55, \"summary_reason\": \"synthetic\"}, \"ARB-USDT-SWAP\": {\"action\": \"WAIT\", \"confidence\": 55, \"summary_reason\": \"synthetic\"}, \"LINK-USDT-SWAP\": {\"action\": \"WAIT\", \"confidence\": 55, \"summary_reason\": \"synthetic\"}, \"SUI-USDT-SWAP\": {\"action\": \"WAIT\", \"confidence\": 55, \"summary_reason\": \"synthetic\"}, \"BNB-USDT-SWAP\": {\"action\": \"WAIT\", \"confidence\": 55, \"summary_reason\": \"synthetic\"}, \"AVAX-USDT-SWAP\": {\"action\": \"WAIT\", \"confidence\": 55, \"summary_reason\": \"synthetic\"}, \"OP-USDT-SWAP\": {\"action\": \"WAIT\", \"confidence\": 55, \"summary_reason\": \"synthetic\"}}}",
+        "seat_c": "synthetic analysis, no instrument decisions"
+      }
+    }
+  ]
+}

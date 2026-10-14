@@ -245,6 +245,9 @@ _INTENTIONAL_DIVERGENCE = {
 def _strip_intentional(factors):
     """对拍前摘掉**已登记的有意分歧键**，其余键继续逐位比对。"""
     out = copy.deepcopy(factors)
+    # Observation-only addition; all old numeric fields remain in this parity
+    # comparison. The new source/closure contract is tested independently.
+    out.pop("closed_candle_contract", None)
     for blk, key in _INTENTIONAL_DIVERGENCE:
         if isinstance(out.get(blk), dict):
             out[blk].pop(key, None)

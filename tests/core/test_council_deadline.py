@@ -22,7 +22,7 @@ class CouncilDeadlineTests(unittest.TestCase):
             if len(calls) == 1:
                 clock[0] += 60
                 raise TimeoutError("HTTP 524 upstream timeout")
-            return "proposal", "", {"_astra_trace": {"model": "actual-fallback"}}, 1
+            return "BTC-USDT-SWAP | WAIT | - | - | - | - | 55 | fixture", "", {"_astra_trace": {"model": "actual-fallback"}}, 1
         with patch.object(deadline.time, "monotonic", lambda: clock[0]), \
              patch.object(deadline.time, "sleep", lambda seconds: clock.__setitem__(0, clock[0] + seconds)), \
              patch("astra_backend.llm_manager.execute_llm_request", llm):

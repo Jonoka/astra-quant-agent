@@ -466,6 +466,9 @@ def db_state(root):
         if not sqlite:
             continue
         with closing(sqlite3.connect(path.as_uri() + "?mode=ro", uri=True, timeout=15)) as db:
+            # Schema, integrity and row counts must describe one read snapshot,
+            # including committed WAL frames, even during online preflight.
+            db.execute("BEGIN")
             require(db.execute("PRAGMA integrity_check").fetchall() == [("ok",)], "sqlite_integrity")
             tables = {}
             for name, declaration in db.execute("SELECT name,sql FROM sqlite_master WHERE type='table' ORDER BY name"):
@@ -480,6 +483,79 @@ def db_state(root):
             result[path.relative_to(root).as_posix()] = {"tables": tables, "indexes": indexes}
     require("data/astra_admin.db" in result, "administrator_database_missing")
     return result
+
+
+@contextmanager
+def sqlite_snapshot(path, timeout_seconds=15):
+    """Bounded SQL-read-only snapshot, including SQLite's committed WAL view.
+
+    The source is never checkpointed, rewritten or opened with immutable=1.
+    SQLite may maintain its normal SHM reader coordination; this is not a
+    filesystem-byte-read-only probe. Only the in-memory backup is queried.
+    This proves database state at a point in time, not scheduler quiescence.
+    """
+    require(type(timeout_seconds) in (int, float) and 0 < timeout_seconds <= 15,
+            'sqlite_snapshot_timeout')
+    deadline = time.monotonic() + timeout_seconds
+
+    def remaining():
+        require(time.monotonic() < deadline, 'sqlite_snapshot_timeout')
+
+    def progress(_status, _remaining, _total):
+        # Connection timeout alone does not bound sqlite3_backup's retries.
+        remaining()
+
+    def expired():
+        return int(time.monotonic() >= deadline)
+
+    def regular(candidate):
+        plain_path(candidate)
+        require(stat.S_ISREG(candidate.stat().st_mode), 'sqlite_snapshot_file_type')
+
+    def sidecars():
+        for suffix in ('-wal', '-shm', '-journal'):
+            candidate = Path(str(path) + suffix)
+            plain_path(candidate)
+            if candidate.exists():
+                regular(candidate)
+                if suffix == '-wal' and candidate.stat().st_size:
+                    with candidate.open('rb') as stream:
+                        header = stream.read(32)
+                    # SQLite may ignore an unrecognizable WAL. Fail closed
+                    # instead of silently treating such bytes as no pending data.
+                    require(len(header) == 32 and header[:4] in
+                            (b'7\x7f\x06\x82', b'7\x7f\x06\x83') and
+                            int.from_bytes(header[4:8], 'big') == 3007000,
+                            'sqlite_snapshot_invalid')
+
+    try:
+        regular(path)
+        identity = path.stat()
+        sidecars()
+        remaining()
+        with closing(sqlite3.connect(path.as_uri() + '?mode=ro', uri=True,
+                                     timeout=min(timeout_seconds, 1))) as source, \
+                closing(sqlite3.connect(':memory:')) as snapshot:
+            source.set_progress_handler(expired, 1000)
+            source.execute('PRAGMA query_only=ON')
+            source.execute('BEGIN')
+            source.execute('SELECT name FROM sqlite_master LIMIT 1').fetchone()
+            source.backup(snapshot, pages=128, progress=progress, sleep=0.05)
+            remaining()
+            regular(path)
+            current = path.stat()
+            require((identity.st_dev, identity.st_ino) == (current.st_dev, current.st_ino),
+                    'sqlite_snapshot_identity_changed')
+            sidecars()
+            snapshot.execute('PRAGMA query_only=ON')
+            snapshot.set_progress_handler(expired, 1000)
+            require(snapshot.execute('PRAGMA integrity_check').fetchall() == [('ok',)],
+                    'sqlite_snapshot_invalid')
+            yield snapshot
+            remaining()
+    except (sqlite3.Error, OSError):
+        remaining()
+        raise GateError('sqlite_snapshot_invalid') from None
 
 
 def compatible_databases(before, after):
@@ -714,26 +790,7 @@ class Upgrade:
         require(scope['schedule_seconds'] - int(time.time()) % scope['schedule_seconds'] >=
                 scope['minimum_idle_window_seconds'], 'insufficient_idle_window')
         path = plain_path(ROOT / GATEWAY_DATABASE)
-        auxiliary = [Path(str(path) + suffix) for suffix in ('-wal', '-shm')]
-        require(not any(p.exists() for p in auxiliary), 'scheduler_snapshot_unstable')
-        before = path.stat()
-        raw = path.read_bytes()
-        after = path.stat()
-        second = path.read_bytes()
-        final = path.stat()
-        require(raw == second and not any(p.exists() for p in auxiliary) and
-                (before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns) ==
-                (after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns) ==
-                (final.st_ino, final.st_size, final.st_mtime_ns, final.st_ctime_ns),
-                'scheduler_snapshot_unstable')
-        # Read a checkpointed copy in memory; never create live SQLite sidecars.
-        copied = bytearray(raw)
-        require(len(copied) >= 100 and copied[:16] == b'SQLite format 3\x00',
-                'scheduler_snapshot_invalid')
-        copied[18] = copied[19] = 1
-        with closing(sqlite3.connect(':memory:')) as database:
-            database.deserialize(copied)
-            database.execute('PRAGMA query_only=ON')
+        with sqlite_snapshot(path) as database:
             require(database.execute("SELECT COUNT(*) FROM job_runs WHERE status='running'").fetchone()[0] == 0,
                     'active_scheduled_job')
         for process in Path('/proc').iterdir():
@@ -747,6 +804,10 @@ class Upgrade:
                 b'ai_factor_trader.py', b'ai_brain_trader.py', b'trading_brain.py',
                 b'self_evolution.py') for arg in arguments), 'active_trader_or_brain')
         self.pool_guard()
+        # A busy backup or process/config probe must not spend the reserved
+        # cutover interval after the original pre-read window check succeeded.
+        require(scope['schedule_seconds'] - int(time.time()) % scope['schedule_seconds'] >=
+                scope['minimum_idle_window_seconds'], 'insufficient_idle_window')
 
     def read(self, name):
         return json.loads((self.op / name).read_bytes())

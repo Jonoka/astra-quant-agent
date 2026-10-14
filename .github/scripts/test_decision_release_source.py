@@ -185,7 +185,7 @@ class DecisionSourceContractTests(unittest.TestCase):
             with self.subTest(relative=relative), self.assertRaisesRegex(RuntimeError, 'anchor delta paths'):
                 self.verify(delta=((guard.BASELINE, guard.REVIEWED_COMMIT), guard.REVIEWED_PATHS - {relative}))
 
-    def test_each_of_the_six_release_paths_is_required(self):
+    def test_each_of_the_nine_release_paths_is_required(self):
         for relative in guard.RELEASE_INCREMENT_PATHS:
             with self.subTest(relative=relative), self.assertRaisesRegex(RuntimeError, 'release increment paths'):
                 self.verify(delta=((guard.REVIEWED_COMMIT, self.revision), guard.RELEASE_INCREMENT_PATHS - {relative}))
@@ -314,7 +314,35 @@ class DecisionSourceContractTests(unittest.TestCase):
             self.reject_contract(changed, 'contract fields')
         self.assertNotIn('ordinary_pull_request_only', self.contract)
         self.assertEqual(len(guard.REVIEWED_PATHS), 26)
-        self.assertEqual(len(guard.RELEASE_INCREMENT_PATHS), 6)
+        self.assertEqual(len(guard.RELEASE_INCREMENT_PATHS), 9)
+
+    def test_wal_increment_is_exactly_three_fixed_tool_paths_with_both_hashes(self):
+        prior = '16e12871e51e7cfb13823a370dcbf9bdec9f0804'
+        old = json.loads(guard.git(ROOT, 'show', prior + ':' + guard.CONTRACT_PATH))
+        added = {'.github/scripts/runtime_release_upgrade.py',
+                 '.github/scripts/test_runtime_release_upgrade.py',
+                 '.github/scripts/test_deployment_plan.py'}
+        self.assertEqual(set(self.contract['release_paths']) - set(old['release_paths']), added)
+        self.assertEqual(self.contract['reviewed_paths'], old['reviewed_paths'])
+        self.assertEqual(self.contract['self_hash_exemptions'], old['self_hash_exemptions'])
+        for relative in added:
+            pin = self.contract['release_paths'][relative]
+            before = guard.git(ROOT, 'show', prior + ':' + relative)
+            self.assertEqual(before, self.reviewed[relative])
+            self.assertEqual(pin['reviewed_sha256'], hashlib.sha256(before).hexdigest())
+            self.assertEqual(pin['sha256'], hashlib.sha256(self.current[relative]).hexdigest())
+            self.assertEqual(pin['mode'], '100644')
+            self.assertNotIn(relative, guard.SELF_HASH_EXEMPTIONS)
+
+    def test_each_wal_tool_predecessor_current_bytes_and_modes_remain_pinned(self):
+        for relative in ('.github/scripts/runtime_release_upgrade.py',
+                         '.github/scripts/test_runtime_release_upgrade.py',
+                         '.github/scripts/test_deployment_plan.py'):
+            for revision in (guard.REVIEWED_COMMIT, self.revision):
+                with self.subTest(relative=relative, revision=revision), self.assertRaises(RuntimeError):
+                    self.verify(mutation=(revision, relative))
+                with self.subTest(relative=relative, revision=revision, mode=True), self.assertRaises(RuntimeError):
+                    self.verify(mode=(revision, relative, '100755', 'blob'))
 
     def test_manifest_duplicate_fields_are_rejected(self):
         with patch.object(Path, 'read_bytes', return_value=b'{"schema":1,"schema":1}'), \
@@ -536,7 +564,7 @@ class HistoricalGuardBoundaryTests(unittest.TestCase):
 
 
 class DecisionPreflightBoundaryTests(unittest.TestCase):
-    def invoke(self, *, fail=None, verifier_fail=None, pr_only=False, deployed=None, environment=None):
+    def invoke(self, *, fail=None, verifier_fail=None, pr_only=False, deployed=None, environment=None, uid=0):
         import run_decision_release_preflight as preflight
         calls = []
 
@@ -552,7 +580,7 @@ class DecisionPreflightBoundaryTests(unittest.TestCase):
                 patch.object(preflight, 'verify_decision_release_source', side_effect=verifier_fail) as verify, \
                 patch.object(preflight, 'verify_fixture'), \
                 patch.object(preflight.subprocess, 'run', side_effect=run), patch.object(preflight, 'extract') as extract, \
-                patch.object(preflight.os, 'geteuid', return_value=0), patch('sys.stdout', new_callable=io.StringIO) as output:
+                patch.object(preflight.os, 'geteuid', return_value=uid), patch('sys.stdout', new_callable=io.StringIO) as output:
             if deployed:
                 os.environ['ASTRA_DEPLOYED_SOURCE'] = '/synthetic-deployed'
             preflight.run_preflight(ROOT, 'b' * 40, pr_only)
@@ -618,13 +646,38 @@ class DecisionPreflightBoundaryTests(unittest.TestCase):
                    if len(command) > 3 and command[1] == '-c' and options.get('cwd') == ROOT]
         expected = dict(preflight.CURRENT_HELPER_SUITES, **preflight.DECISION_RELEASE_SUITES)
         self.assertEqual({Path(command[3]).name for command, _ in current}, set(expected))
-        self.assertEqual(sum(preflight.CURRENT_HELPER_SUITES.values()), 152)
+        self.assertEqual(sum(preflight.CURRENT_HELPER_SUITES.values()), 169)
         self.assertNotIn('test_verify_deployment_source.py', preflight.CURRENT_HELPER_SUITES)
         self.assertEqual(preflight.DECISION_RELEASE_SUITES['test_decision_regression_gate.py'], 13)
         for command, options in current:
             self.assertEqual(Path(command[3]).parent, ROOT / '.github/scripts')
             self.assertEqual(int(command[4]), expected[Path(command[3]).name])
             self.assertEqual(options['env']['ASTRA_CI_EXPECTED_SHA'], 'b' * 40)
+
+    def test_wal_101_and_root_68_cases_run_on_same_candidate_without_skips(self):
+        import run_decision_release_preflight as preflight
+        self.assertEqual(preflight.CURRENT_HELPER_SUITES['test_runtime_release_upgrade.py'], 56)
+        self.assertEqual(preflight.SUITES['test_runtime_release_upgrade.py'], 39)
+        self.assertEqual(sum(n for k, n in preflight.CURRENT_HELPER_SUITES.items()
+                             if k not in preflight.OWNERSHIP_SUITES), 101)
+        self.assertEqual({k: preflight.CURRENT_HELPER_SUITES[k] for k in preflight.OWNERSHIP_SUITES},
+                         {'test_deployment_plan.py': 29, 'test_deployment_identity.py': 19,
+                          'test_recovery_journal.py': 20})
+        calls, _, _, _ = self.invoke(uid=1000, environment={'GITHUB_ACTIONS': 'true'})
+        observed = {}
+        for command, options in calls:
+            if options.get('cwd') != ROOT or preflight.LOADER not in command:
+                continue
+            loader = command.index(preflight.LOADER)
+            path = Path(command[loader + 1]); minimum = int(command[loader + 2])
+            if path.name not in preflight.CURRENT_HELPER_SUITES:
+                continue
+            self.assertEqual(path.parent, ROOT / '.github/scripts')
+            self.assertEqual(options['env']['ASTRA_CI_EXPECTED_SHA'], 'b' * 40)
+            self.assertEqual(command[:2] == ['sudo', '-n'], path.name in preflight.OWNERSHIP_SUITES)
+            self.assertTrue(options['check'])
+            observed[path.name] = minimum
+        self.assertEqual(observed, preflight.CURRENT_HELPER_SUITES)
 
     def test_all_retained_product_gates_and_decision_regressions_run_on_current_head(self):
         calls, _, _, _ = self.invoke()

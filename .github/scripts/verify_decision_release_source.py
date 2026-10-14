@@ -31,6 +31,9 @@ RELEASE_INCREMENT_PATHS = frozenset({
     CONTRACT_PATH, VERIFIER_PATH,
     '.github/scripts/test_decision_release_source.py',
     '.github/scripts/run_decision_release_preflight.py',
+    '.github/scripts/runtime_release_upgrade.py',
+    '.github/scripts/test_runtime_release_upgrade.py',
+    '.github/scripts/test_deployment_plan.py',
     '.github/workflows/test-taker-parsing.yml',
     '.github/workflows/build-release-image.yml',
 })

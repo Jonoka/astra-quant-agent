@@ -1,11 +1,14 @@
 """Synthetic safety gates; execute on GitHub Actions, never the VPS."""
 import copy
+from contextlib import closing, contextmanager
 import importlib.util
+import itertools
 import os
 import sqlite3
 import sys
 import io
 import tarfile
+import subprocess
 from pathlib import Path
 import tempfile
 import unittest
@@ -209,6 +212,285 @@ class RuntimeUpgradeTests(unittest.TestCase):
         for connection in connections:
             with self.assertRaises(sqlite3.ProgrammingError):
                 connection.execute('SELECT 1')
+
+    def test_database_report_does_not_mix_concurrent_wal_commits(self):
+        data = self.root / 'data'
+        data.mkdir()
+        path = data / 'astra_admin.db'
+        connect = sqlite3.connect
+        with closing(connect(path)) as writer:
+            writer.executescript('PRAGMA journal_mode=WAL; CREATE TABLE records(id INTEGER);'
+                                 'INSERT INTO records VALUES(1);')
+            changed = []
+            class ConcurrentCommit(sqlite3.Connection):
+                def execute(self, sql, *args, **kwargs):
+                    result = super().execute(sql, *args, **kwargs)
+                    if sql == 'PRAGMA integrity_check' and not changed:
+                        writer.executescript('INSERT INTO records VALUES(2);'
+                                             'CREATE TABLE later_commit(id INTEGER);')
+                        changed.append(True)
+                    return result
+            with patch.object(upgrade.sqlite3, 'connect',
+                              side_effect=lambda *a, **kw: connect(*a, factory=ConcurrentCommit, **kw)):
+                report = upgrade.db_state(self.root)['data/astra_admin.db']
+            self.assertEqual(report['tables']['records']['rows'], 1)
+            self.assertNotIn('later_commit', report['tables'])
+            self.assertEqual(writer.execute('SELECT COUNT(*) FROM records').fetchone()[0], 2)
+            self.assertEqual(changed, [True])
+
+    def wal_gateway(self, status='finished'):
+        """Keep a real backend connection open, with schema in the main file."""
+        path = self.root / upgrade.GATEWAY_DATABASE
+        path.parent.mkdir(exist_ok=True)
+        db = sqlite3.connect(path)
+        self.addCleanup(db.close)
+        db.executescript('PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0; '
+                         'CREATE TABLE job_runs(id INTEGER PRIMARY KEY, status TEXT, detail BLOB);')
+        db.execute('INSERT INTO job_runs VALUES(1,?,?)', (status, b'original\x00\xff'))
+        db.commit()
+        db.execute('PRAGMA wal_checkpoint(TRUNCATE)').fetchall()
+        self.assertEqual(Path(str(path) + '-wal').stat().st_size, 0)
+        self.assertTrue(Path(str(path) + '-shm').is_file())
+        return path, db
+
+    @staticmethod
+    def sqlite_payload(path):
+        # SHM is intentionally excluded: normal SQLite reader coordination can
+        # change it even when both SQL payload files are strictly read-only.
+        result = {}
+        for candidate in (path, Path(str(path) + '-wal')):
+            info = candidate.stat()
+            result[candidate.name] = (candidate.read_bytes(), info.st_ino,
+                                      info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+        return result
+
+    @contextmanager
+    def idle_fixture(self, obj, *, clock=1800, processes=()):
+        obj.deployment_plan = Mock(return_value={'runtime': {
+            'schedule_seconds': 900, 'minimum_idle_window_seconds': 480}})
+        original_iterdir = Path.iterdir
+        def iterdir(path):
+            return iter(processes) if path == Path('/proc') else original_iterdir(path)
+        with patch.object(upgrade, 'ROOT', self.root), \
+                patch.object(upgrade.time, 'time', return_value=clock) as wall_clock, \
+                patch.object(Path, 'iterdir', iterdir):
+            yield wall_clock
+
+    def test_idle_window_rejects_running_commit_only_present_in_wal(self):
+        obj = self.operator()
+        path, backend = self.wal_gateway()
+        backend.execute("UPDATE job_runs SET status='running' WHERE id=1")
+        backend.commit()
+        with closing(sqlite3.connect(path.as_uri() + '?immutable=1', uri=True)) as main_only:
+            self.assertEqual(main_only.execute('SELECT status FROM job_runs').fetchone(), ('finished',))
+        before = self.sqlite_payload(path)
+        with self.idle_fixture(obj), self.assertRaisesRegex(upgrade.GateError, 'active_scheduled_job'):
+            obj.idle_window()
+        self.assertEqual(self.sqlite_payload(path), before)
+        obj.pool_guard.assert_not_called()
+
+    def test_idle_window_accepts_finished_commit_only_present_in_wal(self):
+        obj = self.operator()
+        path, backend = self.wal_gateway(status='running')
+        backend.execute("UPDATE job_runs SET status='finished', detail=? WHERE id=1", (b'latest\x00\xff',))
+        backend.commit()
+        with closing(sqlite3.connect(path.as_uri() + '?immutable=1', uri=True)) as main_only:
+            self.assertEqual(main_only.execute('SELECT status FROM job_runs').fetchone(), ('running',))
+        before = self.sqlite_payload(path)
+        with self.idle_fixture(obj):
+            obj.idle_window()
+        self.assertEqual(self.sqlite_payload(path), before)
+        obj.pool_guard.assert_called_once_with()
+
+    def test_idle_window_accepts_open_backend_zero_byte_wal_and_shm(self):
+        obj = self.operator()
+        path, backend = self.wal_gateway()
+        before = self.sqlite_payload(path)
+        with self.idle_fixture(obj):
+            obj.idle_window()
+        self.assertEqual(self.sqlite_payload(path), before)
+        self.assertEqual(backend.execute('SELECT COUNT(*) FROM job_runs').fetchone(), (1,))
+        obj.pool_guard.assert_called_once_with()
+
+    def test_sqlite_snapshot_excludes_uncommitted_writes_and_is_query_only(self):
+        path, backend = self.wal_gateway()
+        backend.execute("UPDATE job_runs SET status='running' WHERE id=1")
+        before = self.sqlite_payload(path)
+        with upgrade.sqlite_snapshot(path) as snapshot:
+            self.assertEqual(snapshot.execute('SELECT status,detail FROM job_runs').fetchall(),
+                             [('finished', b'original\x00\xff')])
+            self.assertEqual(snapshot.execute('PRAGMA query_only').fetchone(), (1,))
+            with self.assertRaises(sqlite3.OperationalError):
+                snapshot.execute("UPDATE job_runs SET status='changed'")
+        self.assertEqual(self.sqlite_payload(path), before)
+        self.assertTrue(backend.in_transaction)
+        backend.rollback()
+
+    def test_sqlite_snapshot_closes_readonly_source_and_memory_copy_on_every_exit(self):
+        path, _ = self.wal_gateway()
+        connect = sqlite3.connect
+        for consumer_fails in (False, True):
+            connections, calls = [], []
+            def track(*args, **kwargs):
+                calls.append((args, kwargs))
+                connection = connect(*args, **kwargs)
+                connections.append(connection)
+                return connection
+            with self.subTest(consumer_fails=consumer_fails), patch.object(upgrade.sqlite3, 'connect', track):
+                try:
+                    with upgrade.sqlite_snapshot(path) as snapshot:
+                        self.assertEqual(snapshot.execute('SELECT COUNT(*) FROM job_runs').fetchone(), (1,))
+                        if consumer_fails:
+                            raise RuntimeError('synthetic consumer failure')
+                except RuntimeError:
+                    self.assertTrue(consumer_fails)
+            self.assertEqual(len(connections), 2)
+            self.assertTrue(calls[0][1]['uri'])
+            self.assertIn('mode=ro', calls[0][0][0])
+            self.assertNotIn('immutable', calls[0][0][0])
+            self.assertEqual(calls[1][0][0], ':memory:')
+            for connection in connections:
+                with self.assertRaises(sqlite3.ProgrammingError):
+                    connection.execute('SELECT 1')
+
+    def test_sqlite_snapshot_busy_progress_is_deadline_bounded_and_closes_connections(self):
+        path, _ = self.wal_gateway()
+        connect, connections, statuses = sqlite3.connect, [], []
+        class BusyConnection(sqlite3.Connection):
+            def backup(self, target, *, pages, progress, sleep):
+                self_test.assertGreater(pages, 0)
+                self_test.assertLessEqual(sleep, 0.1)
+                for status in itertools.islice(itertools.cycle((sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED)), 100):
+                    statuses.append(status)
+                    progress(status, 1, 1)
+                self_test.fail('backup progress did not enforce its deadline')
+        self_test = self
+        def track(*args, **kwargs):
+            if args[0] != ':memory:':
+                kwargs['factory'] = BusyConnection
+            connection = connect(*args, **kwargs)
+            connections.append(connection)
+            return connection
+        before = self.sqlite_payload(path)
+        with patch.object(upgrade.sqlite3, 'connect', track), \
+                patch.object(upgrade.time, 'monotonic', side_effect=itertools.count(step=0.1)), \
+                self.assertRaisesRegex(upgrade.GateError, 'sqlite_snapshot_timeout'):
+            with upgrade.sqlite_snapshot(path, timeout_seconds=0.5):
+                self.fail('busy backup yielded a snapshot')
+        self.assertIn(sqlite3.SQLITE_BUSY, statuses)
+        self.assertIn(sqlite3.SQLITE_LOCKED, statuses)
+        self.assertLess(len(statuses), 10)
+        self.assertEqual(self.sqlite_payload(path), before)
+        self.assertEqual(len(connections), 2)
+        for connection in connections:
+            with self.assertRaises(sqlite3.ProgrammingError):
+                connection.execute('SELECT 1')
+
+    def test_sqlite_snapshot_rejects_corrupt_missing_and_symlink_inputs(self):
+        valid = self.root / 'valid.db'
+        with closing(sqlite3.connect(valid)) as db:
+            db.execute('CREATE TABLE sample(id INTEGER)')
+        corrupt = self.root / 'corrupt.db'
+        corrupt.write_bytes(b'SQLite format 3\x00' + b'not a database' * 100)
+        link = self.root / 'alias.db'
+        link.symlink_to(valid)
+        directory = self.root / 'directory.db'
+        directory.mkdir()
+        for path in (corrupt, self.root / 'missing.db', link, directory):
+            with self.subTest(path=path.name), self.assertRaises(upgrade.GateError):
+                with upgrade.sqlite_snapshot(path):
+                    self.fail('unsafe input yielded a snapshot')
+        self.assertFalse((self.root / 'missing.db').exists())
+        for suffix in ('-wal', '-shm', '-journal'):
+            sidecar = Path(str(valid) + suffix)
+            sidecar.symlink_to(corrupt)
+            with self.subTest(suffix=suffix), self.assertRaisesRegex(upgrade.GateError, 'symlink_path'):
+                with upgrade.sqlite_snapshot(valid):
+                    self.fail('symlink sidecar yielded a snapshot')
+            sidecar.unlink()
+
+    def test_sqlite_snapshot_rejects_unrecognized_wal_instead_of_ignoring_it(self):
+        path = self.root / 'malformed-wal.db'
+        with closing(sqlite3.connect(path)) as db:
+            db.execute('CREATE TABLE sample(id INTEGER)')
+        wal = Path(str(path) + '-wal')
+        wal.write_bytes(b'unrecognized nonempty WAL payload')
+        before = self.sqlite_payload(path)
+        with self.assertRaisesRegex(upgrade.GateError, 'sqlite_snapshot_invalid'):
+            with upgrade.sqlite_snapshot(path):
+                self.fail('unrecognized WAL was silently ignored')
+        self.assertEqual(self.sqlite_payload(path), before)
+
+    def test_sqlite_snapshot_detects_main_inode_replacement(self):
+        path = self.root / 'replace.db'
+        with closing(sqlite3.connect(path)) as db:
+            db.execute('CREATE TABLE sample(id INTEGER)')
+        replacement = self.root / 'replacement.db'
+        replacement.write_bytes(path.read_bytes())
+        connect = sqlite3.connect
+        class ReplacingConnection(sqlite3.Connection):
+            def backup(self, *args, **kwargs):
+                super().backup(*args, **kwargs)
+                os.replace(replacement, path)
+        def track(*args, **kwargs):
+            if args[0] != ':memory:':
+                kwargs['factory'] = ReplacingConnection
+            return connect(*args, **kwargs)
+        with patch.object(upgrade.sqlite3, 'connect', track), \
+                self.assertRaisesRegex(upgrade.GateError, 'sqlite_snapshot_identity_changed'):
+            with upgrade.sqlite_snapshot(path):
+                self.fail('replacement database accepted')
+
+    def test_idle_window_preserves_process_and_configuration_gates(self):
+        obj = self.operator()
+        self.wal_gateway()
+        process = self.root / '12345'
+        process.mkdir()
+        for executable in ('ai_factor_trader.py', 'ai_brain_trader.py', 'trading_brain.py', 'self_evolution.py'):
+            (process / 'cmdline').write_bytes(b'python\x00/app/' + executable.encode() + b'\x00')
+            with self.subTest(executable=executable), self.idle_fixture(obj, processes=(process,)), \
+                    self.assertRaisesRegex(upgrade.GateError, 'active_trader_or_brain'):
+                obj.idle_window()
+        obj.pool_guard.assert_not_called()
+        obj.pool_guard.side_effect = upgrade.GateError('pool_config_drift')
+        with self.idle_fixture(obj), self.assertRaisesRegex(upgrade.GateError, 'pool_config_drift'):
+            obj.idle_window()
+
+    def test_idle_window_enforces_480_seconds_before_and_after_snapshot(self):
+        obj = self.operator()
+        self.wal_gateway()
+        with self.idle_fixture(obj, clock=2220):  # Exactly 480 seconds remain.
+            obj.idle_window()
+        obj.pool_guard.reset_mock()
+        with self.idle_fixture(obj, clock=2221), \
+                patch.object(upgrade, 'sqlite_snapshot') as snapshot, \
+                self.assertRaisesRegex(upgrade.GateError, 'insufficient_idle_window'):
+            obj.idle_window()
+        snapshot.assert_not_called()
+        obj.pool_guard.assert_not_called()
+        with self.idle_fixture(obj) as wall_clock:
+            wall_clock.side_effect = [1800, 2221]
+            with self.assertRaisesRegex(upgrade.GateError, 'insufficient_idle_window'):
+                obj.idle_window()
+
+    def test_corrupt_scheduler_database_aborts_before_stopped_copy(self):
+        obj = self.operator()
+        path = self.root / upgrade.GATEWAY_DATABASE
+        path.parent.mkdir()
+        path.write_bytes(b'SQLite format 3\x00' + b'corrupt' * 100)
+        obj.state.update(phase='prepared', baseline={}, endpoints={})
+        for method in ('check_drift', 'capacity', 'runtime', 'validate_compose', 'image_metadata'):
+            setattr(obj, method, Mock())
+        obj.endpoints = Mock(return_value={})
+        obj.stop = Mock()
+        obj.copy = Mock()
+        obj.rollback = Mock()
+        with self.idle_fixture(obj), self.assertRaisesRegex(upgrade.GateError, 'sqlite_snapshot_invalid'):
+            obj.execute()
+        obj.stop.assert_not_called()
+        obj.copy.assert_not_called()
+        obj.rollback.assert_not_called()
+        self.assertFalse((obj.op / 'stopped-snapshot').exists())
 
     def test_gateway_source_contract_rejects_other_sql_or_migrations(self):
         old, new = self.root / 'old.py', self.root / 'new.py'
@@ -460,6 +742,186 @@ class RuntimeUpgradeTests(unittest.TestCase):
             self.assertEqual(db.execute('SELECT status FROM orders ORDER BY id').fetchall(),
                              [('prior',), ('candidate',)])
 
+    def stopped_wal(self, path, *, append=False):
+        """A terminated backend leaves genuine committed WAL and SHM bytes.
+
+        Normal connection close would checkpoint/remove the sidecars, so use a
+        tiny local process and exit after commit without SQLite's close hook.
+        """
+        script = """
+import os, sqlite3, sys
+db = sqlite3.connect(sys.argv[1])
+db.execute('PRAGMA journal_mode=WAL')
+db.execute('PRAGMA wal_autocheckpoint=0')
+if sys.argv[2] == 'create':
+    db.execute('CREATE TABLE orders(id INTEGER PRIMARY KEY, status TEXT, payload BLOB)')
+    db.execute('INSERT INTO orders VALUES(1,?,?)', ('prior', b'prior\\x00\\xff'))
+    db.commit()
+    db.execute('PRAGMA wal_checkpoint(TRUNCATE)').fetchall()
+    db.execute('INSERT INTO orders VALUES(2,?,?)', ('committed-wal', bytes(range(256))))
+else:
+    db.execute('INSERT INTO orders VALUES(3,?,?)', ('candidate-latest', b'latest\\x00\\xff' * 257))
+db.commit()
+os._exit(0)
+"""
+        subprocess.run([sys.executable, '-c', script, str(path), 'append' if append else 'create'],
+                       check=True, capture_output=True, timeout=15)
+        self.assertGreater(Path(str(path) + '-wal').stat().st_size, 32)
+        self.assertGreater(Path(str(path) + '-shm').stat().st_size, 0)
+
+    def rollback_wal_fixture(self):
+        obj = self.operator()
+        live = obj.op / 'live'
+        (live / 'data').mkdir(parents=True)
+        (live / 'source-marker').write_bytes(b'previous-source')
+        (live / '.env').write_bytes(b'ASTRA_STANDALONE_GATEWAY=true\nASTRA_OKX_ENV=demo\nOKX_IS_SIMULATED=1\n')
+        (live / '.env').chmod(0o600)
+        (live / 'data/deleted.json').write_bytes(b'intentionally deleted by candidate')
+        (live / 'data/retained.json').write_bytes(b'prior record')
+        with closing(sqlite3.connect(live / 'data/astra_admin.db')) as db:
+            db.executescript('CREATE TABLE admin_users(id INTEGER,username TEXT,password_hash TEXT,'
+                             'salt TEXT,iterations INTEGER,role TEXT,enabled INTEGER,created_at TEXT);'
+                             "INSERT INTO admin_users VALUES(1,'synthetic','hash','salt',1,'superadmin',1,'synthetic');")
+        self.stopped_wal(live / 'data/astra_quant.db')
+        baseline = upgrade.db_state(live)
+        original = obj.op / 'original-deployment'
+        obj.copy(live, original)
+        obj.copy(live, obj.op / 'stopped-snapshot')
+        snapshot = upgrade.tree_manifest(original)
+        self.assertEqual(upgrade.tree_manifest(obj.op / 'stopped-snapshot'), snapshot)
+        self.stopped_wal(live / 'data/astra_quant.db', append=True)
+        (live / 'data/deleted.json').unlink()
+        (live / 'data/retained.json').write_bytes(b'latest record\x00\xff')
+        (live / 'data/retained.json').chmod(0o640)
+        (live / '.env').write_bytes((live / '.env').read_bytes() + b'# latest configuration\n')
+        (live / 'source-marker').write_bytes(b'candidate-source')
+        obj.manifest_sha = 'synthetic-manifest'
+        obj.state.update(phase='candidate-active', manifest_sha=obj.manifest_sha,
+                         snapshot=snapshot, databases=baseline, deployment_sources={
+                             'previous': upgrade.deployment_source(original),
+                             'release': upgrade.deployment_source(live)})
+        # These tests exercise filesystem/SQLite recovery. Host ownership,
+        # container identity, capacity, image, and health gates have separate
+        # deployment tests and cannot be exercised as root by this fixture.
+        for method in ('sources', 'image_metadata', 'capacity', 'stop', 'start', 'verify'):
+            setattr(obj, method, Mock())
+        return obj, live, original, snapshot
+
+    def test_rollback_carries_latest_committed_wal_rows_and_preserves_original_trio(self):
+        obj, live, original, snapshot = self.rollback_wal_fixture()
+        quant = live / 'data/astra_quant.db'
+        latest_payload = {p.name: p.read_bytes() for p in (quant, Path(str(quant) + '-wal'))}
+        with patch.object(upgrade, 'ROOT', live), patch.object(upgrade, 'env_gate'):
+            obj.rollback()
+        self.assertEqual(obj.state['phase'], 'rolled-back')
+        obj.stop.assert_called_once_with()
+        obj.start.assert_called_once_with(True)
+        obj.verify.assert_called_once_with(previous=True)
+        self.assertEqual(upgrade.tree_manifest(original), snapshot)
+        self.assertEqual(upgrade.tree_manifest(obj.op / 'stopped-snapshot'), snapshot)
+        self.assertEqual(upgrade.tree_manifest(obj.op / 'recovery-seed-data'),
+                         upgrade.tree_manifest(original / 'data'))
+        for root in (live, obj.op / 'failed-candidate'):
+            for name, payload in latest_payload.items():
+                self.assertEqual((root / 'data' / name).read_bytes(), payload)
+            self.assertEqual((root / 'data/retained.json').read_bytes(), b'latest record\x00\xff')
+            self.assertEqual((root / 'data/retained.json').stat().st_mode & 0o777, 0o640)
+            self.assertFalse((root / 'data/deleted.json').exists())
+            self.assertTrue((root / '.env').read_bytes().endswith(b'# latest configuration\n'))
+            self.assertEqual((root / '.env').stat().st_mode & 0o777, 0o600)
+        self.assertEqual((live / 'source-marker').read_bytes(), b'previous-source')
+        self.assertEqual((obj.op / 'failed-candidate/source-marker').read_bytes(), b'candidate-source')
+        with upgrade.sqlite_snapshot(quant) as db:
+            self.assertEqual(db.execute('SELECT id,status,payload FROM orders ORDER BY id').fetchall(), [
+                (1, 'prior', b'prior\x00\xff'), (2, 'committed-wal', bytes(range(256))),
+                (3, 'candidate-latest', b'latest\x00\xff' * 257)])
+        self.assertEqual(upgrade.tree_manifest(original), snapshot)
+        self.assertEqual(upgrade.tree_manifest(obj.op / 'stopped-snapshot'), snapshot)
+
+    def test_rollback_copy_failure_retains_latest_original_and_owned_wal_evidence(self):
+        obj, live, original, snapshot = self.rollback_wal_fixture()
+        quant = live / 'data/astra_quant.db'
+        latest_payload = self.sqlite_payload(quant)
+        run = upgrade.run
+        def fail_recovery_data_copy(*args, **kwargs):
+            if args[:3] == ('cp', '-a', '--') and args[3] == live / 'data':
+                raise upgrade.GateError('synthetic_copy_failure')
+            return run(*args, **kwargs)
+        with patch.object(upgrade, 'ROOT', live), patch.object(upgrade, 'env_gate'), \
+                patch.object(upgrade, 'run', side_effect=fail_recovery_data_copy), \
+                self.assertRaisesRegex(upgrade.GateError, 'synthetic_copy_failure'):
+            obj.rollback()
+        self.assertEqual(self.sqlite_payload(quant), latest_payload)
+        self.assertEqual(upgrade.tree_manifest(original), snapshot)
+        self.assertEqual(upgrade.tree_manifest(obj.op / 'stopped-snapshot'), snapshot)
+        self.assertEqual(upgrade.tree_manifest(obj.op / 'recovery-seed-data'),
+                         upgrade.tree_manifest(original / 'data'))
+        self.assertEqual((live / 'source-marker').read_bytes(), b'candidate-source')
+        self.assertTrue((obj.op / 'recovery').is_dir())
+        self.assertFalse((obj.op / 'failed-candidate').exists())
+        obj.start.assert_not_called()
+        obj.verify.assert_not_called()
+
+    def execute_wal_fixture(self):
+        obj = self.operator()
+        live, candidate = obj.op / 'live', obj.op / 'candidate'
+        for root, marker in ((live, b'previous-source'), (candidate, b'candidate-source')):
+            (root / 'data').mkdir(parents=True)
+            (root / 'source-marker').write_bytes(marker)
+        with closing(sqlite3.connect(live / 'data/astra_admin.db')) as db:
+            db.executescript('CREATE TABLE admin_users(id,username,password_hash,salt,iterations,role,enabled,created_at);'
+                             "INSERT INTO admin_users VALUES(1,'synthetic','hash','salt',1,'superadmin',1,'synthetic');")
+        self.stopped_wal(live / 'data/astra_quant.db')
+        obj.state.update(phase='prepared', baseline={}, endpoints={}, guard=obj.guard(live))
+        # Host/image/ownership and admission are separate boundaries. Keep the
+        # actual post-stop DB probes, full copies, carry, renames and recovery.
+        for method in ('check_drift', 'capacity', 'runtime', 'validate_compose', 'image_metadata',
+                       'idle_window', 'prompt_refresh', 'sources', 'start', 'verify'):
+            setattr(obj, method, Mock())
+        obj.endpoints = Mock(return_value={})
+        obj.stop = Mock(side_effect=lambda: self.stopped_wal(live / 'data/astra_quant.db', append=True))
+        obj.manifest_sha = 'synthetic'
+        obj.state['manifest_sha'] = obj.manifest_sha
+        return obj, live
+
+    def test_execute_freezes_final_wal_commit_written_during_stop(self):
+        obj, live = self.execute_wal_fixture()
+        with patch.object(upgrade, 'ROOT', live):
+            obj.execute()
+            probe = obj.op / 'disposable-original-probe'
+            obj.copy(obj.op / 'original-deployment', probe)
+        self.assertEqual(obj.state['phase'], 'accepted')
+        self.assertEqual(obj.state['databases']['data/astra_quant.db']['tables']['orders']['rows'], 3)
+        obj.stop.assert_called_once_with()
+        obj.start.assert_called_once_with(False)
+        self.assertEqual((live / 'source-marker').read_bytes(), b'candidate-source')
+        for root in (obj.op / 'original-deployment', obj.op / 'stopped-snapshot'):
+            self.assertEqual(upgrade.tree_manifest(root), obj.state['snapshot'])
+        for root in (live, probe):
+            with upgrade.sqlite_snapshot(root / 'data/astra_quant.db') as db:
+                self.assertEqual(db.execute('SELECT id,status FROM orders ORDER BY id').fetchall(),
+                                 [(1, 'prior'), (2, 'committed-wal'), (3, 'candidate-latest')])
+        self.assertEqual(upgrade.tree_manifest(obj.op / 'original-deployment'), obj.state['snapshot'])
+        self.assertEqual(upgrade.tree_manifest(obj.op / 'stopped-snapshot'), obj.state['snapshot'])
+
+    def test_execute_failed_stopped_copy_restores_old_runtime_with_final_wal_commit(self):
+        obj, live = self.execute_wal_fixture()
+        run = upgrade.run
+        def fail_stopped_copy(*args, **kwargs):
+            if args[:3] == ('cp', '-a', '--') and args[-1] == obj.op / 'stopped-snapshot':
+                raise upgrade.GateError('synthetic_stopped_copy_failure')
+            return run(*args, **kwargs)
+        with patch.object(upgrade, 'ROOT', live), patch.object(upgrade, 'run', side_effect=fail_stopped_copy), \
+                self.assertRaisesRegex(upgrade.GateError, 'upgrade_failed_previous_runtime_recovered'):
+            obj.execute()
+        self.assertEqual(obj.state['phase'], 'rolled-back')
+        obj.start.assert_called_once_with(True)
+        obj.verify.assert_called_once_with(previous=True)
+        self.assertEqual((live / 'source-marker').read_bytes(), b'previous-source')
+        self.assertFalse((obj.op / 'original-deployment').exists())
+        with upgrade.sqlite_snapshot(live / 'data/astra_quant.db') as db:
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM orders').fetchone()[0], 3)
+
     def test_database_rejects_lost_trading_rows_and_unknown_columns(self):
         before = {"data/astra_quant.db": {"tables": {"orders": {"columns": [["id", "INTEGER", 0, None, 1]], "rows": 2}}, "indexes": []}}
         after = copy.deepcopy(before)
@@ -598,13 +1060,22 @@ class RuntimeUpgradeTests(unittest.TestCase):
             (source / name).mkdir(parents=True)
         (source / ".env").write_bytes(b"synthetic-private-config\x00\xff")
         (source / ".env").chmod(0o600)
-        (source / "data/orders.db-wal").write_bytes(b"committed-wal-fixture")
+        self.stopped_wal(source / 'data/orders.db')
+        for suffix in ('', '-wal', '-shm'):
+            (source / ('data/orders.db' + suffix)).chmod(0o600)
         (source / "frontend/public/images").symlink_to("../../docs/images", target_is_directory=True)
         expected = upgrade.tree_manifest(source)
         snapshot = obj.op / "snapshot"
         obj.copy(source, snapshot)
         self.assertEqual(upgrade.tree_manifest(snapshot), expected)
         self.assertEqual(upgrade.tree_manifest(source), expected)
+        probe = obj.op / 'disposable-snapshot-probe'
+        obj.copy(snapshot, probe)
+        with upgrade.sqlite_snapshot(probe / 'data/orders.db') as db:
+            self.assertEqual(db.execute('SELECT id,status,payload FROM orders ORDER BY id').fetchall(),
+                             [(1, 'prior', b'prior\x00\xff'), (2, 'committed-wal', bytes(range(256)))])
+        self.assertEqual(upgrade.tree_manifest(source), expected)
+        self.assertEqual(upgrade.tree_manifest(snapshot), expected)
 
 
 if __name__ == "__main__":

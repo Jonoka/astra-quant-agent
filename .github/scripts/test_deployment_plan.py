@@ -217,12 +217,12 @@ class DeploymentPlanTests(unittest.TestCase):
             self.obj.idle_window()
         self.assertEqual(M.tree_manifest(self.live), before)
 
-    def test_idle_guard_rejects_wal_or_short_schedule_window(self):
+    def test_idle_guard_rejects_malformed_wal_or_short_schedule_window(self):
         self.database()
         with patch.object(M.time, 'time', return_value=2600), self.assertRaisesRegex(M.GateError, 'insufficient_idle_window'):
             self.obj.idle_window()
         Path(str(self.live / M.GATEWAY_DATABASE) + '-wal').write_bytes(b'pending')
-        with patch.object(M.time, 'time', return_value=1800), self.assertRaisesRegex(M.GateError, 'scheduler_snapshot_unstable'):
+        with patch.object(M.time, 'time', return_value=1800), self.assertRaisesRegex(M.GateError, 'sqlite_snapshot_invalid'):
             self.obj.idle_window()
 
     def test_idle_window_acceptance_reads_only_memory_copy(self):

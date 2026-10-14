@@ -70,7 +70,7 @@ jobs:
           assert release["tag_name"] == os.environ["SOURCE_VERSION"]
           assert not release["draft"] and not release["prerelease"]
           '
-          python ../ci/.github/scripts/verify_deployment_source.py . "$UPSTREAM_SHA" "$SOURCE_SHA"
+          python ../ci/.github/scripts/verify_decision_release_source.py . "$UPSTREAM_SHA" "$SOURCE_SHA"
 
       - name: Checkout historical fork for additive compatibility fixtures
         uses: actions/checkout@v4
@@ -110,14 +110,16 @@ jobs:
           # baseline and reviewed PR; never re-pin legacy tests to release bytes.
           git -C source worktree add --detach "$GITHUB_WORKSPACE/collection-baseline" 0356bcdcf5ca58748b5ce42197b8cf4d9d1f32e6
           git -C source worktree add --detach "$GITHUB_WORKSPACE/collection-reviewed" 15f5e39e0d3a62b51fec9b7a0834029840802d9e
-          python ci/.github/scripts/verify_deployment_source.py validation "$UPSTREAM_SHA" "$SOURCE_SHA"
+          # Preserve old source-contract test fixtures at their approved release.
+          git -C source worktree add --detach "$GITHUB_WORKSPACE/collection-release" 60133ce82d4a0b91f94bc0c613a07e24aff049f5
+          python ci/.github/scripts/verify_decision_release_source.py validation "$UPSTREAM_SHA" "$SOURCE_SHA"
 
       - name: Require shared deployment and offline taker preflight
         working-directory: source
         env:
           ASTRA_CI_EXPECTED_SHA: ${{ env.SOURCE_SHA }}
           ASTRA_DEPLOYED_SOURCE: ${{ github.workspace }}/deployed
-        run: python .github/scripts/run_deployment_preflight.py
+        run: python .github/scripts/run_decision_release_preflight.py
 
       - name: Set up exact frontend acceptance runtime
         uses: actions/setup-node@v4
@@ -151,6 +153,10 @@ jobs:
           import sys
           import unittest
           target = Path(sys.argv[1])
+          if target.as_posix() == ".github/scripts/test_verify_deployment_source.py":
+              # This historical positive fixture retains its original hash pins.
+              # Current release refusal tests run in the mandatory shared preflight.
+              target = Path("../collection-release") / target
           assert target.is_file(), f"Required suite missing: {target}"
           suite = unittest.defaultTestLoader.discover(str(target.parent), pattern=target.name)
           assert suite.countTestCases() > 0, f"No tests discovered: {target}"
@@ -253,7 +259,7 @@ jobs:
           git -C source diff --exit-code HEAD
           git -C source status --porcelain
           test -z "$(git -C source status --porcelain)"
-          python ci/.github/scripts/verify_deployment_source.py source "$UPSTREAM_SHA" "$SOURCE_SHA"
+          python ci/.github/scripts/verify_decision_release_source.py source "$UPSTREAM_SHA" "$SOURCE_SHA"
 
       - name: Set up Buildx
         uses: docker/setup-buildx-action@v3

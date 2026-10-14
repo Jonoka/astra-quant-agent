@@ -37,7 +37,10 @@ jobs:
         env:
           ASTRA_CI_EXPECTED_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
-          if test -f .github/scripts/pr_candidate_contract.json; then
+          if test -f .github/scripts/decision_release_contract.json; then
+            echo 'mode=decision-release' >> "$GITHUB_OUTPUT"
+            python .github/scripts/run_decision_release_preflight.py --release-pr
+          elif test -f .github/scripts/pr_candidate_contract.json; then
             echo 'mode=candidate' >> "$GITHUB_OUTPUT"
             python .github/scripts/run_deployment_preflight.py --candidate-pr
           elif test -f .github/scripts/collection_release_contract.json; then
@@ -72,7 +75,12 @@ jobs:
           # Reuse the original selected gate; contract removal cannot downgrade
           # the final check. Candidate source never receives release eligibility.
           mode = os.environ['ASTRA_PR_MODE']
-          if mode == 'candidate':
+          if mode == 'decision-release':
+              if os.environ.get('GITHUB_EVENT_NAME') != 'pull_request':
+                  raise RuntimeError('Release PR verification requires a pull_request event')
+              from verify_decision_release_source import verify_decision_release_source
+              verify_decision_release_source(Path.cwd(), UPSTREAM_SHA, os.environ['ASTRA_CI_EXPECTED_SHA'])
+          elif mode == 'candidate':
               if os.environ.get('GITHUB_EVENT_NAME') != 'pull_request':
                   raise RuntimeError('Candidate verification requires a pull_request event')
               from verify_pr_candidate import CONTRACT_PATH, verify_pr_candidate

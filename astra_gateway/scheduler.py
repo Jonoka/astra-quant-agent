@@ -15,6 +15,7 @@ from astra_backend.time_utils import parse_beijing
 from astra_backend.schedule_store import load_schedule
 from astra_backend.backup_store import list_jobs as list_backup_jobs
 from astra_gateway.store import GatewayStore
+from astra_gateway.collection_timeout import collection_timeout_summary
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "scripts"
@@ -204,8 +205,15 @@ class GatewayScheduler:
             detail = (result.stderr if result.returncode else result.stdout)[-2000:]
             self.store.finish_job(run_id, result.returncode, detail,
                                   brain_result=read_brain_result() if spec.name == "trader" else None)
-        except subprocess.TimeoutExpired:
-            self.store.finish_job(run_id, 124, f"timeout after {timeout:g}s; execution_budget_exhausted",
+        except subprocess.TimeoutExpired as exc:
+            detail = f"timeout after {timeout:g}s; execution_budget_exhausted"
+            try:
+                summary = collection_timeout_summary(exc.stdout, exc.stderr, run_id, scheduled_at)
+                if summary:
+                    detail += "; collection=" + summary
+            except Exception:
+                pass  # A diagnostic failure must preserve the timeout outcome.
+            self.store.finish_job(run_id, 124, detail,
                                   brain_result=read_brain_result() if spec.name == "trader" else None)
         except Exception as exc:
             self.store.finish_job(run_id, 1, f"{type(exc).__name__}: {exc}",

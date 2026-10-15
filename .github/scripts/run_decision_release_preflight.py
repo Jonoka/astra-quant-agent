@@ -36,7 +36,7 @@ CURRENT_HELPER_SUITES = {name: minimum for name, minimum in SUITES.items()
 # not silently lose them.
 CURRENT_HELPER_SUITES['test_runtime_release_upgrade.py'] = 69
 DECISION_RELEASE_SUITES = {
-    'test_decision_release_source.py': 84,
+    'test_decision_release_source.py': 93,
     'test_decision_regression_gate.py': 13,
 }
 HISTORICAL_CANDIDATE_SUITES = {'test_pr_candidate_contract.py': 46}

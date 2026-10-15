@@ -5,6 +5,7 @@ unmocked source guard on the exact committed release checkout.
 """
 from __future__ import annotations
 
+import ast
 import copy
 import hashlib
 import io
@@ -22,6 +23,16 @@ from unittest.mock import patch
 import verify_decision_release_source as guard
 
 ROOT = Path(__file__).resolve().parents[2]
+PRE_FACTOR_RELEASE = '26673ca6668b1df3f5e074e7f760cc593ae1a192'
+FACTOR_COLLECTION_RELEASE_PATHS = frozenset({
+    '.github/scripts/run_collection_regressions.py',
+    '.github/scripts/test_collection_regression_gate.py',
+    'astra_gateway/scheduler.py',
+    'astra_gateway/collection_timeout.py',
+    'scripts/market_data_service.py',
+    'tests/ops/test_scheduler_timeout_diagnostics.py',
+    'tests/venues/test_indicator_failure_dedup.py',
+})
 
 
 def object_id(raw):
@@ -185,7 +196,7 @@ class DecisionSourceContractTests(unittest.TestCase):
             with self.subTest(relative=relative), self.assertRaisesRegex(RuntimeError, 'anchor delta paths'):
                 self.verify(delta=((guard.BASELINE, guard.REVIEWED_COMMIT), guard.REVIEWED_PATHS - {relative}))
 
-    def test_each_of_the_nine_release_paths_is_required(self):
+    def test_each_of_the_16_release_paths_is_required(self):
         for relative in guard.RELEASE_INCREMENT_PATHS:
             with self.subTest(relative=relative), self.assertRaisesRegex(RuntimeError, 'release increment paths'):
                 self.verify(delta=((guard.REVIEWED_COMMIT, self.revision), guard.RELEASE_INCREMENT_PATHS - {relative}))
@@ -314,19 +325,21 @@ class DecisionSourceContractTests(unittest.TestCase):
             self.reject_contract(changed, 'contract fields')
         self.assertNotIn('ordinary_pull_request_only', self.contract)
         self.assertEqual(len(guard.REVIEWED_PATHS), 26)
-        self.assertEqual(len(guard.RELEASE_INCREMENT_PATHS), 9)
+        self.assertEqual(len(guard.RELEASE_INCREMENT_PATHS), 16)
 
     def test_wal_increment_is_exactly_three_fixed_tool_paths_with_both_hashes(self):
         prior = '16e12871e51e7cfb13823a370dcbf9bdec9f0804'
         old = json.loads(guard.git(ROOT, 'show', prior + ':' + guard.CONTRACT_PATH))
+        before_factor = json.loads(guard.git(ROOT, 'show', PRE_FACTOR_RELEASE + ':' + guard.CONTRACT_PATH))
         added = {'.github/scripts/runtime_release_upgrade.py',
                  '.github/scripts/test_runtime_release_upgrade.py',
                  '.github/scripts/test_deployment_plan.py'}
-        self.assertEqual(set(self.contract['release_paths']) - set(old['release_paths']), added)
+        self.assertEqual(set(before_factor['release_paths']) - set(old['release_paths']), added)
         self.assertEqual(self.contract['reviewed_paths'], old['reviewed_paths'])
         self.assertEqual(self.contract['self_hash_exemptions'], old['self_hash_exemptions'])
         for relative in added:
             pin = self.contract['release_paths'][relative]
+            self.assertEqual(pin, before_factor['release_paths'][relative])
             before = guard.git(ROOT, 'show', prior + ':' + relative)
             self.assertEqual(before, self.reviewed[relative])
             self.assertEqual(pin['reviewed_sha256'], hashlib.sha256(before).hexdigest())
@@ -343,6 +356,101 @@ class DecisionSourceContractTests(unittest.TestCase):
                     self.verify(mutation=(revision, relative))
                 with self.subTest(relative=relative, revision=revision, mode=True), self.assertRaises(RuntimeError):
                     self.verify(mode=(revision, relative, '100755', 'blob'))
+
+    def test_factor_increment_is_exactly_seven_paths_with_existing_release_pins_preserved(self):
+        old = json.loads(guard.git(ROOT, 'show', PRE_FACTOR_RELEASE + ':' + guard.CONTRACT_PATH))
+        self.assertEqual(set(self.contract['release_paths']) - set(old['release_paths']),
+                         FACTOR_COLLECTION_RELEASE_PATHS)
+        self.assertEqual(guard.RELEASE_INCREMENT_PATHS,
+                         set(old['release_paths']) | guard.SELF_HASH_EXEMPTIONS | FACTOR_COLLECTION_RELEASE_PATHS)
+        for field in ('schema', 'upstream', 'baseline', 'baseline_tree', 'reviewed_commit',
+                      'reviewed_tree', 'reviewed_paths', 'self_hash_exemptions'):
+            self.assertEqual(self.contract[field], old[field])
+        updated = {'.github/scripts/test_decision_release_source.py',
+                   '.github/scripts/run_decision_release_preflight.py'}
+        for relative, pin in old['release_paths'].items():
+            with self.subTest(relative=relative):
+                if relative in updated:
+                    self.assertEqual(self.contract['release_paths'][relative]['reviewed_sha256'],
+                                     pin['reviewed_sha256'])
+                    self.assertEqual(self.contract['release_paths'][relative]['mode'], pin['mode'])
+                else:
+                    self.assertEqual(self.contract['release_paths'][relative], pin)
+
+    def test_factor_pins_bind_exact_original_predecessors_and_current_bytes(self):
+        new = {'astra_gateway/collection_timeout.py',
+               'tests/ops/test_scheduler_timeout_diagnostics.py',
+               'tests/venues/test_indicator_failure_dedup.py'}
+        for relative in FACTOR_COLLECTION_RELEASE_PATHS:
+            with self.subTest(relative=relative):
+                pin = self.contract['release_paths'][relative]
+                if relative in new:
+                    self.assertIsNone(pin['reviewed_sha256'])
+                    self.assertNotIn(relative, self.reviewed)
+                else:
+                    self.assertEqual(pin['reviewed_sha256'], hashlib.sha256(self.reviewed[relative]).hexdigest())
+                self.assertEqual(pin['sha256'], hashlib.sha256(self.current[relative]).hexdigest())
+                self.assertEqual(pin['mode'], '100644')
+                self.assertNotIn(relative, guard.SELF_HASH_EXEMPTIONS)
+
+    def test_each_factor_manifest_path_is_mandatory(self):
+        for relative in FACTOR_COLLECTION_RELEASE_PATHS:
+            changed = copy.deepcopy(self.contract)
+            del changed['release_paths'][relative]
+            with self.subTest(relative=relative):
+                self.reject_contract(changed, 'release_paths')
+
+    def test_each_factor_pin_requires_all_exact_fields_and_valid_hashes(self):
+        for relative in FACTOR_COLLECTION_RELEASE_PATHS:
+            for field in ('reviewed_sha256', 'sha256', 'mode'):
+                changed = copy.deepcopy(self.contract)
+                del changed['release_paths'][relative][field]
+                with self.subTest(relative=relative, missing=field):
+                    self.reject_contract(changed, 'pin fields')
+            for field, value in (('sha256', None), ('sha256', 'B' * 64),
+                                 ('reviewed_sha256', 'invalid'), ('mode', '100755'), ('unknown', True)):
+                changed = copy.deepcopy(self.contract)
+                changed['release_paths'][relative][field] = value
+                with self.subTest(relative=relative, field=field):
+                    self.reject_contract(changed)
+
+    def test_each_factor_predecessor_pin_cannot_be_replaced_by_a_valid_hash(self):
+        for relative in FACTOR_COLLECTION_RELEASE_PATHS:
+            changed = copy.deepcopy(self.contract)
+            changed['release_paths'][relative]['reviewed_sha256'] = 'c' * 64
+            with self.subTest(relative=relative), \
+                    patch.object(guard, 'decision_release_contract', return_value=changed), \
+                    self.assertRaisesRegex(RuntimeError, 'bytes|required path missing'):
+                self.verify()
+
+    def test_each_factor_current_pin_cannot_be_replaced_by_a_valid_hash(self):
+        for relative in FACTOR_COLLECTION_RELEASE_PATHS:
+            changed = copy.deepcopy(self.contract)
+            changed['release_paths'][relative]['sha256'] = 'c' * 64
+            with self.subTest(relative=relative), \
+                    patch.object(guard, 'decision_release_contract', return_value=changed), \
+                    self.assertRaisesRegex(RuntimeError, 'Unreviewed decision release bytes'):
+                self.verify()
+
+    def test_each_factor_path_must_exist_in_release_delta_and_committed_tree(self):
+        for relative in FACTOR_COLLECTION_RELEASE_PATHS:
+            with self.subTest(relative=relative, absent='delta'), \
+                    self.assertRaisesRegex(RuntimeError, 'release increment paths'):
+                self.verify(delta=((guard.REVIEWED_COMMIT, self.revision),
+                                   guard.RELEASE_INCREMENT_PATHS - {relative}))
+            with self.subTest(relative=relative, absent='tree'), \
+                    self.assertRaisesRegex(RuntimeError, 'required path missing'):
+                self.verify(missing=(self.revision, relative))
+
+    def test_each_factor_path_rejects_changed_current_bytes_and_nonregular_modes(self):
+        for relative in FACTOR_COLLECTION_RELEASE_PATHS:
+            with self.subTest(relative=relative, changed='bytes'), \
+                    self.assertRaisesRegex(RuntimeError, 'Unreviewed decision release bytes'):
+                self.verify(mutation=(self.revision, relative), working_mutation=relative)
+            for mode, kind in (('100755', 'blob'), ('120000', 'blob'), ('160000', 'commit')):
+                with self.subTest(relative=relative, mode=mode), \
+                        self.assertRaisesRegex(RuntimeError, 'Git mode or type'):
+                    self.verify(mode=(self.revision, relative, mode, kind))
 
     def test_manifest_duplicate_fields_are_rejected(self):
         with patch.object(Path, 'read_bytes', return_value=b'{"schema":1,"schema":1}'), \
@@ -687,6 +795,28 @@ class DecisionPreflightBoundaryTests(unittest.TestCase):
                           ('run_decision_contract_regressions.py', [])])
         self.assertTrue(all(options['cwd'] == ROOT for _, options in calls[-5:]))
 
+    def test_factor_collection_gate_preserves_all_original_minimums_and_requires_both_new_suites(self):
+        import run_collection_regressions as collection
+        import run_decision_release_preflight as preflight
+        raw = guard.git(ROOT, 'show', PRE_FACTOR_RELEASE + ':.github/scripts/run_collection_regressions.py')
+        assignment = next(node for node in ast.parse(raw).body if isinstance(node, ast.Assign)
+                          and any(isinstance(target, ast.Name) and target.id == 'COLLECTION_SUITES'
+                                  for target in node.targets))
+        original = ast.literal_eval(assignment.value)
+        added = {'tests.ops.test_scheduler_timeout_diagnostics': 25,
+                 'tests.venues.test_indicator_failure_dedup': 25}
+        self.assertEqual(len(original), 30)
+        self.assertEqual(sum(original.values()), 1036)
+        self.assertEqual(collection.COLLECTION_SUITES, dict(original, **added))
+        self.assertEqual(sum(collection.COLLECTION_SUITES.values()), 1086)
+        self.assertEqual(preflight.CURRENT_HELPER_SUITES['test_collection_regression_gate.py'], 10)
+        self.assertEqual(preflight.DECISION_RELEASE_SUITES['test_decision_release_source.py'], 93)
+        calls, _, _, _ = self.invoke()
+        gate = next((command, options) for command, options in calls
+                    if command[-1].endswith('/run_collection_regressions.py'))
+        self.assertEqual(gate[1]['cwd'], ROOT)
+        self.assertTrue(gate[1]['check'])
+
     def test_current_helpers_receive_original_compatibility_archive_pins(self):
         import run_decision_release_preflight as preflight
         calls, _, extract, _ = self.invoke()
@@ -883,7 +1013,8 @@ class DecisionPreflightBoundaryTests(unittest.TestCase):
 
     def test_candidate_helper_and_product_failures_are_never_ignored(self):
         for filename in ('verify_pr_candidate.py', 'test_pr_candidate_contract.py', 'test_runtime_release_upgrade.py',
-                         'test_decision_release_source.py', 'run_decision_contract_regressions.py'):
+                         'test_decision_release_source.py', 'test_collection_regression_gate.py',
+                         'run_collection_regressions.py', 'run_decision_contract_regressions.py'):
             with self.subTest(filename=filename), self.assertRaises(subprocess.CalledProcessError):
                 self.invoke(fail=lambda command: any(str(value).endswith(filename) for value in command))
 

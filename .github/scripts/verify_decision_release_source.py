@@ -34,8 +34,15 @@ RELEASE_INCREMENT_PATHS = frozenset({
     '.github/scripts/runtime_release_upgrade.py',
     '.github/scripts/test_runtime_release_upgrade.py',
     '.github/scripts/test_deployment_plan.py',
+    '.github/scripts/run_collection_regressions.py',
+    '.github/scripts/test_collection_regression_gate.py',
     '.github/workflows/test-taker-parsing.yml',
     '.github/workflows/build-release-image.yml',
+    'astra_gateway/scheduler.py',
+    'astra_gateway/collection_timeout.py',
+    'scripts/market_data_service.py',
+    'tests/ops/test_scheduler_timeout_diagnostics.py',
+    'tests/venues/test_indicator_failure_dedup.py',
 })
 # Fixed reviewed scope, not an allowlist derived from the current PR manifest.
 REVIEWED_PATHS = frozenset({

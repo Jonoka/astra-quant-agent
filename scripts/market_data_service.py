@@ -67,6 +67,18 @@ class MarketDataResponseError(RuntimeError):
     两个口径会对不上，运维一眼看到两个不同的数就会失去信任）。
     """
 
+
+class _PublicRequestOutcome:
+    """One logical call's evidence, never a host cache or shared circuit breaker.
+
+    Only exhaustive endpoint failures may skip equivalent indicator requests.
+    Missing, malformed, or application-error data does not establish that.
+    """
+
+    def __init__(self):
+        self.endpoint_exhausted = False
+
+
 DEFAULT_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
     "Accept": "application/json",
@@ -155,18 +167,25 @@ def _retry_delay(response, attempt: int) -> float:
 
 
 def _public_request(method: str, path: str, *, params=None, payload=None,
-                    timeout: float) -> Optional[Dict[str, Any]]:
+                    timeout: float,
+                    _outcome: Optional[_PublicRequestOutcome] = None) -> Optional[Dict[str, Any]]:
+    if _outcome is not None:
+        _outcome.endpoint_exhausted = False
     validate_public_path(path)
     check_deadline()
     session = get_market_session()
     kind = _call_kind(method.lower(), path)
     bounded = current_deadline() is not None
+    endpoint_failures_only = True
+    exhausted_hosts = set()
     for base in OKX_PUBLIC_HOSTS:
         for attempt in range(3 if bounded else 1):
             check_deadline()
             started = time.monotonic()
             retry_response = None
             retry = False
+            endpoint_failure = False
+            received_response = False
             try:
                 with endpoint_timing(method, path, base) as trace:
                     limit = min(timeout, check_deadline())
@@ -182,6 +201,7 @@ def _public_request(method: str, path: str, *, params=None, payload=None,
                         resp = session.post(f"{base}{path}", json=payload,
                                             headers={"Content-Type": "application/json"},
                                             **options)
+                    received_response = True
                     check_deadline()
                     if resp.status_code == 200:
                         data = resp.json()
@@ -197,6 +217,9 @@ def _public_request(method: str, path: str, *, params=None, payload=None,
                                   else "code_error")
                     else:
                         trace["result"] = f"http_{resp.status_code}"
+                        # Explicit allowlist: content/compatibility errors such
+                        # as 400/422 (and unknown statuses) still try singles.
+                        endpoint_failure = resp.status_code in {403, 429, 500, 502, 503, 504}
                         retry = bounded and resp.status_code in {429, 500, 502, 503, 504}
                         retry_response = resp
                         reason = f"http={resp.status_code}"
@@ -212,12 +235,18 @@ def _public_request(method: str, path: str, *, params=None, payload=None,
                 check_deadline()
                 note_call(kind, time.monotonic() - started, ok=False)
                 note_failure(kind, RuntimeError(type(exc).__name__))
+                endpoint_failure = not received_response and isinstance(
+                    exc, (requests.exceptions.ConnectionError, requests.exceptions.Timeout))
                 retry = bounded and isinstance(
                     exc, (requests.exceptions.ConnectionError, requests.exceptions.Timeout))
+            endpoint_failures_only = endpoint_failures_only and endpoint_failure
             if not retry or attempt == 2:
                 break
             sleep_with_deadline(_retry_delay(retry_response, attempt))
+        exhausted_hosts.add(base)
     check_deadline()
+    if _outcome is not None:
+        _outcome.endpoint_exhausted = endpoint_failures_only and len(exhausted_hosts) >= 2
     return None
 
 
@@ -228,8 +257,12 @@ def _public_get(path: str, params: Optional[Dict[str, Any]] = None,
 
 
 def _public_post(path: str, payload: Dict[str, Any],
-                 timeout: float = 4.0) -> Optional[Dict[str, Any]]:
+                 timeout: float = 4.0, *,
+                 _outcome: Optional[_PublicRequestOutcome] = None) -> Optional[Dict[str, Any]]:
     """Try primary then fallback OKX public POST endpoints within one budget."""
+    if _outcome is not None:
+        return _public_request("POST", path, payload=payload, timeout=timeout,
+                               _outcome=_outcome)
     return _public_request("POST", path, payload=payload, timeout=timeout)
 
 
@@ -390,8 +423,19 @@ def fetch_indicators_batch(
         "indicators": ind_configs,
     }
     
-    data = _public_post("/api/v5/aigc/mcp/indicators", payload, timeout=timeout)
+    outcome = _PublicRequestOutcome()
+    data = _public_post("/api/v5/aigc/mcp/indicators", payload, timeout=timeout,
+                        _outcome=outcome)
     check_deadline()
+    if outcome.endpoint_exhausted and indicators:
+        # Both hosts already exhausted this call's retry policy. Compute the
+        # whole set from one candle snapshot instead of repeating those same
+        # endpoint failures and fetching identical candles per indicator.
+        # A host could recover immediately afterward; the next logical call
+        # probes normally. No failure state survives this invocation.
+        local = _local_math_indicators(inst_id, indicators, bar)
+        check_deadline()
+        return local
     result: Dict[str, Dict[str, Any]] = {}
     
     if data and data.get("data"):

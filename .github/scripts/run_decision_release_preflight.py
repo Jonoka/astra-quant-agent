@@ -31,9 +31,10 @@ from verify_decision_release_source import (
 CURRENT_HELPER_SUITES = {name: minimum for name, minimum in SUITES.items()
                          if name != 'test_verify_deployment_source.py'}
 # The historical minimum remains 39 on its original source. This release adds
-# 17 real-WAL/rollback cases, all mandatory on the same candidate as the 68
-# unchanged ownership/recovery cases; discovery must not silently lose them.
-CURRENT_HELPER_SUITES['test_runtime_release_upgrade.py'] = 56
+# 17 real-WAL/rollback and 13 capacity/diagnostic cases, all mandatory on the
+# same candidate as the 68 unchanged ownership/recovery cases; discovery must
+# not silently lose them.
+CURRENT_HELPER_SUITES['test_runtime_release_upgrade.py'] = 69
 DECISION_RELEASE_SUITES = {
     'test_decision_release_source.py': 84,
     'test_decision_regression_gate.py': 13,

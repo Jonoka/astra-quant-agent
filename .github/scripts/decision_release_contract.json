@@ -140,17 +140,17 @@
   "release_paths": {
     ".github/scripts/run_decision_release_preflight.py": {
       "reviewed_sha256": null,
-      "sha256": "3d91e38bb2bed3bee7dc47d1431c0ba8eeb21540ded5a328188798d10f773152",
+      "sha256": "5603179553398b7a9cbb1feff0132c08fd056188c692911d893ba50338598e98",
       "mode": "100644"
     },
     ".github/scripts/runtime_release_upgrade.py": {
       "reviewed_sha256": "6f396c9104081691d3ff4d74a481633a025493ba02bc307dd304acb5b0075291",
-      "sha256": "d271e815beb022185c629009fa0f1b57f6913de46fcb5090ce1e53f2789c0bb9",
+      "sha256": "57d9713fe1f5b44fc81bd052c8d1d720b13e1889bf51506d20600f2f8b356451",
       "mode": "100644"
     },
     ".github/scripts/test_decision_release_source.py": {
       "reviewed_sha256": null,
-      "sha256": "35a6165cf94d8556fc1920e7a498fc60eb6d6e1b35eff306a69a8433badc7e35",
+      "sha256": "7587c4d48ff68c8ea76fb0ee8ba11810c4266f1f7d6b335ec4c98d58b67f6324",
       "mode": "100644"
     },
     ".github/scripts/test_deployment_plan.py": {
@@ -160,7 +160,7 @@
     },
     ".github/scripts/test_runtime_release_upgrade.py": {
       "reviewed_sha256": "4e9d50b2c7d0e93909beb20151f3838d7de825e5c9e274e3be42743866b0b268",
-      "sha256": "fad19fab6b0cd8c1e5c5fde4ad774a8151d215e40be4441a61b9fa87840cb30e",
+      "sha256": "27f635dee70f1ebe479319ce3a0adb9d241b048c000fc2f62c81f9a997bfe89a",
       "mode": "100644"
     },
     ".github/workflows/build-release-image.yml": {

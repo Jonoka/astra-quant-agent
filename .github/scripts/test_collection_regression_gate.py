@@ -13,14 +13,43 @@ from run_taker_regressions import require_complete_result
 
 
 class CollectionRegressionGateTests(unittest.TestCase):
-    def test_all_30_affected_modules_and_four_new_suites_are_explicit(self):
-        self.assertEqual(len(COLLECTION_SUITES), 30)
-        self.assertEqual(sum(COLLECTION_SUITES.values()), 1036)
-        for name, count in {'tests.core.test_collection_deadline': 43,
-                            'tests.core.test_collection_regression': 6,
-                            'tests.venues.test_collection_http_deadline': 48,
-                            'tests.ops.test_gateway_brain_outcome': 24}.items():
-            self.assertEqual(COLLECTION_SUITES[name], count)
+    def test_all_32_modules_preserve_original_minimums_and_add_both_25_case_suites(self):
+        self.assertEqual(COLLECTION_SUITES, {
+            'tests.core.test_collection_deadline': 43,
+            'tests.core.test_collection_regression': 6,
+            'tests.core.test_module_tails': 57,
+            'tests.core.test_router_system': 56,
+            'tests.extraction.test_brain_package_extraction': 14,
+            'tests.extraction.test_brain_snapshots_extraction': 5,
+            'tests.extraction.test_dashboard_integrity_sidecars_extraction': 33,
+            'tests.extraction.test_factors_smart_money_extraction': 4,
+            'tests.llm.test_alpha_transport_contract': 12,
+            'tests.ops.test_ai_brain_trader': 43,
+            'tests.ops.test_brain_deadline': 20,
+            'tests.ops.test_brain_packages': 47,
+            'tests.ops.test_factor_library': 73,
+            'tests.ops.test_factors_smart_money': 27,
+            'tests.ops.test_gateway': 59,
+            'tests.ops.test_gateway_agents': 29,
+            'tests.ops.test_gateway_brain_outcome': 24,
+            'tests.ops.test_gateway_scheduler': 67,
+            'tests.ops.test_scheduler_timeout_diagnostics': 25,
+            'tests.trading.test_okx_quant_factors': 62,
+            'tests.ui.test_dashboard_health_tails': 9,
+            'tests.venues.test_collection_http_deadline': 48,
+            'tests.venues.test_indicator_failure_dedup': 25,
+            'tests.venues.test_market_data_health': 21,
+            'tests.venues.test_market_data_health_tails': 34,
+            'tests.venues.test_market_data_service': 21,
+            'tests.venues.test_market_data_service_tails': 51,
+            'tests.venues.test_okx_public_data': 25,
+            'tests.venues.test_okx_public_domains': 5,
+            'tests.venues.test_okx_rest': 30,
+            'tests.venues.test_okx_rest_tails': 102,
+            'tests.venues.test_okx_v5_official_contract': 9,
+        })
+        self.assertEqual(len(COLLECTION_SUITES), 32)
+        self.assertEqual(sum(COLLECTION_SUITES.values()), 1086)
 
     def test_retained_deadline_and_council_completion_are_explicit(self):
         import verify_deployment_source as source
@@ -35,10 +64,15 @@ class CollectionRegressionGateTests(unittest.TestCase):
             load_required_suites({})
 
     def test_per_module_partial_discovery_is_rejected(self):
-        loader = Mock(errors=[])
-        loader.loadTestsFromName.return_value.countTestCases.return_value = 42
-        with self.assertRaisesRegex(RuntimeError, 'requires 43'):
-            load_required_suites({'module': 43}, loader)
+        for name, minimum in (
+            ('module', 43),
+            ('tests.ops.test_scheduler_timeout_diagnostics', 25),
+            ('tests.venues.test_indicator_failure_dedup', 25),
+        ):
+            loader = Mock(errors=[])
+            loader.loadTestsFromName.return_value.countTestCases.return_value = minimum - 1
+            with self.subTest(module=name), self.assertRaisesRegex(RuntimeError, f'requires {minimum}'):
+                load_required_suites({name: minimum}, loader)
 
     def test_discovery_errors_are_rejected_even_above_minimum(self):
         loader = Mock(errors=['failed import'])

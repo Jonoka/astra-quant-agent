@@ -138,9 +138,14 @@
     }
   },
   "release_paths": {
+    ".github/scripts/run_collection_regressions.py": {
+      "reviewed_sha256": "410ae3a8b96017b14d4a5427d63be6e66b5b37cd537f82119f5aad909a6fc21e",
+      "sha256": "1bd7d1508eb610c75809bcad64d929b56262fffd800bc24eeaff7d568c5b06e0",
+      "mode": "100644"
+    },
     ".github/scripts/run_decision_release_preflight.py": {
       "reviewed_sha256": null,
-      "sha256": "5603179553398b7a9cbb1feff0132c08fd056188c692911d893ba50338598e98",
+      "sha256": "00fa6daa06974bd9bfe44940bc8bd36d0bdf81a926729e5077c40514abf27866",
       "mode": "100644"
     },
     ".github/scripts/runtime_release_upgrade.py": {
@@ -148,9 +153,14 @@
       "sha256": "57d9713fe1f5b44fc81bd052c8d1d720b13e1889bf51506d20600f2f8b356451",
       "mode": "100644"
     },
+    ".github/scripts/test_collection_regression_gate.py": {
+      "reviewed_sha256": "b18ff2eb4dbcb1414dbe1fbf5a34467164c2a731487334ecf244f0c62a495afc",
+      "sha256": "6daceb2257a9509e1975ff14820a888d94f985f593d8cbb3a457a94fb5a3eb6c",
+      "mode": "100644"
+    },
     ".github/scripts/test_decision_release_source.py": {
       "reviewed_sha256": null,
-      "sha256": "7587c4d48ff68c8ea76fb0ee8ba11810c4266f1f7d6b335ec4c98d58b67f6324",
+      "sha256": "6300f61c8319821679792d7303e1e39acbef8e4e5727acab9b5e64176e74c1a8",
       "mode": "100644"
     },
     ".github/scripts/test_deployment_plan.py": {
@@ -171,6 +181,31 @@
     ".github/workflows/test-taker-parsing.yml": {
       "reviewed_sha256": "c71f6c7d0a5730d622d2c74168c0c89a2a0b5ef6ef4c3044438fcd7368d2e24b",
       "sha256": "9fa4996696ee2561be2b3a3c0cba01d449352d21c830727508b789b82a639d21",
+      "mode": "100644"
+    },
+    "astra_gateway/collection_timeout.py": {
+      "reviewed_sha256": null,
+      "sha256": "7f4bb4be9f877845de42247ad1b952bc396bf9a48a7e040a3add519775970a35",
+      "mode": "100644"
+    },
+    "astra_gateway/scheduler.py": {
+      "reviewed_sha256": "09aabcf67ff17222de2c7dba265efb66a0bd6977271a6fe0370b9660d3d0dc90",
+      "sha256": "ce7c298dd8f03ef4ec2c0407399829752141da517cd1ec1b8ca83f2cd7b77d8b",
+      "mode": "100644"
+    },
+    "scripts/market_data_service.py": {
+      "reviewed_sha256": "965c9305157b280089a5e2fe80a6378de247c3197adf25dacb94c843d87bef31",
+      "sha256": "1f0cc3e818b4720c612f2815dc18a3a63f2807f1ac217b09185ca1422cf231bf",
+      "mode": "100644"
+    },
+    "tests/ops/test_scheduler_timeout_diagnostics.py": {
+      "reviewed_sha256": null,
+      "sha256": "e8f88f8626a9e30cdd0a5254f2601eb5491507725f83dd4867ae1acac94ed12d",
+      "mode": "100644"
+    },
+    "tests/venues/test_indicator_failure_dedup.py": {
+      "reviewed_sha256": null,
+      "sha256": "bf8630c91db6f0f42b87645d196ee974109664e0abb2d2c4c5df8afbc5b85b08",
       "mode": "100644"
     }
   },

@@ -1,6 +1,7 @@
 """Synthetic safety gates; execute on GitHub Actions, never the VPS."""
 import copy
-from contextlib import closing, contextmanager
+import errno
+from contextlib import closing, contextmanager, nullcontext, redirect_stderr, redirect_stdout
 import importlib.util
 import itertools
 import os
@@ -25,6 +26,57 @@ LEGACY_REFERENCE_SHA = '90f9f3a558bdbea0171b19a42c58e2fae7ed8e9d'
 LEGACY_REFERENCE_IMAGE = 'ghcr.io/jonoka/astra-quant-agent@sha256:8b471e834dbfe633d720dc5d0ad0c4249e922dce91689719c46ca0fb6575b43b'
 
 
+class MetadataEntry:
+    """Preserve DirEntry's interface while observing its real metadata reads."""
+    def __init__(self, entry, before_stat):
+        self.entry = entry
+        self.before_stat = before_stat
+
+    def __getattr__(self, name):
+        return getattr(self.entry, name)
+
+    def __fspath__(self):
+        return os.fspath(self.entry)
+
+    def stat(self, *, follow_symlinks=True):
+        self.before_stat(self.entry, follow_symlinks)
+        return self.entry.stat(follow_symlinks=follow_symlinks)
+
+
+class ScandirSnapshot:
+    """A real directory listing with deterministic list-to-stat race injection."""
+    def __init__(self, iterator, before_entry, before_stat):
+        self.iterator = iterator
+        self.entries = iter(sorted(iterator, key=lambda entry: entry.name))
+        self.before_entry = before_entry
+        self.before_stat = before_stat
+        self.closed = False
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_exc):
+        self.close()
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        if self.closed:
+            raise StopIteration
+        try:
+            entry = next(self.entries)
+        except StopIteration:
+            self.close()
+            raise
+        self.before_entry(entry)
+        return MetadataEntry(entry, self.before_stat)
+
+    def close(self):
+        self.iterator.close()
+        self.closed = True
+
+
 class RuntimeUpgradeTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -45,6 +97,64 @@ class RuntimeUpgradeTests(unittest.TestCase):
         obj.remember_started_containers = Mock()
         return obj
 
+    @contextmanager
+    def metadata_scans(self, *, before_open=None, before_entry=None, before_stat=None):
+        """Only wrap scandir; every listed name and stat otherwise comes from disk."""
+        scandir = os.scandir
+        observed = {'opened': [], 'stats': [], 'iterators': []}
+        def stat_entry(entry, follow_symlinks):
+            observed['stats'].append((Path(entry.path), follow_symlinks))
+            if before_stat is not None:
+                before_stat(entry, follow_symlinks)
+        def scan(path):
+            path = Path(path)
+            observed['opened'].append(path)
+            if before_open is not None:
+                before_open(path)
+            iterator = ScandirSnapshot(scandir(path), before_entry or (lambda entry: None), stat_entry)
+            observed['iterators'].append(iterator)
+            return iterator
+        with patch.object(upgrade.os, 'scandir', scan):
+            yield observed
+        self.assertTrue(all(iterator.closed for iterator in observed['iterators']))
+
+    def cli(self, mode, operation):
+        """Run real argument parsing/dispatch, isolating host-only admission."""
+        stdout, stderr = io.StringIO(), io.StringIO()
+        arguments = ['runtime_release_upgrade.py', mode, str(operation),
+                     '--deployment-plan-sha256', 'a' * 64]
+        with patch.object(sys, 'argv', arguments), \
+                patch.object(upgrade, 'BACKUPS', self.root), \
+                patch.object(upgrade.os, 'umask'), \
+                patch.object(upgrade.os, 'geteuid', return_value=0), \
+                patch.object(upgrade, 'operation_path', side_effect=lambda path: path), \
+                patch.object(upgrade, 'upgrade_lock', return_value=nullcontext()), \
+                patch.object(upgrade.signal, 'signal'), \
+                redirect_stdout(stdout), redirect_stderr(stderr):
+            result = upgrade.main()
+        return result, stdout.getvalue(), stderr.getvalue()
+
+    def diagnostic(self, result, stdout, stderr, kind):
+        self.assertEqual(result, 1)
+        self.assertEqual(stderr, '')
+        lines = stdout.splitlines()
+        self.assertEqual(len(lines), 2)
+        self.assertEqual(lines[0], 'FAIL: runtime_failure')
+        self.assertTrue(lines[1].startswith('DIAGNOSTIC: '))
+        report = upgrade.json.loads(lines[1].removeprefix('DIAGNOSTIC: '))
+        self.assertEqual(set(report), {'type', 'frames'})
+        self.assertEqual(report['type'], kind)
+        self.assertTrue(report['frames'])
+        for frame in report['frames']:
+            self.assertEqual(set(frame), {'function', 'line'})
+            self.assertIsInstance(frame['function'], str)
+            self.assertIs(type(frame['line']), int)
+            self.assertGreater(frame['line'], 0)
+        self.assertNotIn(str(self.root), stdout)
+        self.assertNotIn('synthetic-private', stdout)
+        self.assertNotIn('Traceback', stdout)
+        return report
+
     def schema_fixture(self, *, additive=False):
         with sqlite3.connect(':memory:') as db:
             db.executescript("CREATE TABLE job_runs(id INTEGER PRIMARY KEY AUTOINCREMENT, job_name TEXT NOT NULL);"
@@ -63,6 +173,234 @@ class RuntimeUpgradeTests(unittest.TestCase):
         indexes = [list(row) for row in db.execute(
             "SELECT type,name,tbl_name,sql FROM sqlite_master WHERE type IN ('index','trigger','view') ORDER BY type,name")]
         return {upgrade.GATEWAY_DATABASE: {'tables': tables, 'indexes': indexes}}
+
+    def test_capacity_is_metadata_only_and_preserves_strict_free_space_boundary(self):
+        obj = self.operator()
+        runtime = self.root / 'runtime'
+        (runtime / 'data/empty').mkdir(parents=True)
+        (runtime / '.env').write_bytes(b'private-synthetic-config')
+        (runtime / 'data/cache.bin').write_bytes(b'cache-payload')
+        size = len(b'private-synthetic-config') + len(b'cache-payload')
+        boundary = 5 * size + 1024**3
+        with patch.object(upgrade, 'ROOT', runtime), \
+                patch.object(upgrade, 'tree_manifest', side_effect=AssertionError('content manifest used')), \
+                patch.object(upgrade, 'digest', side_effect=AssertionError('content digest used')), \
+                patch.object(Path, 'read_bytes', side_effect=AssertionError('content bytes read')), \
+                patch.object(Path, 'open', side_effect=AssertionError('content file opened')), \
+                self.metadata_scans() as observed:
+            self.assertEqual(upgrade.capacity_bytes(runtime), size)
+            for free in (boundary - 1, boundary, boundary + 1):
+                with self.subTest(free=free), patch('shutil.disk_usage', return_value=Mock(free=free)):
+                    if free <= boundary:
+                        with self.assertRaisesRegex(upgrade.GateError, 'snapshot_recovery_capacity'):
+                            obj.capacity()
+                    else:
+                        obj.capacity()
+        self.assertTrue(observed['stats'])
+        self.assertTrue(all(follow is False for _, follow in observed['stats']))
+
+    def test_capacity_retries_entire_scan_after_real_atomic_cache_replace(self):
+        def fixture(name):
+            root = self.root / name
+            cache = root / 'z-cache'
+            cache.mkdir(parents=True)
+            counted, current, pending = root / 'a-counted', cache / 'a-current', cache / 'z-pending.tmp'
+            counted.write_bytes(b'old')
+            current.write_bytes(b'prior')
+            pending.write_bytes(b'new-cache-payload')
+            return root, counted, current, pending
+        runtime, counted, current, pending = fixture('runtime')
+        replaced = []
+        def replace_after_listing(entry):
+            if Path(entry.path) == pending and not replaced:
+                os.replace(pending, current)
+                counted.write_bytes(b'larger-after-replacement')
+                replaced.append(True)
+        with self.metadata_scans(before_entry=replace_after_listing) as observed:
+            self.assertEqual(upgrade.capacity_bytes(runtime),
+                             len(b'larger-after-replacement') + len(b'new-cache-payload'))
+        self.assertEqual(replaced, [True])
+        self.assertEqual(observed['opened'].count(runtime), 2)
+        self.assertEqual(sum(path == counted for path, _ in observed['stats']), 2)
+        self.assertFalse(pending.exists())
+        # The same fully compatible iterator reproduces the original failure in
+        # the content-manifest path, rather than failing on a mocked interface.
+        runtime, counted, current, pending = fixture('baseline')
+        replaced.clear()
+        with self.metadata_scans(before_entry=replace_after_listing), \
+                self.assertRaises(FileNotFoundError) as caught:
+            upgrade.tree_manifest(runtime)
+        self.assertEqual(Path(caught.exception.filename), pending)
+        self.assertEqual(replaced, [True])
+
+    def test_capacity_persistent_disappearance_fails_after_three_complete_attempts(self):
+        runtime = self.root / 'runtime'
+        cache = runtime / 'z-cache'
+        cache.mkdir(parents=True)
+        counted, current, pending = runtime / 'a-counted', cache / 'a-current', cache / 'z-pending.tmp'
+        counted.write_bytes(b'count-before-failure')
+        current.write_bytes(b'prior')
+        replacements = []
+        def create_pending(path):
+            if path == cache:
+                pending.write_bytes(b'new-cache-payload')
+        def replace_pending(entry):
+            if Path(entry.path) == pending:
+                os.replace(pending, current)
+                replacements.append(True)
+        with self.metadata_scans(before_open=create_pending, before_entry=replace_pending) as observed, \
+                self.assertRaises(FileNotFoundError) as caught:
+            upgrade.capacity_bytes(runtime)
+        self.assertEqual(Path(caught.exception.filename), pending)
+        self.assertEqual(len(replacements), 3)
+        self.assertEqual(observed['opened'].count(runtime), 3)
+        self.assertEqual(sum(path == counted for path, _ in observed['stats']), 3)
+
+    def test_capacity_permission_and_other_io_errors_are_not_retried(self):
+        (self.root / 'a-counted').write_bytes(b'counted')
+        blocked = self.root / 'z-blocked'
+        blocked.write_bytes(b'not-skippable')
+        for kind, number in ((PermissionError, errno.EACCES), (OSError, errno.EIO)):
+            failure = kind(number, 'synthetic-private-error', str(blocked))
+            def fail_stat(entry, follow_symlinks):
+                if Path(entry.path) == blocked:
+                    raise failure
+            with self.subTest(kind=kind.__name__), \
+                    self.metadata_scans(before_stat=fail_stat) as observed, \
+                    self.assertRaises(kind) as caught:
+                upgrade.capacity_bytes(self.root)
+            self.assertIs(caught.exception, failure)
+            self.assertEqual(observed['opened'].count(self.root), 1)
+            self.assertEqual(sum(path == blocked for path, _ in observed['stats']), 1)
+
+    def test_capacity_rejects_missing_root_instead_of_returning_zero(self):
+        missing = self.root / 'missing'
+        with self.assertRaises((upgrade.GateError, FileNotFoundError)):
+            upgrade.capacity_bytes(missing)
+        self.assertFalse(missing.exists())
+
+    def test_capacity_official_link_is_never_followed_or_double_counted(self):
+        (self.root / 'frontend/public').mkdir(parents=True)
+        (self.root / 'docs/images').mkdir(parents=True)
+        (self.root / 'docs/images/asset').write_bytes(b'one-copy-only')
+        link = self.root / 'frontend/public/images'
+        link.symlink_to('../../docs/images', target_is_directory=True)
+        with self.metadata_scans() as observed:
+            self.assertEqual(upgrade.capacity_bytes(self.root), len(b'one-copy-only'))
+            self.assertEqual(upgrade.capacity_bytes(self.root / 'frontend'), 0)
+        self.assertEqual([follow for path, follow in observed['stats'] if path == link], [False, False])
+        self.assertNotIn(link, observed['opened'])
+        self.assertNotIn(link / 'asset', [path for path, _ in observed['stats']])
+
+    def test_capacity_rejects_unknown_or_nonexact_official_symlinks(self):
+        for name, relative, target in (
+                ('unknown', 'alias', 'asset'),
+                ('wrong-target', 'frontend/public/images', '../../docs/./images'),
+                ('wrong-location', 'nested/frontend/public/images', '../../docs/images')):
+            root = self.root / name
+            (root / 'docs/images').mkdir(parents=True)
+            (root / 'asset').write_bytes(b'synthetic')
+            link = root / relative
+            link.parent.mkdir(parents=True, exist_ok=True)
+            link.symlink_to(target)
+            with self.subTest(name=name), self.assertRaisesRegex(upgrade.GateError, 'tree_symlink_not_allowed'):
+                upgrade.capacity_bytes(root)
+
+    def test_capacity_rejects_official_link_escaping_through_docs_alias(self):
+        runtime = self.root / 'runtime'
+        outside = self.root / 'outside'
+        (outside / 'images').mkdir(parents=True)
+        (outside / 'images/asset').write_bytes(b'outside-payload')
+        (runtime / 'frontend/public').mkdir(parents=True)
+        (runtime / 'docs').symlink_to(outside, target_is_directory=True)
+        (runtime / 'frontend/public/images').symlink_to('../../docs/images', target_is_directory=True)
+        with self.assertRaisesRegex(upgrade.GateError, 'tree_symlink_escape'):
+            upgrade.capacity_bytes(runtime / 'frontend')
+
+    def test_capacity_rejects_special_files(self):
+        (self.root / 'a-regular').write_bytes(b'counted')
+        os.mkfifo(self.root / 'z-pipe')
+        with self.assertRaisesRegex(upgrade.GateError, 'tree_special_file'):
+            upgrade.capacity_bytes(self.root)
+
+    def test_tree_manifest_stays_strict_when_listed_file_disappears(self):
+        missing = self.root / 'listed-then-missing'
+        missing.write_bytes(b'must-be-hashed')
+        lstat = Path.lstat
+        removed = []
+        def remove_before_lstat(path, *args, **kwargs):
+            if path == missing and not removed:
+                path.unlink()
+                removed.append(True)
+            return lstat(path, *args, **kwargs)
+        with patch.object(Path, 'lstat', remove_before_lstat), self.assertRaises(FileNotFoundError) as caught:
+            upgrade.tree_manifest(self.root)
+        self.assertEqual(Path(caught.exception.filename), missing)
+        self.assertEqual(removed, [True])
+
+    def test_cli_initialization_unexpected_errors_expose_only_type_and_helper_frames(self):
+        operation = self.root / 'operation'
+        operation.mkdir()
+        plan = operation / 'deployment-plan.json'
+        plan.write_bytes(b'{}')
+        read_bytes = Path.read_bytes
+        for failure in (FileNotFoundError(errno.ENOENT, 'synthetic-private-message', str(plan)),
+                        PermissionError(errno.EACCES, 'synthetic-private-message', str(plan)),
+                        ValueError('synthetic-private-message ' + str(plan))):
+            # Deliberately share a helper function's name. Filtering must use
+            # traceback filenames, rather than just accepting function names.
+            def main(path):
+                synthetic_private_local = 'synthetic-private-local'
+                if path == plan:
+                    raise failure
+                return read_bytes(path)
+            with self.subTest(kind=type(failure).__name__), patch.object(Path, 'read_bytes', main):
+                result = self.cli('preflight', operation)
+            report = self.diagnostic(*result, type(failure).__name__)
+            self.assertEqual([frame['function'] for frame in report['frames']],
+                             ['main', '__init__', 'deployment_plan', 'read_deployment_plan'])
+
+    def test_cli_prestop_capacity_error_preserves_prepared_state_without_recovery(self):
+        obj = self.operator()
+        runtime = self.root / 'runtime'
+        runtime.mkdir()
+        blocked = runtime / 'private-cache'
+        blocked.write_bytes(b'synthetic-cache')
+        obj.state.update(phase='prepared', baseline={}, endpoints={})
+        obj.save('state.json', obj.state)
+        before_state = copy.deepcopy(obj.state)
+        before_bytes = (obj.op / 'state.json').read_bytes()
+        obj.check_drift = Mock()
+        obj.stop = Mock()
+        obj.rollback = Mock()
+        def fail_stat(entry, follow_symlinks):
+            if Path(entry.path) == blocked:
+                raise PermissionError(errno.EACCES, 'synthetic-private-message', str(blocked))
+        with patch.object(upgrade, 'ROOT', runtime), patch.object(upgrade, 'Upgrade', return_value=obj), \
+                self.metadata_scans(before_stat=fail_stat) as observed:
+            result = self.cli('execute', obj.op)
+        report = self.diagnostic(*result, 'PermissionError')
+        names = [frame['function'] for frame in report['frames']]
+        self.assertEqual(names[:3], ['main', 'execute', 'capacity'])
+        self.assertIn('capacity_bytes', names)
+        self.assertNotIn('fail_stat', names)
+        self.assertNotIn('stat_entry', names)
+        self.assertEqual(observed['opened'].count(runtime), 1)
+        self.assertEqual(obj.state, before_state)
+        self.assertEqual((obj.op / 'state.json').read_bytes(), before_bytes)
+        self.assertFalse((obj.op / 'failure.json').exists())
+        obj.check_drift.assert_called_once_with()
+        obj.stop.assert_not_called()
+        obj.rollback.assert_not_called()
+
+    def test_cli_known_gate_error_output_is_unchanged(self):
+        operation = self.root / 'operation'
+        operation.mkdir()
+        with patch.object(upgrade.Upgrade, 'deployment_plan', side_effect=upgrade.GateError('synthetic_known_gate')):
+            result, stdout, stderr = self.cli('preflight', operation)
+        self.assertEqual(result, 1)
+        self.assertEqual(stdout, 'FAIL: synthetic_known_gate\n')
+        self.assertEqual(stderr, '')
 
     def test_only_exact_additive_deadline_schema_is_accepted_and_idempotent(self):
         before, after = self.schema_fixture(), self.schema_fixture(additive=True)

@@ -313,6 +313,63 @@ def tree_manifest(root):
     return result
 
 
+def capacity_bytes(root):
+    """Metadata-only live size estimate, never a backup/integrity manifest.
+
+    Atomic writers can remove an enumerated temporary file before stat. Discard
+    that entire estimate and retry with fresh directory entries, at most three
+    times. Persistent disappearance and every other error still fail closed.
+    Preserve the manifest's special-file/link checks without reading file bytes.
+    This is a current estimate, not a consistent snapshot of a running tree.
+    """
+    plain_path(root)
+
+    def scan(directory):
+        size = 0
+        with os.scandir(directory) as entries:
+            for entry in entries:
+                info = entry.stat(follow_symlinks=False)
+                if stat.S_ISREG(info.st_mode):
+                    size += info.st_size
+                elif stat.S_ISDIR(info.st_mode):
+                    size += scan(entry.path)
+                elif stat.S_ISLNK(info.st_mode):
+                    path = Path(entry.path)
+                    link = os.readlink(path)
+                    relative = path.relative_to(root).as_posix()
+                    require((relative == "frontend/public/images" or
+                             (root.name == "frontend" and relative == "public/images")) and
+                            path.parts[-3:] == ("frontend", "public", "images") and
+                            link == "../../docs/images", "tree_symlink_not_allowed")
+                    source_root = path.parents[2]
+                    plain_path(source_root)
+                    resolved = path.resolve()
+                    require(resolved == source_root / "docs/images" and
+                            source_root in resolved.parents, "tree_symlink_escape")
+                else:
+                    raise GateError("tree_special_file")
+        return size
+
+    for attempt in range(3):
+        try:
+            return scan(root)
+        except FileNotFoundError:
+            if attempt == 2:
+                raise
+
+
+def unexpected_error_details(exc):
+    """Expose only exception type and this helper's code locations, never data."""
+    frames = []
+    trace = exc.__traceback__
+    while trace is not None:
+        code = trace.tb_frame.f_code
+        if code.co_filename == __file__:
+            frames.append({"function": code.co_name, "line": trace.tb_lineno})
+        trace = trace.tb_next
+    return {"type": type(exc).__name__, "frames": frames}
+
+
 def files_manifest(root):
     return {name: value["sha256"] for name, value in tree_manifest(root).items()
             if "sha256" in value}
@@ -1192,7 +1249,7 @@ print(json.dumps({'risk':expected,'pool':[i['name'] for i in items],
     def capacity(self):
         import shutil
         require(ROOT.stat().st_dev == self.op.stat().st_dev, "atomic_rename_filesystem")
-        size = sum(v.get("bytes", 0) for v in tree_manifest(ROOT).values())
+        size = capacity_bytes(ROOT)
         # Full stopped snapshot, staged writable state, recovery tree and recovery
         # displacement copies can coexist; never free space by deleting evidence.
         require(shutil.disk_usage(self.op).free > 5 * size + 1024**3, "snapshot_recovery_capacity")
@@ -1526,6 +1583,8 @@ def main():
         print("PASS: " + args.mode)
     except BaseException as exc:
         print("FAIL: " + (str(exc) if isinstance(exc, GateError) else "runtime_failure"))
+        if not isinstance(exc, GateError):
+            print("DIAGNOSTIC: " + json.dumps(unexpected_error_details(exc), sort_keys=True))
         return 1
     return 0
 

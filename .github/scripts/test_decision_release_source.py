@@ -646,7 +646,7 @@ class DecisionPreflightBoundaryTests(unittest.TestCase):
                    if len(command) > 3 and command[1] == '-c' and options.get('cwd') == ROOT]
         expected = dict(preflight.CURRENT_HELPER_SUITES, **preflight.DECISION_RELEASE_SUITES)
         self.assertEqual({Path(command[3]).name for command, _ in current}, set(expected))
-        self.assertEqual(sum(preflight.CURRENT_HELPER_SUITES.values()), 169)
+        self.assertEqual(sum(preflight.CURRENT_HELPER_SUITES.values()), 182)
         self.assertNotIn('test_verify_deployment_source.py', preflight.CURRENT_HELPER_SUITES)
         self.assertEqual(preflight.DECISION_RELEASE_SUITES['test_decision_regression_gate.py'], 13)
         for command, options in current:
@@ -654,12 +654,12 @@ class DecisionPreflightBoundaryTests(unittest.TestCase):
             self.assertEqual(int(command[4]), expected[Path(command[3]).name])
             self.assertEqual(options['env']['ASTRA_CI_EXPECTED_SHA'], 'b' * 40)
 
-    def test_wal_101_and_root_68_cases_run_on_same_candidate_without_skips(self):
+    def test_helper_114_and_root_68_cases_run_on_same_candidate_without_skips(self):
         import run_decision_release_preflight as preflight
-        self.assertEqual(preflight.CURRENT_HELPER_SUITES['test_runtime_release_upgrade.py'], 56)
+        self.assertEqual(preflight.CURRENT_HELPER_SUITES['test_runtime_release_upgrade.py'], 69)
         self.assertEqual(preflight.SUITES['test_runtime_release_upgrade.py'], 39)
         self.assertEqual(sum(n for k, n in preflight.CURRENT_HELPER_SUITES.items()
-                             if k not in preflight.OWNERSHIP_SUITES), 101)
+                             if k not in preflight.OWNERSHIP_SUITES), 114)
         self.assertEqual({k: preflight.CURRENT_HELPER_SUITES[k] for k in preflight.OWNERSHIP_SUITES},
                          {'test_deployment_plan.py': 29, 'test_deployment_identity.py': 19,
                           'test_recovery_journal.py': 20})

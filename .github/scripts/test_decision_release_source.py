@@ -24,6 +24,13 @@ import verify_decision_release_source as guard
 
 ROOT = Path(__file__).resolve().parents[2]
 PRE_FACTOR_RELEASE = '26673ca6668b1df3f5e074e7f760cc593ae1a192'
+PRE_PROMPT_RELEASE = '1bd3c016bf4375114d34022c1528d119d90cd6ad'
+PROMPT_CONSISTENCY_RELEASE_PATHS = frozenset({
+    '.github/scripts/run_decision_contract_regressions.py',
+    '.github/scripts/test_decision_regression_gate.py',
+    'data/prompt_library.json',
+    'tests/llm/test_prompt_exhaustion_consistency.py',
+})
 FACTOR_COLLECTION_RELEASE_PATHS = frozenset({
     '.github/scripts/run_collection_regressions.py',
     '.github/scripts/test_collection_regression_gate.py',
@@ -196,7 +203,7 @@ class DecisionSourceContractTests(unittest.TestCase):
             with self.subTest(relative=relative), self.assertRaisesRegex(RuntimeError, 'anchor delta paths'):
                 self.verify(delta=((guard.BASELINE, guard.REVIEWED_COMMIT), guard.REVIEWED_PATHS - {relative}))
 
-    def test_each_of_the_16_release_paths_is_required(self):
+    def test_each_of_the_20_release_paths_is_required(self):
         for relative in guard.RELEASE_INCREMENT_PATHS:
             with self.subTest(relative=relative), self.assertRaisesRegex(RuntimeError, 'release increment paths'):
                 self.verify(delta=((guard.REVIEWED_COMMIT, self.revision), guard.RELEASE_INCREMENT_PATHS - {relative}))
@@ -325,7 +332,7 @@ class DecisionSourceContractTests(unittest.TestCase):
             self.reject_contract(changed, 'contract fields')
         self.assertNotIn('ordinary_pull_request_only', self.contract)
         self.assertEqual(len(guard.REVIEWED_PATHS), 26)
-        self.assertEqual(len(guard.RELEASE_INCREMENT_PATHS), 16)
+        self.assertEqual(len(guard.RELEASE_INCREMENT_PATHS), 20)
 
     def test_wal_increment_is_exactly_three_fixed_tool_paths_with_both_hashes(self):
         prior = '16e12871e51e7cfb13823a370dcbf9bdec9f0804'
@@ -359,10 +366,31 @@ class DecisionSourceContractTests(unittest.TestCase):
 
     def test_factor_increment_is_exactly_seven_paths_with_existing_release_pins_preserved(self):
         old = json.loads(guard.git(ROOT, 'show', PRE_FACTOR_RELEASE + ':' + guard.CONTRACT_PATH))
-        self.assertEqual(set(self.contract['release_paths']) - set(old['release_paths']),
+        before_prompt = json.loads(guard.git(ROOT, 'show', PRE_PROMPT_RELEASE + ':' + guard.CONTRACT_PATH))
+        self.assertEqual(set(before_prompt['release_paths']) - set(old['release_paths']),
                          FACTOR_COLLECTION_RELEASE_PATHS)
-        self.assertEqual(guard.RELEASE_INCREMENT_PATHS,
+        self.assertEqual(set(before_prompt['release_paths']) | guard.SELF_HASH_EXEMPTIONS,
                          set(old['release_paths']) | guard.SELF_HASH_EXEMPTIONS | FACTOR_COLLECTION_RELEASE_PATHS)
+        for field in ('schema', 'upstream', 'baseline', 'baseline_tree', 'reviewed_commit',
+                      'reviewed_tree', 'reviewed_paths', 'self_hash_exemptions'):
+            self.assertEqual(before_prompt[field], old[field])
+        updated = {'.github/scripts/test_decision_release_source.py',
+                   '.github/scripts/run_decision_release_preflight.py'}
+        for relative, pin in old['release_paths'].items():
+            with self.subTest(relative=relative):
+                if relative in updated:
+                    self.assertEqual(before_prompt['release_paths'][relative]['reviewed_sha256'],
+                                     pin['reviewed_sha256'])
+                    self.assertEqual(before_prompt['release_paths'][relative]['mode'], pin['mode'])
+                else:
+                    self.assertEqual(before_prompt['release_paths'][relative], pin)
+
+    def test_prompt_increment_is_exactly_four_paths_with_existing_release_pins_preserved(self):
+        old = json.loads(guard.git(ROOT, 'show', PRE_PROMPT_RELEASE + ':' + guard.CONTRACT_PATH))
+        self.assertEqual(set(self.contract['release_paths']) - set(old['release_paths']),
+                         PROMPT_CONSISTENCY_RELEASE_PATHS)
+        self.assertEqual(guard.RELEASE_INCREMENT_PATHS,
+                         set(old['release_paths']) | guard.SELF_HASH_EXEMPTIONS | PROMPT_CONSISTENCY_RELEASE_PATHS)
         for field in ('schema', 'upstream', 'baseline', 'baseline_tree', 'reviewed_commit',
                       'reviewed_tree', 'reviewed_paths', 'self_hash_exemptions'):
             self.assertEqual(self.contract[field], old[field])
@@ -376,6 +404,19 @@ class DecisionSourceContractTests(unittest.TestCase):
                     self.assertEqual(self.contract['release_paths'][relative]['mode'], pin['mode'])
                 else:
                     self.assertEqual(self.contract['release_paths'][relative], pin)
+
+    def test_prompt_pins_bind_exact_original_predecessors_and_current_bytes(self):
+        for relative in PROMPT_CONSISTENCY_RELEASE_PATHS:
+            with self.subTest(relative=relative):
+                pin = self.contract['release_paths'][relative]
+                if relative == 'tests/llm/test_prompt_exhaustion_consistency.py':
+                    self.assertIsNone(pin['reviewed_sha256'])
+                    self.assertNotIn(relative, self.reviewed)
+                else:
+                    self.assertEqual(pin['reviewed_sha256'], hashlib.sha256(self.reviewed[relative]).hexdigest())
+                self.assertEqual(pin['sha256'], hashlib.sha256(self.current[relative]).hexdigest())
+                self.assertEqual(pin['mode'], '100644')
+                self.assertNotIn(relative, guard.SELF_HASH_EXEMPTIONS)
 
     def test_factor_pins_bind_exact_original_predecessors_and_current_bytes(self):
         new = {'astra_gateway/collection_timeout.py',
@@ -810,10 +851,27 @@ class DecisionPreflightBoundaryTests(unittest.TestCase):
         self.assertEqual(collection.COLLECTION_SUITES, dict(original, **added))
         self.assertEqual(sum(collection.COLLECTION_SUITES.values()), 1086)
         self.assertEqual(preflight.CURRENT_HELPER_SUITES['test_collection_regression_gate.py'], 10)
-        self.assertEqual(preflight.DECISION_RELEASE_SUITES['test_decision_release_source.py'], 93)
+        self.assertEqual(preflight.DECISION_RELEASE_SUITES['test_decision_release_source.py'], 96)
         calls, _, _, _ = self.invoke()
         gate = next((command, options) for command, options in calls
                     if command[-1].endswith('/run_collection_regressions.py'))
+        self.assertEqual(gate[1]['cwd'], ROOT)
+        self.assertTrue(gate[1]['check'])
+
+    def test_prompt_gate_preserves_all_original_minimums_and_requires_new_suite(self):
+        import run_decision_contract_regressions as decision
+        raw = guard.git(ROOT, 'show', PRE_PROMPT_RELEASE + ':.github/scripts/run_decision_contract_regressions.py')
+        assignment = next(node for node in ast.parse(raw).body if isinstance(node, ast.Assign)
+                          and any(isinstance(target, ast.Name) and target.id == 'TEST_SUITES'
+                                  for target in node.targets))
+        original = ast.literal_eval(assignment.value)
+        self.assertEqual(len(original), 28)
+        self.assertEqual(sum(original.values()), 474)
+        self.assertEqual(decision.TEST_SUITES, dict(original, **{'tests.llm.test_prompt_exhaustion_consistency': 14}))
+        self.assertEqual(sum(decision.TEST_SUITES.values()), 488)
+        calls, _, _, _ = self.invoke()
+        gate = next((command, options) for command, options in calls
+                    if command[-1].endswith('/run_decision_contract_regressions.py'))
         self.assertEqual(gate[1]['cwd'], ROOT)
         self.assertTrue(gate[1]['check'])
 

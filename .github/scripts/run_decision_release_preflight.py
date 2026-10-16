@@ -43,8 +43,11 @@ CURRENT_HELPER_SUITES = {name: minimum for name, minimum in SUITES.items()
 # same candidate as the 68 unchanged ownership/recovery cases; discovery must
 # not silently lose them.
 CURRENT_HELPER_SUITES['test_runtime_release_upgrade.py'] = 69
+# Exact factory refresh, active-release guards and recovery run on this source,
+# including all 29 original plan/ownership cases and 30 transition regressions.
+CURRENT_HELPER_SUITES['test_deployment_plan.py'] = 59
 DECISION_RELEASE_SUITES = {
-    'test_decision_release_source.py': 105,
+    'test_decision_release_source.py': 106,
     'test_decision_regression_gate.py': 13,
 }
 HISTORICAL_CANDIDATE_SUITES = {'test_pr_candidate_contract.py': 46}

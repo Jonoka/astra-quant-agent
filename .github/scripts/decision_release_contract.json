@@ -150,7 +150,7 @@
     },
     ".github/scripts/run_decision_release_preflight.py": {
       "reviewed_sha256": null,
-      "sha256": "df11adc8784cb9090d6e0102b575c7c4b72005274bb80b7c51e8378aaa2b694f",
+      "sha256": "dddd4b5694ee26d01aab024eabc6e01a62a433e95e636b646060d82981c186e3",
       "mode": "100644"
     },
     ".github/scripts/runtime_release_upgrade.py": {
@@ -170,7 +170,7 @@
     },
     ".github/scripts/test_decision_release_source.py": {
       "reviewed_sha256": null,
-      "sha256": "0efbb4e4bc47cf90e6a51d4905d118418e0039e4333b5717a3f3cacc3fdaf2ad",
+      "sha256": "81a89d9510820f1e02d0f6e5678db4e99627f8f600cfa06cb74e40bc8f546d70",
       "mode": "100644"
     },
     ".github/scripts/test_deployment_plan.py": {

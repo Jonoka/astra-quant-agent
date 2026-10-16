@@ -1019,17 +1019,30 @@ class RuntimeUpgradeTests(unittest.TestCase):
 
     def test_custom_prompt_preserved_and_pristine_prompt_refreshed(self):
         obj = self.operator()
-        for name, value in (("source-previous", b"old"), ("source-release", b"new"), ("candidate", b"custom")):
+        pin = upgrade.OFFICIAL_PROMPT_REFRESH
+        source = Path(__file__).resolve().parents[2]
+        old = subprocess.check_output(['git', '-C', str(source), 'show',
+                                       pin['previous_source'] + ':' + upgrade.PROMPT])
+        new = (source / upgrade.PROMPT).read_bytes()
+        self.assertEqual(upgrade.sha(old), pin['previous_sha256'])
+        self.assertEqual(upgrade.sha(new), pin['release_sha256'])
+        obj.manifest = {'source_files': {'previous': {upgrade.PROMPT: upgrade.sha(old)},
+                                        'release': {upgrade.PROMPT: upgrade.sha(new)}}}
+        obj.deployment_plan = Mock(return_value={
+            'previous_source': pin['previous_source'], 'previous_image': pin['previous_image'],
+            'protected_config': {upgrade.PROMPT: upgrade.sha(old)}})
+        obj.sources = Mock()  # Full raw source verification is in the plan integration suite.
+        for name, value in (("source-previous", old), ("source-release", new), ("candidate", b"custom")):
             (obj.op / name / "data").mkdir(parents=True)
             (obj.op / name / upgrade.PROMPT).write_bytes(value)
         obj.prompt_refresh(obj.op / "candidate")
         self.assertEqual((obj.op / "candidate" / upgrade.PROMPT).read_bytes(), b"custom")
         self.assertFalse(obj.state["prompt_refreshed"])
-        (obj.op / "candidate" / upgrade.PROMPT).write_bytes(b"old")
+        (obj.op / "candidate" / upgrade.PROMPT).write_bytes(old)
         obj.prompt_refresh(obj.op / "candidate")
-        self.assertEqual((obj.op / "candidate" / upgrade.PROMPT).read_bytes(), b"new")
+        self.assertEqual((obj.op / "candidate" / upgrade.PROMPT).read_bytes(), new)
         obj.restore_prompt(obj.op / "candidate")
-        self.assertEqual((obj.op / "candidate" / upgrade.PROMPT).read_bytes(), b"old")
+        self.assertEqual((obj.op / "candidate" / upgrade.PROMPT).read_bytes(), old)
 
     def test_restore_prompt_keeps_poststart_edit(self):
         obj = self.operator()

@@ -43,6 +43,14 @@ IMAGE_RE = r"ghcr\.io/jonoka/astra-quant-agent@sha256:[0-9a-f]{64}"
 WRITABLE = (".env", "data", "logs", "backups", ".archive", "plugins")
 OVERRIDE = "docker-compose.override.yml"
 PROMPT = "data/prompt_library.json"
+# Exact factory-only transition approved for this release. This is independent
+# of candidate-supplied manifests; custom/local prompts remain protected config.
+OFFICIAL_PROMPT_REFRESH = {
+    'previous_source': '1bd3c016bf4375114d34022c1528d119d90cd6ad',
+    'previous_image': 'ghcr.io/jonoka/astra-quant-agent@sha256:7bfc6bb0b75c6a63393f1c717c771cc7097059b2b2c4a6ddca2de86049005bee',
+    'previous_sha256': 'c032575fc4f3af3fc32fcb9ec410770468eecdc83a7e5f7fd6810096a3cf7573',
+    'release_sha256': 'ea9ae97ee05637664b71cfb86a9f32aeea946893e35591f745cb0cccb378ce63',
+}
 # Dynamic positions, decisions, ledgers, sessions and scheduler records are
 # intentionally copied after stop, rather than being mistaken for config drift.
 CONFIG = (
@@ -837,10 +845,34 @@ class Upgrade:
                 (after.st_uid, after.st_gid, stat.S_IMODE(after.st_mode), after.st_size) ==
                 (pool['uid'], pool['gid'], pool['mode'], pool['size']) and
                 sha(raw) == pool['sha256'], 'pool_config_drift')
+        prompt_hash = plan['protected_config'][PROMPT]
+        if (self.state.get('prompt_refreshed') and
+                (self.op / 'original-deployment').exists() and
+                not (self.op / 'failed-candidate').exists()):
+            # The staged candidate-ready tree still uses the old plan; only an
+            # actually active, operation-owned release may use the approved new
+            # factory bytes. Recovery switches back to the unchanged old plan.
+            self.deployment_guard()
+            require(deployment_source(ROOT, self.state['extras']) ==
+                    self.state['deployment_sources']['release'], 'prompt_deployment_identity')
+            prompt_hash = self.approved_prompt_hash(plan)
         for name, expected in plan['protected_config'].items():
+            if name == PROMPT:
+                expected = prompt_hash
             require(configuration_hash(ROOT / name) == expected,
                     'approved_configuration_drift')
         return pool
+
+    def approved_prompt_hash(self, plan):
+        old = self.manifest['source_files']['previous'][PROMPT]
+        new = self.manifest['source_files']['release'][PROMPT]
+        transition = {'previous_source': plan['previous_source'],
+                      'previous_image': plan['previous_image'],
+                      'previous_sha256': old, 'release_sha256': new}
+        require(plan['protected_config'][PROMPT] == old and
+                (new == old or transition == OFFICIAL_PROMPT_REFRESH),
+                'unapproved_official_prompt_refresh')
+        return new
 
     def idle_window(self):
         scope = self.deployment_plan()['runtime']
@@ -919,10 +951,10 @@ class Upgrade:
         """
         phase = self.state.get('phase')
         previous_phases = {'stopping', 'stopped', 'snapshot-verified', 'candidate-ready',
-                           'recovery-starting'}
+                           'recovery-starting', 'rolled-back'}
         candidate_phases = {'root-moved', 'candidate-active', 'starting', 'accepted',
                             'recovery-stopped', 'recovery-ready'}
-        recovery_phases = {'candidate-retained', 'recovery-active', 'recovery-starting'}
+        recovery_phases = {'candidate-retained', 'recovery-active', 'recovery-starting', 'rolled-back'}
         original = self.op / 'original-deployment'
         failed = self.op / 'failed-candidate'
         sources = self.state.get('deployment_sources', {})
@@ -1259,9 +1291,8 @@ print(json.dumps({'risk':expected,'pool':[i['name'] for i in items],
         self.pool_guard()
         self.sources()
         plan = self.deployment_plan()
-        require(self.manifest['source_files']['previous'][PROMPT] != plan['protected_config'][PROMPT] or
-                self.manifest['source_files']['release'][PROMPT] == plan['protected_config'][PROMPT],
-                'unapproved_official_prompt_refresh')
+        if self.manifest['source_files']['previous'][PROMPT] == plan['protected_config'][PROMPT]:
+            self.approved_prompt_hash(plan)
         self.capacity()
         extras = self.source_runtime()
         env_gate(ROOT)
@@ -1317,8 +1348,12 @@ print(json.dumps({'risk':expected,'pool':[i['name'] for i in items],
         new = self.op / "source-release" / PROMPT
         refreshed = path.is_file() and digest(path) == digest(old)
         if refreshed:
+            self.sources()
+            expected = self.approved_prompt_hash(self.deployment_plan())
+            replacement = new.read_bytes()
+            require(sha(replacement) == expected, 'refreshed_prompt_drift')
             # Retain runtime owner and mode, replacing only proven baseline bytes.
-            path.write_bytes(new.read_bytes())
+            path.write_bytes(replacement)
         counts = {"baseline": 0, "custom": 0}
         for plugin in (candidate / "plugins").rglob("*"):
             if plugin.is_file():
@@ -1332,7 +1367,12 @@ print(json.dumps({'risk':expected,'pool':[i['name'] for i in items],
     def restore_prompt(self, root):
         path = root / PROMPT
         if self.state.get("prompt_refreshed") and path.is_file() and digest(path) == digest(self.op / "source-release" / PROMPT):
-            path.write_bytes((self.op / "source-previous" / PROMPT).read_bytes())
+            self.sources()
+            self.approved_prompt_hash(self.deployment_plan())
+            replacement = (self.op / "source-previous" / PROMPT).read_bytes()
+            require(sha(replacement) == self.manifest['source_files']['previous'][PROMPT],
+                    'refreshed_prompt_drift')
+            path.write_bytes(replacement)
 
     def log_marks(self):
         return {p.relative_to(ROOT / "logs").as_posix(): {"bytes": p.stat().st_size, "sha256": digest(p)}

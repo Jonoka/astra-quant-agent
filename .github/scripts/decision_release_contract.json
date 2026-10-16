@@ -150,12 +150,12 @@
     },
     ".github/scripts/run_decision_release_preflight.py": {
       "reviewed_sha256": null,
-      "sha256": "dddd4b5694ee26d01aab024eabc6e01a62a433e95e636b646060d82981c186e3",
+      "sha256": "3f28043e1d7aea4ce9b6bd1cc60ac513e4da849c663abf435e0d5b84fe942a99",
       "mode": "100644"
     },
     ".github/scripts/runtime_release_upgrade.py": {
       "reviewed_sha256": "6f396c9104081691d3ff4d74a481633a025493ba02bc307dd304acb5b0075291",
-      "sha256": "57d9713fe1f5b44fc81bd052c8d1d720b13e1889bf51506d20600f2f8b356451",
+      "sha256": "aff4d9306e509c7aaa72f7d962ce0ed47225d3a3cfe622d830d304e6ca37545c",
       "mode": "100644"
     },
     ".github/scripts/test_collection_regression_gate.py": {
@@ -170,17 +170,17 @@
     },
     ".github/scripts/test_decision_release_source.py": {
       "reviewed_sha256": null,
-      "sha256": "81a89d9510820f1e02d0f6e5678db4e99627f8f600cfa06cb74e40bc8f546d70",
+      "sha256": "c7eb14a680e873ca10899f9a36b4f7685f3680eed684db04074522349c79d163",
       "mode": "100644"
     },
     ".github/scripts/test_deployment_plan.py": {
       "reviewed_sha256": "30be46e120085390875692fa2c272092d12eb513279b637f1c143cec00995888",
-      "sha256": "8c49ca4c0e8d8df571c0f6d9f1bc5b978797c693345150d5adcb0f9c6df2d13a",
+      "sha256": "9734f377f91db8f86cefdaa12f2fc025b3a7519b6e00bdf6d9f87ad7dcae6eeb",
       "mode": "100644"
     },
     ".github/scripts/test_runtime_release_upgrade.py": {
       "reviewed_sha256": "4e9d50b2c7d0e93909beb20151f3838d7de825e5c9e274e3be42743866b0b268",
-      "sha256": "27f635dee70f1ebe479319ce3a0adb9d241b048c000fc2f62c81f9a997bfe89a",
+      "sha256": "c8987e15ab392e624b51361c326132c1a614977696dd85d5f051a25b4ed4975c",
       "mode": "100644"
     },
     ".github/workflows/build-release-image.yml": {

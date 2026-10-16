@@ -38,16 +38,16 @@ DEPLOYMENT_PREDECESSOR = {
 # All other original helper cases must additionally pass on the release source.
 CURRENT_HELPER_SUITES = {name: minimum for name, minimum in SUITES.items()
                          if name != 'test_verify_deployment_source.py'}
-# The historical minimum remains 39 on its original source. This release adds
-# 17 real-WAL/rollback and 13 capacity/diagnostic cases, all mandatory on the
-# same candidate as the 68 unchanged ownership/recovery cases; discovery must
-# not silently lose them.
-CURRENT_HELPER_SUITES['test_runtime_release_upgrade.py'] = 69
+# The historical minimum remains 39 on its original source. All 69 prior
+# runtime-helper cases remain mandatory, plus 10 real-process worker/HTTP/TPE
+# cases proving natural drain and the unsafe TERM/second-INT counterexamples.
+CURRENT_HELPER_SUITES['test_runtime_release_upgrade.py'] = 79
 # Exact factory refresh, active-release guards and recovery run on this source,
-# including all 29 original plan/ownership cases and 30 transition regressions.
-CURRENT_HELPER_SUITES['test_deployment_plan.py'] = 59
+# including all 29 original ownership and 30 prompt-transition cases, plus
+# 63 maintenance probe, race, journal, signal and recovery regressions.
+CURRENT_HELPER_SUITES['test_deployment_plan.py'] = 122
 DECISION_RELEASE_SUITES = {
-    'test_decision_release_source.py': 108,
+    'test_decision_release_source.py': 109,
     'test_decision_regression_gate.py': 13,
 }
 HISTORICAL_CANDIDATE_SUITES = {'test_pr_candidate_contract.py': 46}

@@ -52,6 +52,10 @@ class DeploymentIdentityTests(unittest.TestCase):
         self.obj.image_metadata = Mock(side_effect=lambda previous=False: 'previous-id' if previous else 'candidate-id')
         self.obj.capacity = Mock()
         self.obj.pool_guard = Mock()
+        # This fixture isolates existing source/image/rename guards. The real
+        # pause, process drain, flock and recovery lifecycle is exercised by
+        # test_deployment_plan; synthetic Docker must never signal a process.
+        self.obj.maintenance_drain = Mock()
         self.obj.start = Mock()
         self.obj.verify = Mock()
         self.docker = Mock()

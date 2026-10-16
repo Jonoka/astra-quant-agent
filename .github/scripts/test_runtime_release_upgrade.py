@@ -15,11 +15,13 @@ import tempfile
 import unittest
 from unittest.mock import Mock, patch
 
-SPEC = importlib.util.spec_from_file_location("runtime_upgrade", Path(__file__).with_name("runtime_release_upgrade.py"))
-upgrade = importlib.util.module_from_spec(SPEC)
-SPEC.loader.exec_module(upgrade)
-sys.path.insert(0, str(Path(__file__).parent))
-import stage_release_bundle as staging
+# Synthetic subprocess role imports neither the application nor runtime helpers.
+if not (len(sys.argv) > 1 and sys.argv[1] == '--synthetic-worker'):
+    SPEC = importlib.util.spec_from_file_location("runtime_upgrade", Path(__file__).with_name("runtime_release_upgrade.py"))
+    upgrade = importlib.util.module_from_spec(SPEC)
+    SPEC.loader.exec_module(upgrade)
+    sys.path.insert(0, str(Path(__file__).parent))
+    import stage_release_bundle as staging
 
 
 LEGACY_REFERENCE_SHA = '90f9f3a558bdbea0171b19a42c58e2fae7ed8e9d'
@@ -95,6 +97,13 @@ class RuntimeUpgradeTests(unittest.TestCase):
         obj.pool_guard = Mock()
         obj.deployment_guard = Mock()
         obj.remember_started_containers = Mock()
+        # These 69 historical filesystem/SQLite/admission tests do not own real
+        # containers. The new maintenance boundary is tested separately, while
+        # its final admission call still executes each fixture's idle_window.
+        obj.maintenance_drain = Mock()
+        obj.maintenance_release_lock = Mock()
+        obj.maintenance_clear_pause = Mock()
+        obj.maintenance_idle_window = lambda: obj.idle_window()
         return obj
 
     @contextmanager
@@ -1223,6 +1232,10 @@ os._exit(0)
             db.executescript('CREATE TABLE admin_users(id,username,password_hash,salt,iterations,role,enabled,created_at);'
                              "INSERT INTO admin_users VALUES(1,'synthetic','hash','salt',1,'superadmin',1,'synthetic');")
         self.stopped_wal(live / 'data/astra_quant.db')
+        # Maintenance now verifies scheduler DB readability before changing any
+        # admission state. Keep that real read-only gate in this WAL fixture.
+        with closing(sqlite3.connect(live / upgrade.GATEWAY_DATABASE)) as database:
+            database.execute('CREATE TABLE job_runs(id INTEGER PRIMARY KEY, status TEXT)')
         obj.state.update(phase='prepared', baseline={}, endpoints={}, guard=obj.guard(live))
         # Host/image/ownership and admission are separate boundaries. Keep the
         # actual post-stop DB probes, full copies, carry, renames and recovery.
@@ -1429,5 +1442,1124 @@ os._exit(0)
         self.assertEqual(upgrade.tree_manifest(snapshot), expected)
 
 
-if __name__ == "__main__":
-    unittest.main()
+
+# Real-process drain regressions below use only synthetic jobs and loopback HTTP.
+import concurrent.futures
+import fcntl
+import http.client
+import inspect
+import json
+import platform
+import signal
+import socket
+import threading
+import time
+import types
+from datetime import datetime, timedelta, timezone
+
+JOB_NAMES = ("synthetic_a", "synthetic_b", "synthetic_c")
+WAIT_SECONDS = 12.0
+
+
+def emit(path: Path, actor: str, event: str, **data: object) -> None:
+    # One append write, so concurrent processes/threads cannot interleave lines.
+    row = {"t_ns": time.monotonic_ns(), "pid": os.getpid(),
+           "actor": actor, "event": event, **data}
+    raw = (json.dumps(row, sort_keys=True) + "\n").encode()
+    if len(raw) >= 4096:
+        raise AssertionError("oversized test event")
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    try:
+        if os.write(fd, raw) != len(raw):
+            raise AssertionError("short event write")
+    finally:
+        os.close(fd)
+
+
+def install_offline_guard(case: Path, synthetic_scripts: set[Path]) -> None:
+    """Defense in depth: no sockets, no unapproved commands, scratch writes only."""
+    case = case.resolve()
+    allowed_scripts = {str(path.resolve()) for path in synthetic_scripts}
+    write_flags = os.O_WRONLY | os.O_RDWR | os.O_CREAT | os.O_TRUNC | os.O_APPEND
+
+    def scratch_path(value: object) -> None:
+        if isinstance(value, int):
+            return
+        path = Path(os.fsdecode(value)).resolve()
+        if not path.is_relative_to(case):
+            raise AssertionError(f"write outside isolated test directory: {path}")
+
+    def audit(event: str, args: tuple[object, ...]) -> None:
+        if event.startswith("socket.") or event in {"os.system", "os.posix_spawn"}:
+            raise AssertionError(f"forbidden external activity: {event}")
+        if event == "open":
+            path, mode, flags = args
+            if (isinstance(flags, int) and flags & write_flags) or (
+                isinstance(mode, str) and any(char in mode for char in "wax+")
+            ):
+                scratch_path(path)
+        elif event in {"os.mkdir", "os.remove", "os.rmdir", "os.chmod"}:
+            scratch_path(args[0])
+        elif event in {"os.rename", "os.link", "os.symlink"}:
+            scratch_path(args[0])
+            scratch_path(args[1])
+        elif event == "subprocess.Popen":
+            executable, argv, cwd, _env = args
+            if str(executable) != sys.executable or len(argv) != 2:
+                raise AssertionError("only the synthetic Python scripts may run")
+            if str(Path(argv[1]).resolve()) not in allowed_scripts:
+                raise AssertionError("real job execution is forbidden")
+            scratch_path(cwd)
+
+    sys.addaudithook(audit)
+
+
+def stub_module(name: str, **values: object) -> types.ModuleType:
+    module = types.ModuleType(name)
+    module.__dict__.update(values)
+    sys.modules[name] = module
+    return module
+
+
+def load_source_module(name: str, path: Path) -> types.ModuleType:
+    spec = importlib.util.spec_from_file_location(name, path)
+    if spec is None or spec.loader is None:
+        raise AssertionError(f"cannot load source: {path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def synthetic_worker(source_root: Path, case: Path, actor: str, mode: str) -> None:
+    """Run in a separate OS process; never import the production dependency tree."""
+    sys.dont_write_bytecode = True
+    event_file = case / "events.jsonl"
+    script_dir = case / "scripts"
+    worker = None
+
+    def record(event: str, **data: object) -> None:
+        emit(event_file, actor, event, **data)
+
+    def wait_gate(name: str) -> None:
+        deadline = time.monotonic() + WAIT_SECONDS
+        while not (case / name).exists():
+            if time.monotonic() > deadline:
+                raise AssertionError(f"test gate did not open: {name}")
+            time.sleep(0.005)
+
+    class SyntheticStore:
+        def __init__(self, _path: Path):
+            past = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
+            self.states = {f"job.last.{name}": past for name in JOB_NAMES}
+            self.lock = threading.RLock()
+            record("store_created")
+
+        def recover_processing(self):
+            record("recover_processing")
+
+        def recover_stale_job_runs(self):
+            record("recover_stale_job_runs")
+            return 0
+
+        def prune_job_runs(self):
+            return {"deleted": 0}
+
+        def get_state(self, key):
+            with self.lock:
+                return self.states.get(key, "")
+
+        def set_state(self, key, value):
+            with self.lock:
+                self.states[key] = value
+            if mode == "mid_tick" and key == "job.last.synthetic_b":
+                record("tick_paused_before_second_submit")
+                wait_gate("release_tick")
+
+        def begin_job(self, name, scheduled_at):
+            record("begin_job", job=name, scheduled_at=scheduled_at)
+            return name
+
+        def finish_job(self, run_id, rc, detail, **_kwargs):
+            record("finish_job", job=run_id, rc=rc, detail=detail)
+
+        def claim_due(self, limit):
+            assert limit == 1
+            record("claim_due")
+            # A deterministic signal window after the first tick. This replaces
+            # only store I/O; real worker control flow and sleep are unmodified.
+            deadline = time.monotonic() + WAIT_SECONDS
+            while worker.RUNNING:
+                if time.monotonic() > deadline:
+                    raise AssertionError("test never delivered SIGTERM")
+                time.sleep(0.005)
+            return []
+
+    class ForbiddenAdapter:
+        def __init__(self, *_args, **_kwargs):
+            raise AssertionError("delivery adapters must never run in this test")
+
+    stub_module("astra_backend", __path__=[])
+    stub_module("astra_gateway", __path__=[])
+    stub_module("scripts", __path__=[])
+    stub_module("astra_backend.time_utils", parse_beijing=datetime.fromisoformat)
+    stub_module("astra_backend.schedule_store", load_schedule=lambda: {})
+    stub_module("astra_backend.backup_store", list_jobs=lambda: [])
+    stub_module("astra_gateway.collection_timeout", collection_timeout_summary=lambda *_: "")
+    stub_module("astra_gateway.store", GatewayStore=SyntheticStore)
+    stub_module("astra_gateway.channels", NotificationChannelAdapter=ForbiddenAdapter)
+    stub_module("astra_gateway.publisher", DB_PATH=case / "unused.db")
+    stub_module("astra_gateway.pidfile", PID_FILE=case / "owner.pid")
+    stub_module("astra_gateway.cache_warmer", check_and_warmup_cache=lambda: None)
+    stub_module("scripts.instrument_pool", POOL_FILE=case / "pool.exists",
+                save_instruments=lambda _: None, DEFAULT_INSTRUMENTS=[])
+    install_offline_guard(case, {script_dir / f"{name}.py" for name in JOB_NAMES})
+    scheduler_module = load_source_module(
+        "astra_gateway.scheduler", source_root / "astra_gateway" / "scheduler.py")
+    scheduler_module.ROOT = case
+    scheduler_module.SCRIPTS = script_dir
+    scheduler_module.current_jobs = lambda: tuple(
+        scheduler_module.JobSpec(name, f"{name}.py", 60, 20)
+        for name in (() if mode == "idle" else JOB_NAMES)
+    )
+
+    class ObservedScheduler(scheduler_module.GatewayScheduler):
+        def __init__(self, store):
+            super().__init__(store, max_workers=1)
+            real_submit = self.executor.submit
+
+            def observed_submit(fn, spec, *args, **kwargs):
+                future = real_submit(fn, spec, *args, **kwargs)
+                record("submitted", job=spec.name)
+                future.add_done_callback(lambda done: record(
+                    "future_done", job=spec.name, cancelled=done.cancelled(),
+                    error=repr(done.exception()) if not done.cancelled() else "cancelled"))
+                return future
+
+            self.executor.submit = observed_submit
+
+        def _execute(self, spec, scheduled_at=None):
+            record("thread_start", job=spec.name,
+                   daemon=threading.current_thread().daemon)
+            return super()._execute(spec, scheduled_at)
+
+        def tick(self, now=None):
+            record("tick_enter")
+            result = super().tick(now)
+            record("tick_return", launched=result)
+            return result
+
+        def shutdown(self):
+            def statuses():
+                return {name: {"done": f.done(), "cancelled": f.cancelled(),
+                               "running": f.running()}
+                        for name, f in self.running.items()}
+            record("shutdown_enter", futures=statuses())
+            super().shutdown()  # Exact production wait=False/cancel_futures=False.
+            record("shutdown_return", futures=statuses())
+
+    worker = load_source_module(
+        "astra_gateway.worker", source_root / "astra_gateway" / "worker.py")
+    worker.ROOT = case
+    worker.LOCK_FILE = case / "owner.lock"
+    worker.PID_FILE = case / "owner.pid"
+    worker.LOG_FILE = case / "worker.log"
+    worker.HEARTBEAT_FILE = case / "heartbeat"
+    worker.DB_PATH = case / "unused.db"
+    worker.GatewayScheduler = ObservedScheduler
+    worker.RUNNING = True
+    original_stop = worker.stop
+
+    def observed_stop(*args):
+        original_stop(*args)  # Real production function handles the OS signal.
+        record("signal_handled", signum=args[0], running=worker.RUNNING)
+
+    worker.stop = observed_stop
+    record("before_run")
+    worker.run()  # Real function; real signal.signal and flock registration.
+    record("run_returned")
+    # Returning out of __main__ must not terminate queued executor work. Python's
+    # real interpreter-exit ThreadPoolExecutor join is part of this test.
+
+
+SYNTHETIC_SCRIPT = r'''
+import json, os, signal, sys, time
+from pathlib import Path
+root = Path(__file__).resolve().parents[1]
+job = Path(__file__).stem
+
+def no_network(event, args):
+    if event.startswith("socket.") or event in {"subprocess.Popen", "os.system", "os.posix_spawn"}:
+        raise AssertionError("synthetic child is strictly offline")
+sys.addaudithook(no_network)
+
+def record(event, **data):
+    row = {"t_ns": time.monotonic_ns(), "pid": os.getpid(), "actor": "child",
+           "event": event, "job": job, "ppid": os.getppid(), **data}
+    raw = (json.dumps(row, sort_keys=True) + "\n").encode()
+    fd = os.open(root / "events.jsonl", os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    try:
+        assert os.write(fd, raw) == len(raw)
+    finally:
+        os.close(fd)
+
+def interrupted(signum, _frame):
+    record("child_interrupted", signum=signum)
+    raise SystemExit(42)
+signal.signal(signal.SIGTERM, interrupted)
+signal.signal(signal.SIGINT, interrupted)
+record("child_started", run_id=os.environ["ASTRA_JOB_RUN_ID"])
+deadline = time.monotonic() + 20
+while not (root / ("allow_" + job)).exists():
+    if time.monotonic() > deadline:
+        record("child_gate_timeout")
+        raise SystemExit(43)
+    time.sleep(0.005)
+record("child_completed")
+print("synthetic completion: " + job, flush=True)
+'''
+
+
+class RuntimeWorkerGracefulDrainTests(unittest.TestCase):
+    def setUp(self):
+        self.assertEqual(os.name, "posix", "real POSIX drain verification required")
+        self.assertEqual(platform.python_implementation(), "CPython")
+        self.source_root = Path(__file__).resolve().parents[2]
+        for name in ("worker.py", "scheduler.py"):
+            self.assertTrue((self.source_root / "astra_gateway" / name).is_file(),
+                            "current source checkout must contain real worker and scheduler files")
+        self.tmp = tempfile.TemporaryDirectory(prefix="astra-offline-drain-")
+        self.case = Path(self.tmp.name)
+        self.addCleanup(self.tmp.cleanup)
+        self.processes = []
+        self.addCleanup(self._stop_owned_processes)
+        (self.case / "scripts").mkdir()
+        (self.case / "pool.exists").touch()
+        for name in JOB_NAMES:
+            (self.case / "scripts" / f"{name}.py").write_text(SYNTHETIC_SCRIPT)
+        self.events = self.case / "events.jsonl"
+
+    def _rows(self, actor=None, event=None):
+        rows = []
+        if self.events.exists():
+            for line in self.events.read_text().splitlines():
+                try:
+                    row = json.loads(line)
+                except json.JSONDecodeError:
+                    continue  # A producer may be appending the last line.
+                if (actor is None or row["actor"] == actor) and (event is None or row["event"] == event):
+                    rows.append(row)
+        return rows
+
+    def _wait(self, predicate, description):
+        deadline = time.monotonic() + WAIT_SECONDS
+        while time.monotonic() < deadline:
+            result = predicate()
+            if result:
+                return result
+            time.sleep(0.005)
+        diagnostics = {p.pid: (self.case / f"{actor}.stderr").read_text()
+                       for p, actor in self.processes}
+        self.fail(f"timed out waiting for {description}; events={self._rows()}; stderr={diagnostics}")
+
+    def _event(self, actor, event):
+        return self._wait(lambda: self._rows(actor, event), f"{actor}:{event}")[-1]
+
+    def _start(self, actor, mode):
+        # Deliberately do not propagate credentials, proxy URLs, model settings,
+        # or any other caller environment into the worker or its job children.
+        env = {"PYTHONDONTWRITEBYTECODE": "1", "PYTHONUNBUFFERED": "1",
+               "LANG": "C.UTF-8"}
+        with (self.case / f"{actor}.stdout").open("wb") as stdout, \
+             (self.case / f"{actor}.stderr").open("wb") as stderr:
+            process = subprocess.Popen(
+                [sys.executable, "-B", str(Path(__file__).resolve()), "--synthetic-worker",
+                 str(self.source_root), str(self.case), actor, mode],
+                cwd=self.case, env=env, stdin=subprocess.DEVNULL,
+                stdout=stdout, stderr=stderr, start_new_session=True)
+        self.processes.append((process, actor))
+        return process
+
+    def _stop_owned_processes(self):
+        # Cleanup opens every gate first, allowing synthetic children to finish.
+        # Signals are sent only to Popen objects created by this test.
+        (self.case / "release_tick").touch()
+        for name in JOB_NAMES:
+            (self.case / f"allow_{name}").touch()
+        for process, _actor in self.processes:
+            if process.poll() is None:
+                process.terminate()
+            try:
+                process.wait(timeout=4)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=4)
+        artifact_dir = os.environ.get("ASTRA_TEST_ARTIFACT_DIR")
+        if artifact_dir:
+            target = Path(artifact_dir) / self._testMethodName
+            target.mkdir(parents=True, exist_ok=True)
+            for source in self.case.iterdir():
+                if source.is_file():
+                    (target / source.name).write_bytes(source.read_bytes())
+
+    def _lock_is_free(self):
+        with (self.case / "owner.lock").open("a") as handle:
+            try:
+                fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return False
+            fcntl.flock(handle, fcntl.LOCK_UN)
+            return True
+
+    def _assert_draining_gap(self, process, actor):
+        returned = self._event(actor, "run_returned")
+        self.assertIsNone(process.poll(), "OS process should still be draining jobs")
+        self.assertTrue(self._lock_is_free(), "existing code releases local lock before interpreter joins")
+        emit(self.events, "controller", "lock_free_while_old_process_alive", worker_pid=process.pid)
+        self.assertFalse(self._rows("child", "child_completed"))
+        self.assertFalse(self._rows("child", "child_interrupted"))
+        status = self._event(actor, "shutdown_return")["futures"]
+        self.assertEqual(set(status), set(JOB_NAMES))
+        self.assertTrue(status[JOB_NAMES[0]]["running"])
+        self.assertTrue(all(not value["done"] and not value["cancelled"] for value in status.values()))
+        self.assertTrue(all(not status[name]["running"] for name in JOB_NAMES[1:]))
+        self.assertEqual(len(self._rows(actor, "tick_enter")), 1)
+        return returned
+
+    def _drain(self, process, actor):
+        for name in JOB_NAMES:
+            self._wait(lambda: any(row["job"] == name for row in self._rows("child", "child_started")),
+                       f"child {name} start")
+            self.assertIsNone(process.poll())
+            (self.case / f"allow_{name}").touch()
+            self._wait(lambda: any(row["job"] == name for row in self._rows(actor, "finish_job")),
+                       f"job {name} completion")
+        self.assertEqual(process.wait(timeout=WAIT_SECONDS), 0)
+        emit(self.events, "controller", "old_process_reaped", worker_pid=process.pid)
+        submitted = self._rows(actor, "submitted")
+        finished = self._rows(actor, "finish_job")
+        completed = self._rows("child", "child_completed")
+        self.assertEqual([row["job"] for row in submitted], list(JOB_NAMES))
+        self.assertEqual([row["job"] for row in finished], list(JOB_NAMES))
+        self.assertEqual([row["job"] for row in completed], list(JOB_NAMES))
+        self.assertTrue(all(row["rc"] == 0 for row in finished))
+        futures = self._rows(actor, "future_done")
+        self.assertEqual(len(futures), 3)
+        self.assertTrue(all(not row["cancelled"] and row["error"] == "None" for row in futures))
+        self.assertTrue(all(not row["daemon"] for row in self._rows(actor, "thread_start")))
+        self.assertFalse(self._rows("child", "child_interrupted"))
+        self.assertEqual(len(self._rows(actor, "tick_enter")), 1)
+        self.assertTrue(self._lock_is_free())
+        return completed
+
+    def test_sigterm_drains_running_and_queued_jobs_before_process_exit(self):
+        old = self._start("old", "after_tick")
+        self._event("old", "claim_due")
+        self._event("child", "child_started")
+        self.assertFalse(self._lock_is_free())
+        self.assertEqual(len(self._rows("old", "submitted")), 3)
+        old.send_signal(signal.SIGTERM)
+        handled = self._event("old", "signal_handled")
+        self.assertFalse(handled["running"])
+        returned = self._assert_draining_gap(old, "old")
+        completed = self._drain(old, "old")
+        self.assertTrue(all(row["t_ns"] > returned["t_ns"] for row in completed))
+        queued_starts = [row for row in self._rows("child", "child_started") if row["job"] != JOB_NAMES[0]]
+        self.assertTrue(all(row["t_ns"] > returned["t_ns"] for row in queued_starts),
+                        "queued work may create child processes after worker.run returns")
+
+    def test_sigterm_during_tick_allows_last_batch_then_drains_it(self):
+        old = self._start("old", "mid_tick")
+        self._event("old", "tick_paused_before_second_submit")
+        self._event("child", "child_started")
+        self.assertEqual([row["job"] for row in self._rows("old", "submitted")], [JOB_NAMES[0]])
+        old.send_signal(signal.SIGTERM)
+        handled = self._event("old", "signal_handled")
+        (self.case / "release_tick").touch()
+        self._event("old", "tick_return")
+        submissions = self._rows("old", "submitted")
+        self.assertEqual([row["job"] for row in submissions], list(JOB_NAMES))
+        self.assertTrue(all(row["t_ns"] > handled["t_ns"] for row in submissions[1:]),
+                        "stop does not interrupt the already-entered tick for-loop")
+        self._assert_draining_gap(old, "old")
+        self._drain(old, "old")
+
+    def test_restart_after_reaping_old_worker_has_one_owner(self):
+        old = self._start("old", "after_tick")
+        self._event("old", "claim_due")
+        self._event("child", "child_started")
+        contender = self._start("before_stop_contender", "idle")
+        self.assertEqual(contender.wait(timeout=WAIT_SECONDS), 0)
+        self.assertFalse(self._rows("before_stop_contender", "store_created"))
+        self.assertFalse(self._lock_is_free())
+        old.send_signal(signal.SIGTERM)
+        self._assert_draining_gap(old, "old")
+        self._drain(old, "old")
+        successor = self._start("successor", "idle")
+        self._event("successor", "claim_due")
+        self.assertFalse(self._lock_is_free())
+        self.assertEqual((self.case / "owner.pid").read_text(), str(successor.pid))
+        duplicate = self._start("duplicate", "idle")
+        self.assertEqual(duplicate.wait(timeout=WAIT_SECONDS), 0)
+        self.assertFalse(self._rows("duplicate", "store_created"))
+        self.assertFalse(self._rows("duplicate", "tick_enter"))
+        self.assertEqual((self.case / "owner.pid").read_text(), str(successor.pid))
+        self.assertFalse(self._lock_is_free())
+        self.assertEqual(len(self._rows("successor", "recover_processing")), 1)
+        self.assertEqual(len(self._rows("successor", "recover_stale_job_runs")), 1)
+        successor.send_signal(signal.SIGTERM)
+        self.assertEqual(successor.wait(timeout=WAIT_SECONDS), 0)
+        self.assertTrue(self._lock_is_free())
+
+
+
+# These fixture programs are written only into each test's TemporaryDirectory.
+# They import no Astra app/store/model/trading implementation.
+UVICORN_SYNTHETIC_APP = r'''
+"""Isolated FastAPI fixture; imports no Astra, model, trading, or network client code."""
+from contextlib import asynccontextmanager
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+import time
+
+# Defense in depth: any accidental application egress is fail-closed.
+def loopback_only(event, args):
+    if event in {"socket.connect", "socket.sendto", "socket.bind"}:
+        address = args[1]
+        if isinstance(address, tuple) and address[0] not in {"127.0.0.1", "::1"}:
+            raise AssertionError("non-loopback network is forbidden")
+    if event == "socket.getaddrinfo" and args[0] not in {"127.0.0.1", "::1", "localhost"}:
+        raise AssertionError("external DNS is forbidden")
+sys.addaudithook(loopback_only)
+
+from fastapi import BackgroundTasks, FastAPI
+
+STATE = Path(os.environ["GRACEFUL_TEST_STATE"])
+WORKER = Path(__file__).with_name("controlled_worker.py")
+
+
+def mark(name, **extra):
+    target = STATE / name
+    temporary = target.with_suffix(target.suffix + ".tmp")
+    temporary.write_text(json.dumps({"pid": os.getpid(), "monotonic": time.monotonic(), **extra}))
+    temporary.replace(target)
+
+
+@asynccontextmanager
+async def lifespan(app):
+    mark("app-started.json")
+    yield
+    mark("app-shutdown.json")
+
+
+app = FastAPI(lifespan=lifespan)
+
+
+def blocking_job(label):
+    mark(f"{label}.handler-started.json")
+    child = subprocess.run(
+        [sys.executable, str(WORKER), str(STATE), label],
+        check=True, text=True, capture_output=True,
+    )
+    mark(f"{label}.handler-completed.json", child_returncode=child.returncode)
+    return {"ok": True, "child_returncode": child.returncode}
+
+
+@app.get("/health")
+def health():
+    return {"ok": True}
+
+
+@app.get("/sync")
+def sync_job():
+    return blocking_job("sync")
+
+
+@app.get("/background")
+def background_job(tasks: BackgroundTasks):
+    tasks.add_task(blocking_job, "background")
+    return {"accepted": True}
+'''
+UVICORN_SYNTHETIC_CHILD = r'''
+"""Harmless child: wait for a scratch-file release, then exit naturally."""
+import json
+import os
+from pathlib import Path
+import sys
+import time
+
+def no_external_activity(event, args):
+    if event.startswith("socket.") or event in {"subprocess.Popen", "os.system", "os.posix_spawn"}:
+        raise AssertionError("synthetic child is offline")
+sys.addaudithook(no_external_activity)
+
+state = Path(sys.argv[1])
+label = sys.argv[2]
+
+def mark(name, **values):
+    target = state / name
+    temporary = target.with_suffix(target.suffix + ".tmp")
+    temporary.write_text(json.dumps(values))
+    temporary.replace(target)
+
+mark(f"{label}.child-started.json", pid=os.getpid(), ppid=os.getppid(), monotonic=time.monotonic())
+deadline = time.monotonic() + 20
+while not (state / f"{label}.release").exists():
+    if time.monotonic() >= deadline:
+        (state / f"{label}.child-timeout").write_text("test harness never released the child\n")
+        sys.exit(77)
+    time.sleep(0.02)
+mark(f"{label}.child-completed.json", pid=os.getpid(), monotonic=time.monotonic())
+print("controlled child completed", flush=True)
+'''
+
+
+def uvicorn_test_request(port, path):
+    connection = http.client.HTTPConnection("127.0.0.1", port, timeout=25)
+    try:
+        connection.request("GET", path, headers={"Connection": "close"})
+        response = connection.getresponse()
+        return response.status, json.loads(response.read())
+    finally:
+        connection.close()
+
+
+def uvicorn_test_refused(port):
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=0.2):
+            return False
+    except ConnectionRefusedError:
+        return True
+
+
+def uvicorn_test_alive(pid):
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+
+
+class RuntimeUvicornGracefulDrainTests(unittest.TestCase):
+    """Exact requirements versions; single SIGINT, TCP and harmless subprocesses."""
+
+    def exercise(self, label):
+        import fastapi
+        import starlette
+        import uvicorn
+
+        source_root = Path(__file__).resolve().parents[2]
+        requirements = (source_root / 'requirements.txt').read_text().splitlines()
+        for name, module in (('uvicorn', uvicorn), ('fastapi', fastapi)):
+            pins = [line.split('==', 1)[1].strip() for line in requirements
+                    if line.startswith(name + '==')]
+            self.assertEqual(len(pins), 1, f'{name} must have one exact requirements pin')
+            self.assertEqual(module.__version__, pins[0],
+                             f'real drain test must run the {name} requirements version')
+        self.assertIsNone(inspect.signature(uvicorn.Config).parameters[
+            'timeout_graceful_shutdown'].default)
+        self.assertEqual(os.name, 'posix', 'real POSIX SIGTERM verification required')
+        temporary = tempfile.TemporaryDirectory(prefix='astra-offline-api-drain-')
+        root = Path(temporary.name)
+        self.addCleanup(temporary.cleanup)
+        state = root / label
+        state.mkdir()
+        (root / 'graceful_app.py').write_text(UVICORN_SYNTHETIC_APP)
+        (root / 'controlled_worker.py').write_text(UVICORN_SYNTHETIC_CHILD)
+        with socket.socket() as listener:
+            listener.bind(('127.0.0.1', 0))
+            port = listener.getsockname()[1]
+        # Only dependency roots of the imported, version-verified packages are
+        # propagated. Do not inherit credentials, proxies, UVICORN_* overrides,
+        # model settings, or other caller environment into the server/children.
+        dependency_roots = sorted({str(Path(module.__file__).resolve().parents[1])
+                                   for module in (uvicorn, fastapi, starlette)})
+        env = {'GRACEFUL_TEST_STATE': str(state), 'PYTHONDONTWRITEBYTECODE': '1',
+               'PYTHONUNBUFFERED': '1', 'LANG': 'C.UTF-8',
+               'PYTHONPATH': os.pathsep.join(dependency_roots)}
+        command = [sys.executable, '-B', '-m', 'uvicorn', 'graceful_app:app',
+                   '--host', '127.0.0.1', '--port', str(port), '--log-level', 'info']
+        info = {'case': label, 'uvicorn': uvicorn.__version__,
+                'fastapi': fastapi.__version__, 'starlette': starlette.__version__,
+                'configured_graceful_timeout': None, 'forced_cleanup': False}
+        pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+        process = None
+
+        def wait_for(predicate, description, timeout=10):
+            deadline = time.monotonic() + timeout
+            while time.monotonic() < deadline:
+                value = predicate()
+                if value:
+                    return value
+                time.sleep(0.01)
+            log = (state / 'uvicorn.log').read_text()
+            self.fail(f'timed out waiting for {description}; synthetic server log: {log}')
+
+        with (state / 'uvicorn.log').open('w') as server_log:
+            try:
+                process = subprocess.Popen(command, cwd=root, env=env,
+                    stdin=subprocess.DEVNULL, stdout=server_log, stderr=subprocess.STDOUT,
+                    start_new_session=True)
+                info['backend_pid'] = process.pid
+                wait_for(lambda: (state / 'app-started.json').exists(), 'app startup')
+
+                def ready():
+                    try:
+                        return uvicorn_test_request(port, '/health')[0] == 200
+                    except (ConnectionError, OSError):
+                        return False
+
+                wait_for(ready, 'loopback health')
+                future = pool.submit(uvicorn_test_request, port, '/' + label)
+                marker = state / (label + '.child-started.json')
+                wait_for(marker.exists, 'synthetic child startup')
+                child = json.loads(marker.read_text())
+                child_pid = child['pid']
+                info['child_pid'] = child_pid
+                self.assertEqual(child['ppid'], process.pid)
+                self.assertTrue(uvicorn_test_alive(child_pid))
+                if label == 'background':
+                    self.assertEqual(future.result(timeout=3), (200, {'accepted': True}))
+                    info['response_before_sigint'] = True
+                else:
+                    self.assertFalse(future.done())
+
+                info['sigint_monotonic'] = time.monotonic()
+                # Precisely one signal to this owned PID, never its process group.
+                process.send_signal(signal.SIGINT)
+                wait_for(lambda: uvicorn_test_refused(port), 'closed listener', timeout=5)
+                self.assertIsNone(process.poll(), 'backend exited before child release')
+                self.assertTrue(uvicorn_test_alive(child_pid))
+                self.assertFalse((state / (label + '.child-completed.json')).exists())
+                self.assertFalse((state / 'app-shutdown.json').exists())
+                if label == 'sync':
+                    self.assertFalse(future.done())
+                info['backend_and_child_alive_while_listener_closed'] = True
+                info['release_monotonic'] = time.monotonic()
+                (state / (label + '.release')).write_text('finish naturally\n')
+                expected = ((200, {'ok': True, 'child_returncode': 0}) if label == 'sync'
+                            else (200, {'accepted': True}))
+                self.assertEqual(future.result(timeout=10), expected)
+                returncode = process.wait(timeout=10)
+                info['backend_exit_observed_monotonic'] = time.monotonic()
+                info['returncode'] = returncode
+                # Uvicorn restores/re-raises the single SIGINT after normal drain.
+                # Exit status alone proves neither success nor task completion.
+                self.assertIn(returncode, (0, 130, -signal.SIGINT))
+                self.assertFalse(uvicorn_test_alive(child_pid))
+                self.assertFalse((state / (label + '.child-timeout')).exists())
+                done = json.loads((state / (label + '.child-completed.json')).read_text())
+                handler = json.loads((state / (label + '.handler-completed.json')).read_text())
+                shutdown = json.loads((state / 'app-shutdown.json').read_text())
+                self.assertEqual(handler['child_returncode'], 0)
+                self.assertLess(info['release_monotonic'], done['monotonic'])
+                self.assertLessEqual(done['monotonic'], handler['monotonic'])
+                self.assertLessEqual(handler['monotonic'], shutdown['monotonic'])
+                self.assertLessEqual(shutdown['monotonic'], info['backend_exit_observed_monotonic'])
+                log = (state / 'uvicorn.log').read_text()
+                self.assertIn('Application shutdown complete.', log)
+                self.assertIn('Finished server process', log)
+                self.assertNotIn('timeout graceful shutdown exceeded', log)
+                self.assertNotIn('Traceback', log)
+                self.assertTrue(uvicorn_test_refused(port))
+                info['natural_child_exit_and_ordered_lifespan_shutdown'] = True
+                info['drain_passed'] = True
+            finally:
+                (state / (label + '.release')).touch()
+                if process is not None and process.poll() is None:
+                    info['forced_cleanup'] = True
+                    process.terminate()
+                    try:
+                        process.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+                        process.wait(timeout=5)
+                pool.shutdown(wait=True)
+                (state / 'result.json').write_text(json.dumps(info, indent=2) + '\n')
+                artifact_dir = os.environ.get('ASTRA_TEST_ARTIFACT_DIR')
+                if artifact_dir:
+                    target = Path(artifact_dir) / self._testMethodName
+                    target.mkdir(parents=True, exist_ok=True)
+                    for path in state.iterdir():
+                        if path.is_file():
+                            (target / path.name).write_bytes(path.read_bytes())
+        self.assertFalse(info['forced_cleanup'])
+
+    def test_sync_http_subprocess_drains(self):
+        self.exercise('sync')
+
+    def test_http_background_task_drains(self):
+        self.exercise('background')
+
+
+# Detached executor work is outside the HTTP/ASGI task graph. These real
+# counterexamples are why backend admission uses exactly one SIGINT and an
+# uncertain send must never be retried automatically. No real model is called.
+DETACHED_TPE_SYNTHETIC_APP = r'''
+from contextlib import asynccontextmanager
+from concurrent.futures import ThreadPoolExecutor
+import json, os, signal, subprocess, sys, threading, time
+from pathlib import Path
+from fastapi import FastAPI
+STATE = Path(os.environ['SYNTHETIC_STATE'])
+
+def offline(event, args):
+    if event in {'socket.connect','socket.bind','socket.sendto'}:
+        addr=args[1]
+        if isinstance(addr,tuple) and addr[0] not in {'127.0.0.1','::1'}:
+            raise AssertionError('synthetic app cannot contact external network')
+    if event=='socket.getaddrinfo' and args[0] not in {'127.0.0.1','::1','localhost'}:
+        raise AssertionError('synthetic app cannot use external DNS')
+sys.addaudithook(offline)
+
+def mark(name, **data):
+    target = STATE / (name + '.json')
+    tmp = target.with_suffix('.tmp')
+    tmp.write_text(json.dumps({'pid':os.getpid(),'time':time.monotonic(),**data}))
+    tmp.replace(target)
+
+@asynccontextmanager
+async def lifespan(app):
+    mark('app_started')
+    yield
+    mark('app_shutdown')
+
+app=FastAPI(lifespan=lifespan)
+
+def thread_work():
+    mark('thread_started',daemon=threading.current_thread().daemon)
+    deadline=time.monotonic()+25
+    while not (STATE/'release').exists():
+        if time.monotonic()>deadline:
+            mark('thread_timed_out')
+            raise RuntimeError('test gate never released')
+        time.sleep(.005)
+    mark('thread_completed')
+
+def child_work():
+    mark('child_thread_started',daemon=threading.current_thread().daemon)
+    result=subprocess.run([sys.executable,'-B',str(Path(__file__).with_name('child.py')),str(STATE)],
+                          cwd=STATE,text=True,capture_output=True,timeout=30)
+    mark('child_thread_completed',returncode=result.returncode)
+
+@app.get('/health')
+def health(): return {'ok':True}
+
+@app.get('/detach')
+def detach():
+    pool=ThreadPoolExecutor(max_workers=2,thread_name_prefix='synthetic-model')
+    futures=[pool.submit(thread_work),pool.submit(child_work)]
+    deadline=time.monotonic()+10
+    while not all((STATE/(n+'.json')).exists() for n in ['thread_started','child_started']):
+        if time.monotonic()>deadline: raise RuntimeError('tasks failed to start')
+        time.sleep(.005)
+    cancelled=[f.cancel() for f in futures]
+    pool.shutdown(wait=False,cancel_futures=True)
+    mark('http_handler_returned',cancelled=cancelled,running=[f.running() for f in futures])
+    return {'returned':True,'cancelled':cancelled,'running':[f.running() for f in futures]}
+'''
+
+DETACHED_TPE_SYNTHETIC_CHILD = r'''
+import json,os,sys,time
+from pathlib import Path
+state=Path(sys.argv[1])
+def offline(event,args):
+    if event.startswith('socket.') or event in {'subprocess.Popen','os.system','os.posix_spawn'}:
+        raise AssertionError('synthetic child is offline')
+sys.addaudithook(offline)
+def mark(name,**data):
+    p=state/(name+'.json');t=p.with_suffix('.tmp')
+    t.write_text(json.dumps({'pid':os.getpid(),'ppid':os.getppid(),'time':time.monotonic(),**data}));t.replace(p)
+mark('child_started')
+deadline=time.monotonic()+25
+while not (state/'release').exists():
+    if time.monotonic()>deadline:
+        mark('child_timed_out');sys.exit(77)
+    time.sleep(.005)
+mark('child_completed')
+# Deliberately no stdout write: a killed backend must not create an artificial
+# BrokenPipe error in this independent natural-exit probe.
+'''
+
+DETACHED_TPE_SYNTHETIC_LAUNCHER = r'''
+import json,os,signal,sys,time
+from pathlib import Path
+state=Path(os.environ['SYNTHETIC_STATE'])
+if sys.argv[1]=='ignore': signal.signal(signal.SIGINT,signal.SIG_IGN)
+(state/'inherited_signal.json').write_text(json.dumps({'handler':str(signal.getsignal(signal.SIGINT)),'time':time.monotonic()}))
+os.execv(sys.executable,[sys.executable,'-B','-m','uvicorn','app:app','--host','127.0.0.1','--port',sys.argv[2],'--log-level','info'])
+'''
+
+SECOND_SIGINT_SYNTHETIC_SERVER = r'''
+import concurrent.futures, faulthandler, os, pathlib, signal, sys, threading, time
+import uvicorn
+D = pathlib.Path(sys.argv[1])
+signal.signal(signal.SIGINT, signal.default_int_handler)
+faulthandler.register(signal.SIGUSR1, file=sys.stderr, all_threads=True)
+pool = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix='synthetic-owned-pool')
+def worker():
+    (D/'worker_started').write_text(str(os.getpid()))
+    end = time.monotonic()+20
+    while not (D/'release').exists() and time.monotonic()<end:
+        time.sleep(0.02)
+    if not (D/'release').exists():
+        raise AssertionError('synthetic gate timed out')
+    (D/'worker_finished').write_text('finished normally')
+async def app(scope, receive, send):
+    assert scope['type']=='http'
+    pool.submit(worker)
+    await send({'type':'http.response.start','status':200,'headers':[(b'content-type',b'text/plain')]})
+    await send({'type':'http.response.body','body':b'{"accepted": true}'})
+class Server(uvicorn.Server):
+    async def startup(self, sockets=None):
+        await super().startup(sockets)
+        (D/'port').write_text(str(self.servers[0].sockets[0].getsockname()[1]))
+try:
+    Server(uvicorn.Config(app, host='127.0.0.1', port=0, loop='asyncio', lifespan='off', log_level='info')).run()
+except KeyboardInterrupt:
+    (D/'caught_keyboard_interrupt').write_text('caught')
+finally:
+    (D/'run_returned').write_text(repr(signal.getsignal(signal.SIGINT)))
+'''
+
+
+class RuntimeDetachedThreadDrainTests(unittest.TestCase):
+    """HTTP already returned; custom executor jobs must still drain naturally."""
+
+    def _dependencies(self):
+        import fastapi
+        import uvicorn
+        self.assertTrue(sys.platform.startswith('linux'), 'real Linux process semantics required')
+        requirements = (Path(__file__).resolve().parents[2] / 'requirements.txt').read_text().splitlines()
+        for name, module in (('uvicorn', uvicorn), ('fastapi', fastapi)):
+            pins = [line.split('==', 1)[1].strip() for line in requirements
+                    if line.startswith(name + '==')]
+            self.assertEqual(pins, [module.__version__])
+        # Derive only trusted, imported package roots; no arbitrary environment
+        # variables, proxy URLs, credentials, or UVICORN_* overrides are copied.
+        return {'PYTHONPATH': os.pathsep.join(sorted({
+            str(Path(module.__file__).resolve().parents[1]) for module in (uvicorn, fastapi)})),
+            'PYTHONDONTWRITEBYTECODE': '1', 'PYTHONUNBUFFERED': '1', 'LANG': 'C.UTF-8'}
+
+    def _wait(self, predicate, description, log, timeout=10):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            value = predicate()
+            if value:
+                return value
+            time.sleep(0.005)
+        self.fail(f'timed out waiting for {description}; synthetic server log: {log.read_text()}')
+
+    def _archive(self, state):
+        artifact_dir = os.environ.get('ASTRA_TEST_ARTIFACT_DIR')
+        if artifact_dir:
+            target = Path(artifact_dir) / self._testMethodName
+            target.mkdir(parents=True, exist_ok=True)
+            for source in state.iterdir():
+                if source.is_file():
+                    (target / source.name).write_bytes(source.read_bytes())
+
+    def _exercise_detached(self, signum, inherited):
+        import ctypes
+        environment = self._dependencies()
+        temporary = tempfile.TemporaryDirectory(prefix='astra-detached-tpe-')
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name)
+        state = root / 'state'
+        state.mkdir()
+        for filename, program in (('app.py', DETACHED_TPE_SYNTHETIC_APP),
+                                  ('child.py', DETACHED_TPE_SYNTHETIC_CHILD),
+                                  ('launcher.py', DETACHED_TPE_SYNTHETIC_LAUNCHER)):
+            (root / filename).write_text(program)
+        environment['SYNTHETIC_STATE'] = str(state)
+        with socket.socket() as listener:
+            listener.bind(('127.0.0.1', 0))
+            port = listener.getsockname()[1]
+        # This flag affects only this test-runner process and is restored below.
+        # It allows the deliberate TERM counterexample's own orphan to be
+        # reaped after natural exit, rather than leaving a zombie for PID 1.
+        libc = ctypes.CDLL(None, use_errno=True)
+        previous = ctypes.c_int()
+        self.assertEqual(libc.prctl(37, ctypes.byref(previous), 0, 0, 0), 0)
+        self.assertEqual(libc.prctl(36, 1, 0, 0, 0), 0)
+        process = None
+        child_pid = None
+        orphan_reaped = False
+        info = {'signal': int(signum), 'inherited_sigint': inherited, 'forced_cleanup': False}
+        log_path = state / 'server.log'
+        read = lambda name: json.loads((state / (name + '.json')).read_text())
+        with log_path.open('w') as log:
+            try:
+                process = subprocess.Popen([sys.executable, '-B', str(root / 'launcher.py'), inherited, str(port)],
+                    cwd=root, env=environment, stdin=subprocess.DEVNULL, stdout=log,
+                    stderr=subprocess.STDOUT, start_new_session=True)
+                info['backend_pid'] = process.pid
+                self._wait(lambda: (state / 'app_started.json').exists(), 'app startup', log_path)
+
+                def ready():
+                    try:
+                        return uvicorn_test_request(port, '/health')[0] == 200
+                    except OSError:
+                        return False
+
+                self._wait(ready, 'listener startup', log_path)
+                self.assertEqual(uvicorn_test_request(port, '/detach'),
+                    (200, {'returned': True, 'cancelled': [False, False], 'running': [True, True]}))
+                info['http_200_before_signal'] = True
+                child = read('child_started')
+                child_pid = child['pid']
+                info['child_pid'] = child_pid
+                self.assertEqual(child['ppid'], process.pid)
+                self.assertFalse(read('thread_started')['daemon'])
+                self.assertFalse(read('child_thread_started')['daemon'])
+                inherited_handler = read('inherited_signal')['handler']
+                if inherited == 'ignore':
+                    self.assertEqual(inherited_handler, str(signal.SIG_IGN))
+                else:
+                    self.assertIn('default_int_handler', inherited_handler)
+                self.assertFalse((state / 'thread_completed.json').exists())
+                self.assertFalse((state / 'child_thread_completed.json').exists())
+                process.send_signal(signum)  # Exact owned PID, never process group.
+                self._wait(lambda: uvicorn_test_refused(port), 'listener closure', log_path)
+                self._wait(lambda: (state / 'app_shutdown.json').exists(), 'lifespan shutdown', log_path)
+                self.assertTrue(uvicorn_test_alive(child_pid))
+                self.assertFalse((state / 'thread_completed.json').exists())
+                self.assertFalse((state / 'child_thread_completed.json').exists())
+                if signum == signal.SIGTERM:
+                    info['backend_returncode'] = process.wait(timeout=5)
+                    self.assertEqual(info['backend_returncode'], -signal.SIGTERM)
+                    self.assertTrue(uvicorn_test_alive(child_pid))
+                    self.assertFalse((state / 'thread_completed.json').exists())
+                    info['detached_thread_completion_lost'] = True
+                    (state / 'release').touch()
+                    self._wait(lambda: (state / 'child_completed.json').exists(), 'orphan natural completion', log_path)
+                    got, status = os.waitpid(child_pid, 0)
+                    orphan_reaped = True
+                    self.assertEqual(got, child_pid)
+                    self.assertEqual(os.waitstatus_to_exitcode(status), 0)
+                    info['orphan_child_natural_returncode'] = 0
+                    self.assertFalse((state / 'child_thread_completed.json').exists())
+                else:
+                    # Uvicorn's application shutdown is already complete, but
+                    # CPython must remain alive while joining the custom pool.
+                    time.sleep(0.20)
+                    self.assertIsNone(process.poll(), 'single SIGINT lost detached thread work')
+                    self.assertTrue(uvicorn_test_alive(child_pid))
+                    info['backend_alive_after_lifespan_while_detached_work_pending'] = True
+                    info['release_time'] = time.monotonic()
+                    (state / 'release').touch()
+                    self._wait(lambda: (state / 'thread_completed.json').exists(), 'detached thread completion', log_path)
+                    self._wait(lambda: (state / 'child_thread_completed.json').exists(), 'subprocess wait completion', log_path)
+                    self.assertEqual(read('child_thread_completed')['returncode'], 0)
+                    info['backend_returncode'] = process.wait(timeout=10)
+                    self.assertIn(info['backend_returncode'], (0, 130, -signal.SIGINT))
+                    self.assertFalse(uvicorn_test_alive(child_pid))
+                    self.assertFalse((state / 'thread_timed_out.json').exists())
+                    self.assertFalse((state / 'child_timed_out.json').exists())
+                    self.assertGreater(read('thread_completed')['time'], info['release_time'])
+                    info['detached_threads_completed'] = True
+                    info['child_natural_returncode'] = 0
+                info['passed'] = True
+            finally:
+                (state / 'release').touch()
+                if process is not None and process.poll() is None:
+                    info['forced_cleanup'] = True
+                    process.terminate()
+                    try:
+                        process.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+                        process.wait(timeout=5)
+                if child_pid is not None and not orphan_reaped:
+                    try:
+                        os.waitpid(child_pid, 0)
+                    except ChildProcessError:
+                        pass  # The backend normally reaped its own child.
+                self.assertEqual(libc.prctl(36, previous.value, 0, 0, 0), 0)
+                (state / 'result.json').write_text(json.dumps(info, indent=2) + '\n')
+                self._archive(state)
+        self.assertFalse(info['forced_cleanup'])
+
+    def test_sigterm_default_loses_detached_executor_threads(self):
+        self._exercise_detached(signal.SIGTERM, 'default')
+
+    def test_sigterm_inherited_ignore_loses_detached_executor_threads(self):
+        self._exercise_detached(signal.SIGTERM, 'ignore')
+
+    def test_single_sigint_default_drains_detached_executor_threads(self):
+        self._exercise_detached(signal.SIGINT, 'default')
+
+    def test_single_sigint_inherited_ignore_drains_detached_executor_threads(self):
+        self._exercise_detached(signal.SIGINT, 'ignore')
+
+    def test_second_sigint_can_interrupt_interpreter_join_and_lose_work(self):
+        """Negative regression: a signal with uncertain delivery must not retry."""
+        environment = self._dependencies()
+        temporary = tempfile.TemporaryDirectory(prefix='astra-second-sigint-')
+        self.addCleanup(temporary.cleanup)
+        state = Path(temporary.name)
+        script = state / 'synthetic_server.py'
+        script.write_text(SECOND_SIGINT_SYNTHETIC_SERVER)
+        log_path = state / 'server.log'
+        process = None
+        info = {'forced_cleanup': False}
+        with log_path.open('w') as log:
+            try:
+                process = subprocess.Popen([sys.executable, '-B', str(script), str(state)],
+                    cwd=state, env=environment, stdin=subprocess.DEVNULL, stdout=log,
+                    stderr=subprocess.STDOUT, start_new_session=True)
+                self._wait(lambda: (state / 'port').exists(), 'loopback port', log_path)
+                self.assertEqual(uvicorn_test_request(int((state / 'port').read_text()), '/'),
+                                 (200, {'accepted': True}))
+                self._wait(lambda: (state / 'worker_started').exists(), 'custom worker', log_path)
+                process.send_signal(signal.SIGINT)
+                self._wait(lambda: (state / 'run_returned').exists(), 'server return', log_path)
+                self.assertIn('default_int_handler', (state / 'run_returned').read_text())
+                self.assertIsNone(process.poll())
+                self.assertFalse((state / 'worker_finished').exists())
+                # Capture the real blocking stack instead of racing a guessed
+                # sleep. SIGUSR1 only asks faulthandler for diagnostics here.
+                last_diagnostic = [0.0]
+                def interpreter_join_seen():
+                    if '_python_exit' in log_path.read_text():
+                        return True
+                    now = time.monotonic()
+                    if now - last_diagnostic[0] >= 0.1:
+                        process.send_signal(signal.SIGUSR1)
+                        last_diagnostic[0] = now
+                    return False
+                self._wait(interpreter_join_seen, 'interpreter pool join', log_path)
+                stack = log_path.read_text()
+                self.assertIn('_shutdown', stack)
+                self.assertIn('join', stack)
+                self.assertFalse((state / 'worker_finished').exists())
+                process.send_signal(signal.SIGINT)  # Deliberate unsafe counterexample, never helper policy.
+                info['returncode'] = process.wait(timeout=5)
+                self.assertFalse((state / 'worker_finished').exists())
+                self.assertIn('KeyboardInterrupt', log_path.read_text())
+                info['interpreter_join_confirmed'] = True
+                info['completion_lost_after_second_sigint'] = True
+                info['passed'] = True
+            finally:
+                (state / 'release').touch()
+                if process is not None and process.poll() is None:
+                    info['forced_cleanup'] = True
+                    process.terminate()
+                    try:
+                        process.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+                        process.wait(timeout=5)
+                (state / 'result.json').write_text(json.dumps(info, indent=2) + '\n')
+                self._archive(state)
+        self.assertFalse(info['forced_cleanup'])
+
+
+if __name__ == '__main__':
+    if len(sys.argv) > 1 and sys.argv[1] == '--synthetic-worker':
+        synthetic_worker(Path(sys.argv[2]), Path(sys.argv[3]), sys.argv[4], sys.argv[5])
+    else:
+        unittest.main()

@@ -36,6 +36,8 @@ RELEASE_INCREMENT_PATHS = frozenset({
     '.github/scripts/runtime_release_upgrade.py',
     '.github/scripts/test_runtime_release_upgrade.py',
     '.github/scripts/test_deployment_plan.py',
+    '.github/scripts/test_deployment_identity.py',
+    '.github/scripts/rehearse_cycle_deadline_upgrade.py',
     '.github/scripts/run_collection_regressions.py',
     '.github/scripts/test_collection_regression_gate.py',
     '.github/workflows/test-taker-parsing.yml',

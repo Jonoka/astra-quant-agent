@@ -162,6 +162,10 @@ def rehearse(source: Path, previous: Path) -> dict:
             'release': helper.deployment_source(live)}
         obj.image_metadata = Mock(return_value="synthetic-image-not-inspected")
         obj.capacity, obj.stop = Mock(), Mock()
+        # This offline SQLite rehearsal has no containers or admitted jobs.
+        # Real maintenance admission/process boundaries have separate mandatory
+        # Linux lifecycle tests; preserve all schema and copy guards below.
+        obj.maintenance_drain = Mock()
         obj.start = Mock()
         obj.phase = lambda phase: obj.state.update(phase=phase)
         def portable_copy(source_path, destination):

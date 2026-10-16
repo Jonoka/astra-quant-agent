@@ -138,6 +138,11 @@
     }
   },
   "release_paths": {
+    ".github/scripts/rehearse_cycle_deadline_upgrade.py": {
+      "reviewed_sha256": "a5d0f1d0b60b7e3aecdaadcc377114c3269488105e0e4a61f75b7c38e20063ff",
+      "sha256": "598f4eff03ea070fe3c72fb57100d53f886a76d42ee86e1c5ceb39e49f8bbc0c",
+      "mode": "100644"
+    },
     ".github/scripts/run_collection_regressions.py": {
       "reviewed_sha256": "410ae3a8b96017b14d4a5427d63be6e66b5b37cd537f82119f5aad909a6fc21e",
       "sha256": "1bd7d1508eb610c75809bcad64d929b56262fffd800bc24eeaff7d568c5b06e0",
@@ -150,12 +155,12 @@
     },
     ".github/scripts/run_decision_release_preflight.py": {
       "reviewed_sha256": null,
-      "sha256": "4af2ad510007137c552a4a0a5afef690524d9e5379bcd6b10c9ddc69782dfff5",
+      "sha256": "009d4104af31f47d06d36f542c2b41b874829c9ef0dd88982b63ea57e0126be1",
       "mode": "100644"
     },
     ".github/scripts/runtime_release_upgrade.py": {
       "reviewed_sha256": "6f396c9104081691d3ff4d74a481633a025493ba02bc307dd304acb5b0075291",
-      "sha256": "aff4d9306e509c7aaa72f7d962ce0ed47225d3a3cfe622d830d304e6ca37545c",
+      "sha256": "1fa37a9c27c1f9bcdac5ff7cac84ce9cd623081ddd4e6e6f2afc2804dca8aaab",
       "mode": "100644"
     },
     ".github/scripts/test_collection_regression_gate.py": {
@@ -170,17 +175,22 @@
     },
     ".github/scripts/test_decision_release_source.py": {
       "reviewed_sha256": null,
-      "sha256": "4f4848a610640ff9799ed4384ad648dfe6a73d830403f11052ee468c84912663",
+      "sha256": "159c593760e965e58dffe254e78076e80e36a9b18266ce5da0accd44ba5e7eb4",
+      "mode": "100644"
+    },
+    ".github/scripts/test_deployment_identity.py": {
+      "reviewed_sha256": "be2b4eed07e35c64b3a540766fc2d4c6d6d7e4510f82c693955c5ad6675f9470",
+      "sha256": "36dcb619506df7abd0be715f44b038e2809587a8dec6a224fb0ee8f2b32c7134",
       "mode": "100644"
     },
     ".github/scripts/test_deployment_plan.py": {
       "reviewed_sha256": "30be46e120085390875692fa2c272092d12eb513279b637f1c143cec00995888",
-      "sha256": "9734f377f91db8f86cefdaa12f2fc025b3a7519b6e00bdf6d9f87ad7dcae6eeb",
+      "sha256": "ece70bfe5b530ef60c517cdf5fe954bc8426698bc528ee56f37b31b8eed916f4",
       "mode": "100644"
     },
     ".github/scripts/test_runtime_release_upgrade.py": {
       "reviewed_sha256": "4e9d50b2c7d0e93909beb20151f3838d7de825e5c9e274e3be42743866b0b268",
-      "sha256": "c8987e15ab392e624b51361c326132c1a614977696dd85d5f051a25b4ed4975c",
+      "sha256": "1cc60d28409c77760b1427b0af15f0712c84cb0adaa47acb16208f946722dd48",
       "mode": "100644"
     },
     ".github/workflows/build-release-image.yml": {

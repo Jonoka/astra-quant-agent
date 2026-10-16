@@ -71,6 +71,143 @@ LOG_PATTERNS = {
     "error": rb"\bERROR\b",
 }
 
+MAINTENANCE_PAUSE = 'data/.astra_watchdog.pause'
+MAINTENANCE_LOCK = 'data/.astra_gateway.lock'
+MAINTENANCE_TIMEOUT = 3600
+MAINTENANCE_POLL = 1
+# The legacy pause has no acknowledgement. In this exact reviewed script every
+# direct `sleep 5` is AFTER the current iteration's last kill/spawn, and every
+# subsequent iteration checks PAUSE first. No other script gets this adapter.
+MAINTENANCE_WATCHDOG_SHA256 = 'c8977df53a1bfffecb7de519ff8e514f4db238699ce95c15282139a065955611'
+MAINTENANCE_FILES = (
+    'scripts/astra_watchdog.sh', 'scripts/gateway_liveness.py', 'deploy/docker-entrypoint.sh',
+    'astra_gateway/worker.py', 'astra_gateway/scheduler.py',
+    'astra_backend/app.py', 'astra_backend/scheduler.py',
+    'astra_backend/routers/gateway/gateway_ops.py',
+    'astra_backend/routers/gateway/backups.py',
+)
+# Deliberately standalone, import-free with respect to the application. Observe
+# all processes in the container namespace, including reparented descendants and
+# API-launched jobs which never acquire the worker lock. Never signal a job,
+# watchdog, PID 1, or a process group. The only mutating action is a pidfd signal
+# to an exact, previously journaled application identity: ONE backend SIGINT
+# (normal interpreter shutdown joins abandoned executor threads), worker SIGTERM.
+MAINTENANCE_PROBE = r'''
+import hashlib, json, os, signal, stat, sys
+from pathlib import Path
+def need(ok, gate):
+    if not ok: raise ValueError(gate)
+def process(pid):
+    p = Path('/proc') / str(pid)
+    try:
+        first = (p / 'stat').read_text().rsplit(') ', 1)[1].split()
+        argv = (p / 'cmdline').read_bytes().rstrip(b'\0').split(b'\0')
+        last = (p / 'stat').read_text().rsplit(') ', 1)[1].split()
+    except (FileNotFoundError, ProcessLookupError):
+        return None
+    need(first[19] == last[19], 'maintenance_process_changed')
+    if last[0] in ('Z', 'X'): return None
+    return {'pid': pid, 'starttime': int(last[19]), 'ppid': int(last[1]),
+            'pgid': int(last[2]), 'sid': int(last[3]),
+            'argv': [x.decode('utf-8', 'strict') for x in argv]}
+def identity(p):
+    return {k:p[k] for k in ('pid', 'starttime')} if p else None
+def marker(expected):
+    fd = os.open('/app/data/.astra_watchdog.pause', os.O_RDONLY | os.O_NOFOLLOW)
+    try:
+        info = os.fstat(fd)
+        data = os.read(fd, 8192)
+        need(stat.S_ISREG(info.st_mode) and info.st_nlink == 1 and
+             stat.S_IMODE(info.st_mode) == 0o600 and info.st_uid == 0 and
+             {'dev': info.st_dev, 'ino': info.st_ino, 'sha256': hashlib.sha256(data).hexdigest(),
+              'mtime_ns': info.st_mtime_ns, 'ctime_ns': info.st_ctime_ns} == expected,
+             'maintenance_pause_identity')
+        after = os.stat('/app/data/.astra_watchdog.pause', follow_symlinks=False)
+        need((info.st_dev, info.st_ino, info.st_mtime_ns, info.st_ctime_ns) ==
+             (after.st_dev, after.st_ino, after.st_mtime_ns, after.st_ctime_ns), 'maintenance_pause_changed')
+    finally: os.close(fd)
+def main(p):
+    need(p['action'] in ('observe', 'signal'), 'maintenance_probe_action')
+    for name, expected in p['source_hashes'].items():
+        path = Path('/app') / name
+        need(path.resolve() == path and path.is_file() and
+             hashlib.sha256(path.read_bytes()).hexdigest() == expected, 'maintenance_container_source')
+    # Fail before changing admission if this kernel/Python cannot pin a signal.
+    fd = os.pidfd_open(os.getpid()); os.close(fd)
+    need(hasattr(signal, 'pidfd_send_signal'), 'maintenance_pidfd_unavailable')
+    if p.get('pause'): marker(p['pause'])
+    processes = []
+    for path in Path('/proc').iterdir():
+        if path.name.isdigit() and int(path.name) != os.getpid():
+            value = process(int(path.name))
+            if value: processes.append(value)
+    watchdog_argv = ['bash', '/app/scripts/astra_watchdog.sh'] + (['gateway'] if p['service'] == 'gateway' else [])
+    watchdogs = [x for x in processes if x['argv'] == watchdog_argv]
+    need(len(watchdogs) == 1 and watchdogs[0]['pid'] == 1, 'maintenance_watchdog_identity')
+    watchdog = watchdogs[0]
+    if p.get('watchdog'):
+        need(identity(watchdog) == p['watchdog'], 'maintenance_watchdog_changed')
+    suffix = (['-m', 'astra_gateway.worker'] if p['service'] == 'gateway' else
+              ['-m', 'uvicorn', 'astra_backend.app:app', '--host', '0.0.0.0', '--port', '8080'])
+    python = {'python3', '/app/.venv/bin/python3', '/app/venv/bin/python3'}
+    applications = [x for x in processes if x['argv'][0] in python and x['argv'][1:] == suffix]
+    app_tokens = {'astra_gateway.worker', 'astra_backend.app:app'}
+    need(all(x in applications for x in processes if app_tokens.intersection(x['argv'])), 'maintenance_app_argv')
+    need(len(applications) <= 1, 'maintenance_app_count')
+    app = applications[0] if applications else None
+    if app and p['service'] == 'backend':
+        env = (Path('/proc') / str(app['pid']) / 'environ').read_bytes().split(b'\0')
+        need(b'ASTRA_STANDALONE_GATEWAY=true' in env, 'maintenance_backend_standalone')
+        need(not any(x.startswith(b'UVICORN_TIMEOUT_GRACEFUL_SHUTDOWN=') for x in env),
+             'maintenance_backend_shutdown_timeout')
+        need(not any((x.startswith((b'UVICORN_WORKERS=', b'WEB_CONCURRENCY=')) and
+                      x.split(b'=', 1)[1] != b'1') or
+                     (x.startswith(b'UVICORN_RELOAD=') and
+                      x.split(b'=', 1)[1].lower() not in (b'0', b'false', b'no')) for x in env),
+             'maintenance_backend_process_manager')
+    if 'application' in p:
+        need(app is None or identity(app) == p['application'], 'maintenance_app_changed')
+    watchdog_lock = Path('/app/data/.astra_watchdog' + ('.gateway' if p['service'] == 'gateway' else '') + '.lock').stat()
+    def owned_sleep(x):
+        if not (x['ppid'] == watchdog['pid'] and x['argv'] == ['sleep', '5'] and
+                x['pgid'] == watchdog['pgid'] and x['sid'] == watchdog['sid']): return False
+        try: inherited = (Path('/proc') / str(x['pid']) / 'fd/9').stat()
+        except FileNotFoundError: return False
+        return (inherited.st_dev, inherited.st_ino) == (watchdog_lock.st_dev, watchdog_lock.st_ino)
+    owner_lock = (Path('/proc') / str(watchdog['pid']) / 'fd/9').stat()
+    need((owner_lock.st_dev, owner_lock.st_ino) == (watchdog_lock.st_dev, watchdog_lock.st_ino),
+         'maintenance_watchdog_lock')
+    sleeps = [x for x in processes if owned_sleep(x)]
+    # Re-read the witness after scanning, rather than accepting a dead child's
+    # stale /proc entry or an arbitrary process with a sleep-like command line.
+    witness = any(process(x['pid']) == x for x in sleeps)
+    need(process(watchdog['pid']) == watchdog, 'maintenance_watchdog_changed')
+    if p.get('pause'): marker(p['pause'])
+    signalled = False
+    if p['action'] == 'signal' and app:
+        need(p.get('pause') and p.get('barrier') is True and p.get('application') == identity(app)
+             and app['pid'] > 1, 'maintenance_signal_precondition')
+        fd = os.pidfd_open(app['pid'])
+        try:
+            need(process(app['pid']) == app, 'maintenance_app_changed')
+            marker(p['pause'])
+            need(process(watchdog['pid']) == watchdog, 'maintenance_watchdog_changed')
+            signal.pidfd_send_signal(fd, signal.SIGINT if p['service'] == 'backend' else signal.SIGTERM)
+            signalled = True
+        finally: os.close(fd)
+    allowed = {watchdog['pid']} | {x['pid'] for x in sleeps}
+    pending = [identity(x) for x in processes if x['pid'] not in allowed]
+    lock = Path('/app/data/.astra_gateway.lock').stat()
+    return {'watchdog': identity(watchdog), 'application': identity(app),
+            'safe_sleep': witness, 'pending': pending, 'signalled': signalled,
+            'lock': {'dev': lock.st_dev, 'ino': lock.st_ino}}
+try:
+    print(json.dumps(main(json.loads(sys.argv[1])), sort_keys=True))
+except Exception as exc:
+    gate = str(exc) if isinstance(exc, ValueError) and str(exc).startswith('maintenance_') else 'maintenance_probe_failed'
+    print(json.dumps({'error': gate}))
+'''
+
 # Independently reviewed migration contract. Never populate it by introspecting
 # the candidate source or candidate database that is being accepted.
 GATEWAY_DATABASE = "data/astra_gateway.db"
@@ -898,6 +1035,465 @@ class Upgrade:
         require(scope['schedule_seconds'] - int(time.time()) % scope['schedule_seconds'] >=
                 scope['minimum_idle_window_seconds'], 'insufficient_idle_window')
 
+    def maintenance_probe(self, container, action='observe', expected=None):
+        """One testable, exact-container boundary; never return environment data."""
+        maintenance = self.state.get('maintenance', {})
+        label = 'release' if (
+            (self.op / 'original-deployment').exists() and not (self.op / 'failed-candidate').exists()
+            ) else 'previous'
+        if expected is not None:
+            require(maintenance.get('source') == label, 'maintenance_source_changed')
+        hashes = self.manifest['source_files'][label]
+        require(all(name in hashes for name in MAINTENANCE_FILES) and
+                hashes['scripts/astra_watchdog.sh'] == MAINTENANCE_WATCHDOG_SHA256,
+                'maintenance_watchdog_adapter')
+        payload = {'service': container['service'], 'action': action,
+                   'source_hashes': {name: hashes[name] for name in MAINTENANCE_FILES}}
+        if expected is not None:
+            payload.update({key: expected[key] for key in ('watchdog', 'application', 'barrier')})
+            payload['pause'] = maintenance['pause']
+        value = json.loads(run('docker', 'exec', container['id'], 'python3', '-c',
+                               MAINTENANCE_PROBE, json.dumps(payload), timeout=30))
+        require(isinstance(value, dict) and not value.get('error'),
+                value.get('error', 'maintenance_probe_result') if isinstance(value, dict)
+                else 'maintenance_probe_result')
+        return value
+
+    def maintenance_save(self, phase=None):
+        """state.json is authoritative; the separate journal is an audit view."""
+        maintenance = self.state['maintenance']
+        if phase is not None and phase != maintenance.get('phase'):
+            maintenance['phase'] = phase
+            maintenance.setdefault('transitions', []).append({'phase': phase, 'at': time.time()})
+        maintenance['updated_at'] = time.time()
+        self.save('state.json', self.state)
+        self.save('maintenance-journal.json', maintenance)
+
+    def maintenance_pause_identity(self, *, copied=False):
+        maintenance = self.state['maintenance']
+        require(maintenance['operation'] == str(self.op) and
+                maintenance['deployment_plan_sha256'] == self.deployment_plan_sha256,
+                'maintenance_operation_identity')
+        path = plain_path(ROOT / MAINTENANCE_PAUSE)
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        try:
+            info = os.fstat(fd)
+            raw = os.read(fd, 8192)
+            require(stat.S_ISREG(info.st_mode) and info.st_nlink == 1 and
+                    info.st_uid == 0 and stat.S_IMODE(info.st_mode) == 0o600 and
+                    raw == maintenance['pause_content'].encode(), 'maintenance_foreign_pause')
+            after = path.stat(follow_symlinks=False)
+            require((info.st_dev, info.st_ino, info.st_mtime_ns, info.st_ctime_ns) ==
+                    (after.st_dev, after.st_ino, after.st_mtime_ns, after.st_ctime_ns),
+                    'maintenance_pause_changed')
+            identity = {'dev': info.st_dev, 'ino': info.st_ino, 'sha256': sha(raw),
+                        'mtime_ns': info.st_mtime_ns, 'ctime_ns': info.st_ctime_ns}
+            if maintenance.get('pause') and not copied:
+                require(identity == maintenance['pause'], 'maintenance_pause_identity')
+            return identity
+        finally:
+            os.close(fd)
+
+    def maintenance_begin(self, purpose):
+        require(purpose in {'execute', 'rollback'}, 'maintenance_purpose')
+        targets = self.deployment_guard()
+        source = 'release' if (self.op / 'original-deployment').exists() and not (
+            self.op / 'failed-candidate').exists() else 'previous'
+        maintenance = self.state.get('maintenance')
+        if (maintenance and maintenance['phase'] == 'released' and
+                self.state.get('phase') in {'candidate-active', 'recovery-active'}):
+            require(all(c['state'] in {'exited', 'created'} for c in targets.values()),
+                    'maintenance_handoff_running')
+            self.maintenance_clear_pause(copied=True)
+        if maintenance and ((maintenance['source'] != source and
+                             maintenance['phase'] not in {'released', 'restored'}) or
+                            maintenance['phase'] == 'releasing'):
+            # A stopped tree may have been renamed before start() could remove
+            # its carried marker. Reconcile that exact copy, never the archive.
+            require(all(c['state'] in {'exited', 'created'} for c in targets.values()),
+                    'maintenance_handoff_running')
+            self.maintenance_release_lock()
+            self.maintenance_clear_pause(copied=True)
+        if maintenance and maintenance['phase'] not in {'released', 'restored'}:
+            require(maintenance['phase'] not in {'releasing', 'restoring'},
+                    'maintenance_restore_pending')
+            require(purpose == 'rollback' or maintenance['purpose'] == purpose,
+                    'maintenance_purpose_changed')
+            return
+        # No mutation has happened yet. In particular, do not adopt or remove an
+        # operator's pause, even if the operation otherwise passes its gates.
+        require(not (ROOT / MAINTENANCE_PAUSE).exists() and
+                not (ROOT / MAINTENANCE_PAUSE).is_symlink(), 'maintenance_foreign_pause')
+        if purpose == 'execute':
+            require(set(targets) == set(NAMES), 'maintenance_container_missing')
+        pins = {}
+        lock = None
+        for name, container in targets.items():
+            require(container['state'] in {'running', 'exited', 'created'}, 'maintenance_container_state')
+            value = self.maintenance_probe(container) if container['state'] == 'running' else None
+            if purpose == 'execute':
+                require(value and value['application'], 'maintenance_application_missing')
+            if value:
+                require(lock is None or lock == value['lock'], 'maintenance_lock_identity')
+                lock = value['lock']
+            pins[name] = {'container_id': container['id'],
+                          'watchdog': value['watchdog'] if value else None,
+                          'application': value['application'] if value else None,
+                          'barrier': value is None, 'stop_complete': value is None,
+                          'signal': 'SIGINT' if container['service'] == 'backend' else 'SIGTERM',
+                          'signal_intent': False, 'signal_acknowledged': False,
+                          'signal_result': 'not_sent' if value else 'container_already_stopped'}
+        if lock is None:
+            info = plain_path(ROOT / MAINTENANCE_LOCK).stat()
+            lock = {'dev': info.st_dev, 'ino': info.st_ino}
+        if maintenance:
+            self.state.setdefault('maintenance_history', []).append(copy.deepcopy(maintenance))
+        content = json.dumps({'owner': 'astra-runtime-release-maintenance-v1',
+            'operation': str(self.op), 'deployment_plan_sha256': self.deployment_plan_sha256,
+            'source': source, 'nonce': os.urandom(32).hex()}, sort_keys=True) + '\n'
+        self.state['maintenance'] = {'schema': 1, 'operation': str(self.op),
+            'deployment_plan_sha256': self.deployment_plan_sha256, 'purpose': purpose,
+            'source': source, 'containers': pins, 'lock': lock, 'pause_content': content,
+            'pause_stage': MAINTENANCE_PAUSE + '.' + sha(content.encode()) + '.stage',
+            'pause_stage_identity': None,
+            'pause': None, 'last_observation': None, 'pending_processes': None,
+            'running_jobs': None}
+        if purpose == 'execute' or self.state.get('phase') == 'prepared':
+            self.state['phase'] = 'draining'
+        # The intent precedes O_EXCL of a private staging file. The final pause
+        # is published only after complete bytes/inode are durably journaled.
+        self.maintenance_save('pause-intent')
+
+    def maintenance_create_pause(self):
+        maintenance = self.state['maintenance']
+        path = plain_path(ROOT / MAINTENANCE_PAUSE)
+        if maintenance['phase'] != 'pause-intent':
+            require(path.exists(), 'maintenance_pause_missing')
+            self.maintenance_pause_identity()
+            return
+
+        def sync_directory():
+            directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)
+
+        def staged_identity(target, links):
+            plain_path(target)
+            fd = os.open(target, os.O_RDONLY | os.O_NOFOLLOW)
+            try:
+                info = os.fstat(fd)
+                raw = os.read(fd, 8192)
+                require(stat.S_ISREG(info.st_mode) and info.st_nlink in links and
+                        info.st_uid == 0 and stat.S_IMODE(info.st_mode) == 0o600 and
+                        raw == maintenance['pause_content'].encode(), 'maintenance_stage_identity')
+                after = target.stat(follow_symlinks=False)
+                require((info.st_dev, info.st_ino, info.st_mtime_ns, info.st_ctime_ns) ==
+                        (after.st_dev, after.st_ino, after.st_mtime_ns, after.st_ctime_ns),
+                        'maintenance_stage_identity')
+                return {'dev': info.st_dev, 'ino': info.st_ino, 'sha256': sha(raw)}
+            finally:
+                os.close(fd)
+
+        stage_name = maintenance['pause_stage']
+        require(re.fullmatch(re.escape(MAINTENANCE_PAUSE) + r'\.[0-9a-f]+\.stage', stage_name),
+                'maintenance_stage_path')
+        stage = plain_path(ROOT / stage_name)
+        recorded = maintenance['pause_stage_identity']
+        if not path.exists():
+            if recorded is None:
+                if stage.exists():
+                    # SIGKILL can leave an incomplete private stage before its
+                    # inode was journaled. Never adopt or remove unknown bytes;
+                    # leave that evidence and choose a fresh exclusive pathname.
+                    maintenance.setdefault('abandoned_pause_stages', []).append(stage_name)
+                    stage_name = MAINTENANCE_PAUSE + '.' + os.urandom(32).hex() + '.stage'
+                    maintenance['pause_stage'] = stage_name
+                    stage = plain_path(ROOT / stage_name)
+                    self.maintenance_save()
+                fd = os.open(stage, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+                with os.fdopen(fd, 'wb') as stream:
+                    stream.write(maintenance['pause_content'].encode())
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                sync_directory()
+                recorded = staged_identity(stage, {1})
+                maintenance['pause_stage_identity'] = recorded
+                self.maintenance_save()
+            require(stage.exists() and staged_identity(stage, {1}) == recorded,
+                    'maintenance_stage_identity')
+            # link(2) is atomic and fails if PAUSE already exists: unlike replace,
+            # it cannot overwrite an unrelated operator marker. PAUSE is never
+            # visible empty or partially written, even if this process is killed.
+            try:
+                os.link(stage, path, follow_symlinks=False)
+            except FileExistsError:
+                raise GateError('maintenance_foreign_pause') from None
+            sync_directory()
+        require(recorded is not None and staged_identity(path, {1, 2}) == recorded,
+                'maintenance_foreign_pause')
+        if stage.exists():
+            require(staged_identity(stage, {2}) == recorded and
+                    staged_identity(path, {2}) == recorded, 'maintenance_stage_identity')
+            stage.unlink()
+            sync_directory()
+        maintenance['pause'] = self.maintenance_pause_identity()
+        self.maintenance_save('paused')
+
+    def maintenance_guard(self):
+        """Recheck ownership even while health is intentionally unavailable."""
+        maintenance = self.state['maintenance']
+        self.deployment_plan()
+        targets = self.deployment_guard()
+        require(set(targets) == set(maintenance['containers']) and all(
+            targets[name]['id'] == pin['container_id'] for name, pin in maintenance['containers'].items()),
+            'maintenance_container_changed')
+        unchanged_unrelated(self.state['baseline'], containers())
+        self.maintenance_pause_identity()
+        info = plain_path(ROOT / MAINTENANCE_LOCK).stat()
+        require(stat.S_ISREG(info.st_mode) and
+                {'dev': info.st_dev, 'ino': info.st_ino} == maintenance['lock'],
+                'maintenance_lock_identity')
+        fd = getattr(self, '_maintenance_lock_fd', None)
+        if fd is not None:
+            held = os.fstat(fd)
+            require((held.st_dev, held.st_ino) == (info.st_dev, info.st_ino),
+                    'maintenance_lock_identity')
+        return targets
+
+    def maintenance_observe(self):
+        maintenance = self.state['maintenance']
+        targets = self.maintenance_guard()
+        observations = {}
+        for name, container in targets.items():
+            pin = maintenance['containers'][name]
+            require(container['state'] in {'running', 'exited', 'created'}, 'maintenance_container_state')
+            if container['state'] != 'running':
+                observations[name] = {'application': None, 'pending': [], 'safe_sleep': False}
+                continue
+            require(pin['watchdog'] is not None, 'maintenance_container_started')
+            value = self.maintenance_probe(container, expected=pin)
+            require(value['lock'] == maintenance['lock'], 'maintenance_lock_identity')
+            observations[name] = value
+        with sqlite_snapshot(plain_path(ROOT / GATEWAY_DATABASE)) as database:
+            running = database.execute("SELECT COUNT(*) FROM job_runs WHERE status='running'").fetchone()[0]
+        maintenance['last_observation'] = {'at': time.time(), 'containers': observations}
+        maintenance['pending_processes'] = sum(len(value['pending']) for value in observations.values())
+        maintenance['running_jobs'] = running
+        self.maintenance_save()
+        return targets, observations
+
+    def maintenance_acquire_lock(self):
+        import fcntl
+        if getattr(self, '_maintenance_lock_fd', None) is not None:
+            self.maintenance_guard()
+            return True
+        fd = os.open(plain_path(ROOT / MAINTENANCE_LOCK), os.O_RDWR | os.O_NOFOLLOW)
+        try:
+            info = os.fstat(fd)
+            require(stat.S_ISREG(info.st_mode) and
+                    {'dev': info.st_dev, 'ino': info.st_ino} == self.state['maintenance']['lock'],
+                    'maintenance_lock_identity')
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return False
+            self._maintenance_lock_fd = fd
+            fd = None
+            self.maintenance_guard()
+            return True
+        finally:
+            if fd is not None:
+                os.close(fd)
+
+    def maintenance_release_lock(self):
+        fd = getattr(self, '_maintenance_lock_fd', None)
+        if fd is not None:
+            os.close(fd)
+            self._maintenance_lock_fd = None
+
+    def maintenance_drain(self, purpose='execute'):
+        """Resume naturally; timeout/interruption retains the admission barrier.
+
+        Return with the original inode flock HELD. Neither a zero DB count nor
+        early worker flock release establishes completion: every live process
+        other than the exact watchdog and its proven sleep must first exit.
+        """
+        self.maintenance_begin(purpose)
+        self.maintenance_create_pause()
+        maintenance = self.state['maintenance']
+        deadline = time.monotonic() + MAINTENANCE_TIMEOUT
+        try:
+            while True:
+                targets, observations = self.maintenance_observe()
+                for name, value in observations.items():
+                    pin = maintenance['containers'][name]
+                    if value['safe_sleep'] or targets[name]['state'] != 'running':
+                        pin['barrier'] = True
+                self.maintenance_save()
+                if all(pin['barrier'] for pin in maintenance['containers'].values()):
+                    if not all(pin['stop_complete'] for pin in maintenance['containers'].values()):
+                        self.maintenance_save('terminating')
+                    # Both watchdogs crossed their last dangerous restart point
+                    # before either application is signalled. The probe opens a
+                    # pidfd and rechecks starttime immediately before signalling.
+                    for name in NAMES:
+                        if name not in targets:
+                            continue
+                        pin = maintenance['containers'][name]
+                        if not pin['stop_complete']:
+                            self.maintenance_guard()
+                            if observations[name]['application'] is None:
+                                pin['signal_result'] = ('unknown_outcome_process_exited' if pin['signal_intent']
+                                                        else 'application_already_exited')
+                                pin['stop_complete'] = True
+                                self.maintenance_save()
+                                continue
+                            # A SECOND backend INT can interrupt CPython's final
+                            # executor joins and lose model work, even exit zero.
+                            # An unacknowledged intent with the original process
+                            # alive therefore needs review, NEVER another signal.
+                            if targets[name]['service'] == 'backend' and pin['signal_intent']:
+                                pin['signal_result'] = 'uncertain_no_resend'
+                                self.maintenance_save()
+                                raise GateError('maintenance_backend_signal_uncertain')
+                            pin['signal_intent'] = True
+                            pin['signal_result'] = 'intent_recorded'
+                            self.maintenance_save()
+                            result = self.maintenance_probe(targets[name], action='signal', expected=pin)
+                            pin['signal_acknowledged'] = bool(result['signalled'])
+                            pin['signal_result'] = ('acknowledged' if result['signalled']
+                                                    else 'application_exited_before_send')
+                            pin['stop_complete'] = True
+                            self.maintenance_save()
+                    self.maintenance_save('draining')
+                    # Always observe again AFTER signalling. tick() can still submit
+                    # queued jobs, and CPython waits for executor threads after
+                    # run() returns and releases the worker's flock.
+                    _, observations = self.maintenance_observe()
+                    if (maintenance['pending_processes'] == 0 and maintenance['running_jobs'] == 0 and
+                            all(value['application'] is None for value in observations.values()) and
+                            self.maintenance_acquire_lock()):
+                        # Recheck all evidence under the lock before returning.
+                        _, observations = self.maintenance_observe()
+                        if maintenance['pending_processes'] == 0 and maintenance['running_jobs'] == 0:
+                            self.maintenance_save('drained')
+                            return
+                require(time.monotonic() < deadline, 'maintenance_drain_timeout')
+                time.sleep(MAINTENANCE_POLL)
+        except BaseException as exc:
+            maintenance['last_error'] = str(exc) if isinstance(exc, GateError) else 'maintenance_interrupted'
+            self.maintenance_save()
+            self.maintenance_release_lock()
+            raise
+
+    def maintenance_idle_window(self):
+        deadline = time.monotonic() + MAINTENANCE_TIMEOUT
+        while True:
+            _, observations = self.maintenance_observe()
+            if (self.state['maintenance']['pending_processes'] != 0 or
+                    self.state['maintenance']['running_jobs'] != 0 or
+                    any(value['application'] is not None for value in observations.values())):
+                require(time.monotonic() < deadline, 'maintenance_activity_after_drain')
+                time.sleep(MAINTENANCE_POLL)
+                continue
+            try:
+                self.idle_window()  # Preserve BOTH 480-second and all existing gates.
+            except GateError as exc:
+                if str(exc) != 'insufficient_idle_window':
+                    raise
+                self.maintenance_save('waiting-window')
+                time.sleep(MAINTENANCE_POLL)
+                continue
+            self.maintenance_save('drained')
+            return
+
+    def maintenance_clear_pause(self, *, copied=False):
+        maintenance = self.state.get('maintenance')
+        if not maintenance:
+            return
+        require(maintenance['phase'] in {'drained', 'waiting-window', 'restoring', 'releasing', 'released'},
+                'maintenance_not_drained')
+        self.deployment_guard()
+        path = plain_path(ROOT / MAINTENANCE_PAUSE)
+        require(maintenance['phase'] != 'released' or not path.exists(), 'maintenance_foreign_pause')
+        if copied:
+            if (maintenance['phase'] == 'releasing' or
+                    maintenance['phase'] == 'released' and
+                    self.state.get('phase') in {'candidate-active', 'recovery-active'}):
+                frozen = copy.deepcopy(maintenance.get('release_tree'))
+                require(frozen, 'maintenance_frozen_tree_missing')
+                if not path.exists():
+                    frozen.pop(MAINTENANCE_PAUSE, None)
+                require(tree_manifest(ROOT) == frozen, 'maintenance_frozen_tree_drift')
+            elif maintenance['phase'] != 'released':
+                frozen = ('recovery_manifest' if (self.op / 'failed-candidate').exists()
+                          else 'candidate_manifest' if (self.op / 'original-deployment').exists()
+                          else None)
+                if frozen:
+                    require(self.state.get(frozen) and tree_manifest(ROOT) == self.state[frozen],
+                            'maintenance_frozen_tree_drift')
+        if not path.exists():
+            require(maintenance['phase'] in {'releasing', 'released'}, 'maintenance_pause_missing')
+            self.maintenance_save('released')
+            return
+        identity = self.maintenance_pause_identity(copied=copied)
+        if maintenance['phase'] == 'releasing':
+            require(identity == maintenance.get('removed_pause'), 'maintenance_pause_identity')
+        maintenance['removed_pause'] = identity
+        maintenance['release_tree'] = tree_manifest(ROOT)
+        self.maintenance_save('releasing')
+        # Only the live ROOT is changed. Copies in stopped/original/failed trees
+        # remain byte-for-byte evidence, including their maintenance marker.
+        require(self.maintenance_pause_identity(copied=copied) == identity, 'maintenance_pause_changed')
+        path.unlink()
+        directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+        self.maintenance_save('released')
+
+    def maintenance_resume_previous(self):
+        self.deployment_guard()
+        require(not (self.op / 'original-deployment').exists(), 'maintenance_restore_source')
+        # A config/identity failure is not permission to restart using newly
+        # changed configuration. Keep the safe barrier until it is reconciled.
+        self.pool_guard()
+        env_gate(ROOT)
+        require(self.guard(ROOT) == self.state['guard'], 'source_config_drift')
+        self.continuity()
+        if self.state['maintenance']['phase'] not in {'restoring', 'releasing', 'released'}:
+            self.state['log_marks'] = self.log_marks()
+            self.state['started'] = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
+            self.state['protected_config'] = {
+                n: tree_manifest(ROOT / n) if (ROOT / n).exists() else None for n in CONFIG}
+        self.state['phase'] = 'recovery-starting'
+        if self.state['maintenance']['phase'] not in {'releasing', 'released', 'restoring'}:
+            self.maintenance_save('restoring')
+        self.maintenance_release_lock()
+        self.maintenance_clear_pause()
+        deadline = time.monotonic() + 180
+        while True:
+            self.deployment_guard()
+            try:
+                self.runtime(True, self.state['baseline'])
+                self.worker_state()
+                require(self.endpoints(True) == self.state['endpoints'], 'credential_auth_continuity')
+                restored = {name: self.maintenance_probe(c)
+                            for name, c in self.deployment_guard().items()}
+                require(set(restored) == set(NAMES) and all(v['application'] for v in restored.values()),
+                        'maintenance_restore_applications')
+                self.state['maintenance']['restored_applications'] = restored
+                break
+            except GateError:
+                require(time.monotonic() < deadline, 'maintenance_restore_timeout')
+                time.sleep(MAINTENANCE_POLL)
+        self.verify(previous=True)
+        self.maintenance_save('restored')
+        self.phase('rolled-back')
+
     def read(self, name):
         return json.loads((self.op / name).read_bytes())
 
@@ -950,7 +1546,7 @@ class Upgrade:
         operation-owned container IDs may not be replaced by a newer deployment.
         """
         phase = self.state.get('phase')
-        previous_phases = {'stopping', 'stopped', 'snapshot-verified', 'candidate-ready',
+        previous_phases = {'prepared', 'draining', 'stopping', 'stopped', 'snapshot-verified', 'candidate-ready',
                            'recovery-starting', 'rolled-back'}
         candidate_phases = {'root-moved', 'candidate-active', 'starting', 'accepted',
                             'recovery-stopped', 'recovery-ready'}
@@ -1321,6 +1917,19 @@ print(json.dumps({'risk':expected,'pool':[i['name'] for i in items],
         # ID selection still works if candidate .env/Compose is damaged.
         now = containers()
         self.deployment_guard(inventory=now)
+        if self.state.get('maintenance'):
+            require(self.state['maintenance']['phase'] == 'drained' and
+                    getattr(self, '_maintenance_lock_fd', None) is not None,
+                    'maintenance_stop_before_drain')
+            _, observations = self.maintenance_observe()
+            require(self.state['maintenance']['pending_processes'] == 0 and
+                    self.state['maintenance']['running_jobs'] == 0 and
+                    all(value['application'] is None for value in observations.values()),
+                    'maintenance_stop_before_drain')
+            if self.state['maintenance']['purpose'] == 'execute':
+                # The process/DB probes above must not consume the reserved
+                # cutover interval. Wait under the same barrier if necessary.
+                self.maintenance_idle_window()
         targets = {n: c for n, c in now.items() if c["project"] == PROJECT}
         require(set(targets) <= set(NAMES) and all(c["service"] == n.removeprefix("astraquant-")
                 for n, c in targets.items()), "stop_project_scope")
@@ -1400,6 +2009,8 @@ print(json.dumps({'risk':expected,'pool':[i['name'] for i in items],
     def start(self, previous):
         self.pool_guard()
         self.deployment_guard()
+        self.maintenance_release_lock()
+        self.maintenance_clear_pause(copied=True)
         self.state["log_marks"] = self.log_marks()
         self.state["started"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         self.phase("recovery-starting" if previous else "starting")
@@ -1442,18 +2053,27 @@ print(json.dumps({'risk':expected,'pool':[i['name'] for i in items],
                 time.sleep(15)
 
     def execute(self):
-        require(self.state.get("phase") == "prepared", "preflight_required")
+        require(self.state.get("phase") in {'prepared', 'draining'}, "preflight_required")
         # Every fallible pre-stop gate stays outside the recovery block; drift
         # must not restart or otherwise disturb a healthy previous deployment.
         self.check_drift()
         self.capacity()
-        self.runtime(True, self.state["baseline"])
-        require(self.endpoints(True) == self.state["endpoints"], "prestop_auth_drift")
+        if self.state['phase'] == 'prepared':
+            self.runtime(True, self.state["baseline"])
+            require(self.endpoints(True) == self.state["endpoints"], "prestop_auth_drift")
         self.validate_compose(self.op / "candidate")
         self.image_metadata(False)
         self.check_drift()
-        self.idle_window()
+        # Preserve read-only rejection of malformed scheduler state before any
+        # admission change, while allowing legitimate currently running jobs.
+        with sqlite_snapshot(plain_path(ROOT / GATEWAY_DATABASE)) as database:
+            database.execute("SELECT COUNT(*) FROM job_runs WHERE status='running'").fetchone()
+        # A drain timeout/interruption deliberately stays OUTSIDE automatic
+        # recovery: removing pause while the old worker has stopped heartbeats
+        # would expose its still-running executor work to watchdog SIGKILL.
+        self.maintenance_drain()
         try:
+            self.maintenance_idle_window()
             self.phase("stopping")
             self.stop()
             self.phase("stopped")
@@ -1468,8 +2088,10 @@ print(json.dumps({'risk':expected,'pool':[i['name'] for i in items],
             self.carry(ROOT, candidate, "release-seed")
             self.prompt_refresh(candidate)
             self.state["protected_config"] = {n: tree_manifest(candidate / n) if (candidate / n).exists() else None for n in CONFIG}
+            self.state['candidate_manifest'] = tree_manifest(candidate)
             self.phase("candidate-ready")
             require(tree_manifest(ROOT) == self.state["snapshot"], "stopped_state_drift")
+            self.maintenance_release_lock()  # This inode belongs to the old tree only.
             self.move(ROOT, self.op / "original-deployment")
             self.phase("root-moved")
             self.move(candidate, ROOT)
@@ -1532,7 +2154,10 @@ print(json.dumps({'risk':expected,'pool':[i['name'] for i in items],
         self.phase('recovery-active')
 
     def rollback(self):
-        require(self.state and self.state.get("phase") not in ("prepared", "rolled-back"), "rollback_phase")
+        require(self.state and self.state.get("phase") != "prepared", "rollback_phase")
+        if self.state.get('phase') == 'rolled-back':
+            require(self.state.get('maintenance', {}).get('phase') in {'released', 'restored'},
+                    'rollback_phase')
         require(self.manifest_sha == self.state["manifest_sha"], "manifest_drift")
         self.sources()
         self.image_metadata(True)
@@ -1542,9 +2167,22 @@ print(json.dumps({'risk':expected,'pool':[i['name'] for i in items],
             self.save('rollback-identity-rejection-' + str(time.time_ns()) + '.json',
                       {'phase': self.state.get('phase'), 'gate': str(exc)})
             raise
+        if self.state.get('phase') == 'rolled-back':
+            # Repeat only the read-only acceptance of this operation's exact
+            # restored deployment. Never stop or restart an accepted rollback.
+            self.verify(previous=True)
+            return
         original = self.op / "original-deployment"
         failed = self.op / "failed-candidate"
         recovery = self.op / "recovery"
+        maintenance = self.state.get('maintenance')
+        if maintenance and not original.exists() and ROOT.exists():
+            if not (self.state['phase'] == 'recovery-starting' and
+                    maintenance['phase'] in {'restoring', 'releasing', 'released'}):
+                self.maintenance_drain('rollback')
+            if all(c['state'] == 'running' for c in self.deployment_guard().values()):
+                self.maintenance_resume_previous()
+                return
         self.resume_recovery_renames()
         # If the process died between the two renames, restore the explicitly
         # identified tree. The independent stopped snapshot remains untouched.
@@ -1557,6 +2195,9 @@ print(json.dumps({'risk':expected,'pool':[i['name'] for i in items],
             require(tree_manifest(self.op / "stopped-snapshot") == self.state["snapshot"], "snapshot_evidence_drift")
             env_gate(ROOT)
             self.capacity()
+            # A failed candidate may already have admitted scheduled or manual
+            # jobs. It gets the SAME pause/signal/natural drain before docker stop.
+            self.maintenance_drain('rollback')
             self.stop()
             self.phase("recovery-stopped")
             latest_db = db_state(ROOT)
@@ -1577,6 +2218,7 @@ print(json.dumps({'risk':expected,'pool':[i['name'] for i in items],
             self.state["recovery_manifest"] = tree_manifest(recovery)
             self.state['recovery_input_manifest'] = latest
             self.phase("recovery-ready")
+            self.maintenance_release_lock()
             self.move(ROOT, failed)
             self.phase("candidate-retained")
             self.move(recovery, ROOT)
@@ -1616,10 +2258,13 @@ def main():
         signal.signal(signal.SIGINT, interrupted)
         with upgrade_lock(BACKUPS / ".upgrade.lock"):
             upgrade = Upgrade(args.operation, session, args.deployment_plan_sha256)
-            if args.mode == "verify":
-                upgrade.verify(args.previous)
-            else:
-                getattr(upgrade, args.mode)()
+            try:
+                if args.mode == "verify":
+                    upgrade.verify(args.previous)
+                else:
+                    getattr(upgrade, args.mode)()
+            finally:
+                upgrade.maintenance_release_lock()
         print("PASS: " + args.mode)
     except BaseException as exc:
         print("FAIL: " + (str(exc) if isinstance(exc, GateError) else "runtime_failure"))

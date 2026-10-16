@@ -25,6 +25,14 @@ from verify_decision_release_source import (
     git as source_git, verify_checkout, verify_decision_release_source,
 )
 
+# This release's verified deployment predecessor is separate from the frozen
+# historical review fixtures. Updating it requires another exact-source review.
+DEPLOYMENT_PREDECESSOR = {
+    'source': '1bd3c016bf4375114d34022c1528d119d90cd6ad',
+    'tree': '47d98d0091a86a513ce1ccc20ced1096fce9d93d',
+    'image': 'ghcr.io/jonoka/astra-quant-agent@sha256:7bfc6bb0b75c6a63393f1c717c771cc7097059b2b2c4a6ddca2de86049005bee',
+}
+
 # The old source-contract positive fixtures assert exact historical bytes, not
 # current application behavior. Their 35 + 33 cases still run on BASELINE below.
 # All other original helper cases must additionally pass on the release source.
@@ -36,7 +44,7 @@ CURRENT_HELPER_SUITES = {name: minimum for name, minimum in SUITES.items()
 # not silently lose them.
 CURRENT_HELPER_SUITES['test_runtime_release_upgrade.py'] = 69
 DECISION_RELEASE_SUITES = {
-    'test_decision_release_source.py': 93,
+    'test_decision_release_source.py': 105,
     'test_decision_regression_gate.py': 13,
 }
 HISTORICAL_CANDIDATE_SUITES = {'test_pr_candidate_contract.py': 46}
@@ -87,6 +95,33 @@ def verify_fixture(destination, revision):
     verify_checkout(destination, revision)
 
 
+def verify_deployed_predecessor(source, deployed, revision, env):
+    """Bind real workflow inputs and checkout to this release's exact prior state."""
+    pin = DEPLOYMENT_PREDECESSOR
+    if (os.environ.get('PREVIOUS_SHA') != pin['source']
+            or os.environ.get('PREVIOUS_IMAGE') != pin['image']):
+        raise RuntimeError('Decision release workflow inputs differ from pinned deployment predecessor')
+    if revision == pin['source']:
+        raise RuntimeError('Decision release candidate equals deployment predecessor')
+    deployed = Path(deployed).resolve()
+
+    def require_identity():
+        for expression, expected in (('--show-toplevel', str(deployed)),
+                                     ('HEAD', pin['source']), ('HEAD^{tree}', pin['tree'])):
+            actual = subprocess.run(['git', '-C', str(deployed), 'rev-parse', expression],
+                                    check=True, capture_output=True, env=env,
+                                    timeout=60).stdout.decode().strip()
+            if actual != expected:
+                raise RuntimeError('Decision release deployed source differs from pinned deployment predecessor')
+
+    require_identity()
+    subprocess.run(['git', '-C', str(source), 'merge-base', '--is-ancestor', pin['source'], revision],
+                   check=True, capture_output=True, env=env, timeout=60)
+    verify_checkout(deployed, pin['source'])
+    require_identity()
+    return deployed
+
+
 @contextmanager
 def historical_worktree(source, destination, revision, env):
     subprocess.run(['git', '-C', str(source), 'worktree', 'add', '--detach', str(destination), revision],
@@ -118,20 +153,18 @@ def run_preflight(source, revision, pr_only=False):
         raise RuntimeError('Decision release preflight requires Linux')
     if pr_only and os.environ.get('GITHUB_EVENT_NAME') != 'pull_request':
         raise RuntimeError('Release PR preflight requires a pull_request event')
+    supplied = [bool(os.environ.get(name)) for name in
+                ('ASTRA_DEPLOYED_SOURCE', 'PREVIOUS_SHA', 'PREVIOUS_IMAGE')]
+    if (not pr_only or any(supplied)) and not all(supplied):
+        raise RuntimeError('Decision release requires complete pinned deployment predecessor inputs')
     source = source.resolve()
     verify_decision_release_source(source, UPSTREAM, revision)
     env = preflight_environment()
     env['ASTRA_CI_EXPECTED_SHA'] = revision
     deployed = os.environ.get('ASTRA_DEPLOYED_SOURCE')
     if deployed:
-        # Keep the existing formal workflow's independently checked deployed
-        # source available to the current helper tests after clearing runtime env.
-        actual = subprocess.run(['git', '-C', deployed, 'rev-parse', 'HEAD'],
-                                check=True, capture_output=True, env=env,
-                                timeout=60).stdout.decode().strip()
-        if actual != BASELINE:
-            raise RuntimeError('Decision release deployed source differs from approved baseline')
-        env['ASTRA_DEPLOYED_SOURCE'] = str(Path(deployed).resolve())
+        deployed = verify_deployed_predecessor(source, deployed, revision, env)
+        env['ASTRA_DEPLOYED_SOURCE'] = str(deployed)
 
     with tempfile.TemporaryDirectory(prefix='astra-decision-release-') as temporary:
         root = Path(temporary)
@@ -172,6 +205,8 @@ def run_preflight(source, revision, pr_only=False):
             subprocess.run([sys.executable, str(source / '.github/scripts' / name), *arguments],
                            check=True, env=env, timeout=timeout, cwd=source)
 
+    if deployed:
+        verify_deployed_predecessor(source, deployed, revision, env)
     verify_decision_release_source(source, UPSTREAM, revision)
     label = 'DECISION_RELEASE_PR_PREFLIGHT_PASS' if pr_only else 'DECISION_DEPLOYMENT_PREFLIGHT_PASS'
     print(label + ' source=' + revision + ' publication_authorization=not_granted', flush=True)

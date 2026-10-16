@@ -24,6 +24,13 @@ import verify_decision_release_source as guard
 
 ROOT = Path(__file__).resolve().parents[2]
 PRE_FACTOR_RELEASE = '26673ca6668b1df3f5e074e7f760cc593ae1a192'
+PRE_PROMPT_RELEASE = '1bd3c016bf4375114d34022c1528d119d90cd6ad'
+PROMPT_CONSISTENCY_RELEASE_PATHS = frozenset({
+    '.github/scripts/run_decision_contract_regressions.py',
+    '.github/scripts/test_decision_regression_gate.py',
+    'data/prompt_library.json',
+    'tests/llm/test_prompt_exhaustion_consistency.py',
+})
 FACTOR_COLLECTION_RELEASE_PATHS = frozenset({
     '.github/scripts/run_collection_regressions.py',
     '.github/scripts/test_collection_regression_gate.py',
@@ -196,7 +203,7 @@ class DecisionSourceContractTests(unittest.TestCase):
             with self.subTest(relative=relative), self.assertRaisesRegex(RuntimeError, 'anchor delta paths'):
                 self.verify(delta=((guard.BASELINE, guard.REVIEWED_COMMIT), guard.REVIEWED_PATHS - {relative}))
 
-    def test_each_of_the_16_release_paths_is_required(self):
+    def test_each_of_the_20_release_paths_is_required(self):
         for relative in guard.RELEASE_INCREMENT_PATHS:
             with self.subTest(relative=relative), self.assertRaisesRegex(RuntimeError, 'release increment paths'):
                 self.verify(delta=((guard.REVIEWED_COMMIT, self.revision), guard.RELEASE_INCREMENT_PATHS - {relative}))
@@ -325,7 +332,7 @@ class DecisionSourceContractTests(unittest.TestCase):
             self.reject_contract(changed, 'contract fields')
         self.assertNotIn('ordinary_pull_request_only', self.contract)
         self.assertEqual(len(guard.REVIEWED_PATHS), 26)
-        self.assertEqual(len(guard.RELEASE_INCREMENT_PATHS), 16)
+        self.assertEqual(len(guard.RELEASE_INCREMENT_PATHS), 20)
 
     def test_wal_increment_is_exactly_three_fixed_tool_paths_with_both_hashes(self):
         prior = '16e12871e51e7cfb13823a370dcbf9bdec9f0804'
@@ -359,10 +366,31 @@ class DecisionSourceContractTests(unittest.TestCase):
 
     def test_factor_increment_is_exactly_seven_paths_with_existing_release_pins_preserved(self):
         old = json.loads(guard.git(ROOT, 'show', PRE_FACTOR_RELEASE + ':' + guard.CONTRACT_PATH))
-        self.assertEqual(set(self.contract['release_paths']) - set(old['release_paths']),
+        before_prompt = json.loads(guard.git(ROOT, 'show', PRE_PROMPT_RELEASE + ':' + guard.CONTRACT_PATH))
+        self.assertEqual(set(before_prompt['release_paths']) - set(old['release_paths']),
                          FACTOR_COLLECTION_RELEASE_PATHS)
-        self.assertEqual(guard.RELEASE_INCREMENT_PATHS,
+        self.assertEqual(set(before_prompt['release_paths']) | guard.SELF_HASH_EXEMPTIONS,
                          set(old['release_paths']) | guard.SELF_HASH_EXEMPTIONS | FACTOR_COLLECTION_RELEASE_PATHS)
+        for field in ('schema', 'upstream', 'baseline', 'baseline_tree', 'reviewed_commit',
+                      'reviewed_tree', 'reviewed_paths', 'self_hash_exemptions'):
+            self.assertEqual(before_prompt[field], old[field])
+        updated = {'.github/scripts/test_decision_release_source.py',
+                   '.github/scripts/run_decision_release_preflight.py'}
+        for relative, pin in old['release_paths'].items():
+            with self.subTest(relative=relative):
+                if relative in updated:
+                    self.assertEqual(before_prompt['release_paths'][relative]['reviewed_sha256'],
+                                     pin['reviewed_sha256'])
+                    self.assertEqual(before_prompt['release_paths'][relative]['mode'], pin['mode'])
+                else:
+                    self.assertEqual(before_prompt['release_paths'][relative], pin)
+
+    def test_prompt_increment_is_exactly_four_paths_with_existing_release_pins_preserved(self):
+        old = json.loads(guard.git(ROOT, 'show', PRE_PROMPT_RELEASE + ':' + guard.CONTRACT_PATH))
+        self.assertEqual(set(self.contract['release_paths']) - set(old['release_paths']),
+                         PROMPT_CONSISTENCY_RELEASE_PATHS)
+        self.assertEqual(guard.RELEASE_INCREMENT_PATHS,
+                         set(old['release_paths']) | guard.SELF_HASH_EXEMPTIONS | PROMPT_CONSISTENCY_RELEASE_PATHS)
         for field in ('schema', 'upstream', 'baseline', 'baseline_tree', 'reviewed_commit',
                       'reviewed_tree', 'reviewed_paths', 'self_hash_exemptions'):
             self.assertEqual(self.contract[field], old[field])
@@ -376,6 +404,19 @@ class DecisionSourceContractTests(unittest.TestCase):
                     self.assertEqual(self.contract['release_paths'][relative]['mode'], pin['mode'])
                 else:
                     self.assertEqual(self.contract['release_paths'][relative], pin)
+
+    def test_prompt_pins_bind_exact_original_predecessors_and_current_bytes(self):
+        for relative in PROMPT_CONSISTENCY_RELEASE_PATHS:
+            with self.subTest(relative=relative):
+                pin = self.contract['release_paths'][relative]
+                if relative == 'tests/llm/test_prompt_exhaustion_consistency.py':
+                    self.assertIsNone(pin['reviewed_sha256'])
+                    self.assertNotIn(relative, self.reviewed)
+                else:
+                    self.assertEqual(pin['reviewed_sha256'], hashlib.sha256(self.reviewed[relative]).hexdigest())
+                self.assertEqual(pin['sha256'], hashlib.sha256(self.current[relative]).hexdigest())
+                self.assertEqual(pin['mode'], '100644')
+                self.assertNotIn(relative, guard.SELF_HASH_EXEMPTIONS)
 
     def test_factor_pins_bind_exact_original_predecessors_and_current_bytes(self):
         new = {'astra_gateway/collection_timeout.py',
@@ -672,7 +713,7 @@ class HistoricalGuardBoundaryTests(unittest.TestCase):
 
 
 class DecisionPreflightBoundaryTests(unittest.TestCase):
-    def invoke(self, *, fail=None, verifier_fail=None, pr_only=False, deployed=None, environment=None, uid=0):
+    def invoke(self, *, fail=None, verifier_fail=None, pr_only=True, deployed=None, environment=None, uid=0):
         import run_decision_release_preflight as preflight
         calls = []
 
@@ -680,17 +721,25 @@ class DecisionPreflightBoundaryTests(unittest.TestCase):
             calls.append((command, kwargs))
             if fail and fail(command):
                 raise subprocess.CalledProcessError(1, command)
-            return SimpleNamespace(returncode=0, stdout=((deployed or guard.BASELINE) + '\n').encode())
+            value = deployed or preflight.DEPLOYMENT_PREDECESSOR['source']
+            if command[-1] == '--show-toplevel':
+                value = '/synthetic-deployed'
+            elif command[-1] == 'HEAD^{tree}':
+                value = preflight.DEPLOYMENT_PREDECESSOR['tree']
+            return SimpleNamespace(returncode=0, stdout=(value + '\n').encode())
 
         with patch.dict(os.environ, {'GITHUB_EVENT_NAME': 'pull_request', 'ASTRA_DATA_DIR': '/production',
                                     'GITHUB_TOKEN': 'synthetic', 'PROVIDER_API_KEY': 'synthetic',
                                     **(environment or {})}, clear=True), \
                 patch.object(preflight, 'verify_decision_release_source', side_effect=verifier_fail) as verify, \
                 patch.object(preflight, 'verify_fixture'), \
+                patch.object(preflight, 'verify_checkout'), \
                 patch.object(preflight.subprocess, 'run', side_effect=run), patch.object(preflight, 'extract') as extract, \
                 patch.object(preflight.os, 'geteuid', return_value=uid), patch('sys.stdout', new_callable=io.StringIO) as output:
-            if deployed:
+            if deployed or not pr_only:
                 os.environ['ASTRA_DEPLOYED_SOURCE'] = '/synthetic-deployed'
+                os.environ.setdefault('PREVIOUS_SHA', preflight.DEPLOYMENT_PREDECESSOR['source'])
+                os.environ.setdefault('PREVIOUS_IMAGE', preflight.DEPLOYMENT_PREDECESSOR['image'])
             preflight.run_preflight(ROOT, 'b' * 40, pr_only)
         return calls, verify, extract, output.getvalue()
 
@@ -712,7 +761,7 @@ class DecisionPreflightBoundaryTests(unittest.TestCase):
         verify.assert_not_called()
 
     def test_preflight_uses_complete_guard_before_and_after_all_work(self):
-        _, verify, _, output = self.invoke()
+        _, verify, _, output = self.invoke(pr_only=False)
         self.assertEqual(verify.call_count, 2)
         self.assertTrue(all(call.args == (ROOT, guard.UPSTREAM, 'b' * 40) for call in verify.call_args_list))
         self.assertIn('DECISION_DEPLOYMENT_PREFLIGHT_PASS', output)
@@ -810,10 +859,27 @@ class DecisionPreflightBoundaryTests(unittest.TestCase):
         self.assertEqual(collection.COLLECTION_SUITES, dict(original, **added))
         self.assertEqual(sum(collection.COLLECTION_SUITES.values()), 1086)
         self.assertEqual(preflight.CURRENT_HELPER_SUITES['test_collection_regression_gate.py'], 10)
-        self.assertEqual(preflight.DECISION_RELEASE_SUITES['test_decision_release_source.py'], 93)
+        self.assertEqual(preflight.DECISION_RELEASE_SUITES['test_decision_release_source.py'], 105)
         calls, _, _, _ = self.invoke()
         gate = next((command, options) for command, options in calls
                     if command[-1].endswith('/run_collection_regressions.py'))
+        self.assertEqual(gate[1]['cwd'], ROOT)
+        self.assertTrue(gate[1]['check'])
+
+    def test_prompt_gate_preserves_all_original_minimums_and_requires_new_suite(self):
+        import run_decision_contract_regressions as decision
+        raw = guard.git(ROOT, 'show', PRE_PROMPT_RELEASE + ':.github/scripts/run_decision_contract_regressions.py')
+        assignment = next(node for node in ast.parse(raw).body if isinstance(node, ast.Assign)
+                          and any(isinstance(target, ast.Name) and target.id == 'TEST_SUITES'
+                                  for target in node.targets))
+        original = ast.literal_eval(assignment.value)
+        self.assertEqual(len(original), 28)
+        self.assertEqual(sum(original.values()), 474)
+        self.assertEqual(decision.TEST_SUITES, dict(original, **{'tests.llm.test_prompt_exhaustion_consistency': 14}))
+        self.assertEqual(sum(decision.TEST_SUITES.values()), 488)
+        calls, _, _, _ = self.invoke()
+        gate = next((command, options) for command, options in calls
+                    if command[-1].endswith('/run_decision_contract_regressions.py'))
         self.assertEqual(gate[1]['cwd'], ROOT)
         self.assertTrue(gate[1]['check'])
 
@@ -877,8 +943,9 @@ class DecisionPreflightBoundaryTests(unittest.TestCase):
             'GIT_CONFIG_VALUE_98': '/untrusted/hooks', 'PYTHONPATH': '/untrusted/python',
             'PYTHONOPTIMIZE': '1', 'PYTHONSTARTUP': '/untrusted/startup',
         }
-        calls, _, _, _ = self.invoke(environment=injected, deployed=guard.BASELINE)
-        self.assertEqual(calls[0][0], ['git', '-C', '/synthetic-deployed', 'rev-parse', 'HEAD'])
+        import run_decision_release_preflight as preflight
+        calls, _, _, _ = self.invoke(environment=injected, deployed=preflight.DEPLOYMENT_PREDECESSOR['source'])
+        self.assertEqual(calls[0][0], ['git', '-C', '/synthetic-deployed', 'rev-parse', '--show-toplevel'])
         for command, options in calls:
             with self.subTest(command=command):
                 env = options['env']
@@ -994,6 +1061,14 @@ class DecisionPreflightBoundaryTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, 'deployed source differs'):
             self.invoke(deployed='c' * 40)
 
+    def test_deployed_predecessor_is_rechecked_after_all_acceptance(self):
+        import run_decision_release_preflight as preflight
+        with patch.object(preflight, 'verify_deployed_predecessor',
+                          side_effect=[Path('/synthetic-deployed'), RuntimeError('late deployed drift')]) as verify, \
+                self.assertRaisesRegex(RuntimeError, 'late deployed drift'):
+            self.invoke(pr_only=False)
+        self.assertEqual(verify.call_count, 2)
+
     def test_historical_preflight_failure_propagates_and_cleans_worktree(self):
         import run_decision_release_preflight as preflight
         calls = []
@@ -1004,10 +1079,11 @@ class DecisionPreflightBoundaryTests(unittest.TestCase):
                 raise subprocess.CalledProcessError(1, command)
             return SimpleNamespace(returncode=0)
 
-        with patch.dict(os.environ, {}, clear=True), patch.object(preflight, 'verify_decision_release_source') as verify, \
+        with patch.dict(os.environ, {'GITHUB_EVENT_NAME': 'pull_request'}, clear=True), \
+                patch.object(preflight, 'verify_decision_release_source') as verify, \
                 patch.object(preflight, 'verify_fixture'), \
                 patch.object(preflight.subprocess, 'run', side_effect=run), self.assertRaises(subprocess.CalledProcessError):
-            preflight.run_preflight(ROOT, 'b' * 40)
+            preflight.run_preflight(ROOT, 'b' * 40, pr_only=True)
         self.assertEqual(calls[-1][3:6], ['worktree', 'remove', '--force'])
         self.assertEqual(verify.call_count, 1)
 
@@ -1051,6 +1127,150 @@ class DecisionPreflightBoundaryTests(unittest.TestCase):
         with patch.object(sys, 'argv', ['preflight', '--candidate-pr']), \
                 patch('sys.stderr', new_callable=io.StringIO), self.assertRaises(SystemExit):
             preflight.main()
+
+
+class DeploymentPredecessorBoundaryTests(unittest.TestCase):
+    """Real predecessor Git/byte checks; later acceptance is separately tested."""
+    @classmethod
+    def setUpClass(cls):
+        import run_decision_release_preflight as preflight
+        cls.preflight = preflight
+        cls.temporary = tempfile.TemporaryDirectory(prefix='decision-deployed-predecessor-')
+        cls.deployed = Path(cls.temporary.name) / 'deployed'
+        cls.pin = dict(preflight.DEPLOYMENT_PREDECESSOR)
+        cls.revision = guard.git(ROOT, 'rev-parse', 'HEAD').decode().strip()
+        guard.git(ROOT, 'worktree', 'add', '--detach', str(cls.deployed), cls.pin['source'])
+
+    @classmethod
+    def tearDownClass(cls):
+        try:
+            guard.git(ROOT, 'worktree', 'remove', '--force', str(cls.deployed))
+        finally:
+            cls.temporary.cleanup()
+
+    def inputs(self):
+        return {'GITHUB_EVENT_NAME': 'workflow_dispatch',
+                'ASTRA_DEPLOYED_SOURCE': str(self.deployed),
+                'PREVIOUS_SHA': self.pin['source'], 'PREVIOUS_IMAGE': self.pin['image']}
+
+    def verify(self, *, deployed=None, revision=None, inputs=None):
+        with patch.dict(os.environ, self.inputs() if inputs is None else inputs, clear=True):
+            return self.preflight.verify_deployed_predecessor(
+                ROOT, self.deployed if deployed is None else deployed,
+                self.revision if revision is None else revision,
+                self.preflight.preflight_environment())
+
+    def test_exact_current_predecessor_is_separate_from_historical_review_anchors(self):
+        self.assertEqual(self.pin, {
+            'source': '1bd3c016bf4375114d34022c1528d119d90cd6ad',
+            'tree': '47d98d0091a86a513ce1ccc20ced1096fce9d93d',
+            'image': 'ghcr.io/jonoka/astra-quant-agent@sha256:7bfc6bb0b75c6a63393f1c717c771cc7097059b2b2c4a6ddca2de86049005bee',
+        })
+        self.assertEqual(guard.BASELINE, '60133ce82d4a0b91f94bc0c613a07e24aff049f5')
+        self.assertEqual(guard.REVIEWED_COMMIT, '71ff89f554b797558c721cc3f93051624f911e18')
+        self.assertEqual(self.verify(), self.deployed)
+
+    def test_actual_workflow_inputs_reach_historical_stage_after_real_predecessor_checks(self):
+        import yaml
+        workflow = yaml.safe_load((ROOT / '.github/workflows/build-release-image.yml').read_text())
+        self.assertEqual(workflow['env']['PREVIOUS_SHA'], '${{ inputs.previous_source }}')
+        self.assertEqual(workflow['env']['PREVIOUS_IMAGE'], '${{ inputs.previous_image }}')
+        steps = workflow['jobs']['build']['steps']
+        checkout = next(step for step in steps if step.get('with', {}).get('path') == 'deployed')
+        self.assertEqual(checkout['with']['ref'], '${{ env.PREVIOUS_SHA }}')
+        step = next(step for step in steps if step.get('run') == 'python .github/scripts/run_decision_release_preflight.py')
+        self.assertEqual(step['env']['ASTRA_DEPLOYED_SOURCE'], '${{ github.workspace }}/deployed')
+        # Exercise the formal input path with real HEAD/tree/ancestry/raw bytes.
+        # The initial candidate guard has its own unmocked proof; stop before
+        # expensive historical/application acceptance, never claim those ran here.
+        with patch.dict(os.environ, self.inputs(), clear=True), \
+                patch.object(self.preflight, 'verify_decision_release_source'), \
+                patch.object(self.preflight, 'historical_worktree', side_effect=RuntimeError('historical boundary reached')) as historical, \
+                patch.object(self.preflight, 'verify_checkout', wraps=self.preflight.verify_checkout) as raw, \
+                self.assertRaisesRegex(RuntimeError, 'historical boundary reached'):
+            self.preflight.run_preflight(ROOT, self.revision)
+        raw.assert_called_once_with(self.deployed, self.pin['source'])
+        self.assertEqual(historical.call_args.args[2], guard.BASELINE)
+
+    def test_formal_mode_and_partial_pr_inputs_cannot_skip_predecessor_verification(self):
+        fields = ('ASTRA_DEPLOYED_SOURCE', 'PREVIOUS_SHA', 'PREVIOUS_IMAGE')
+        for mask in range(7):
+            values = {name: self.inputs()[name] for index, name in enumerate(fields) if mask & (1 << index)}
+            values['GITHUB_EVENT_NAME'] = 'pull_request'
+            for pr_only in (False, True):
+                if pr_only and mask == 0:
+                    continue  # An ordinary PR has no deployment identity.
+                with self.subTest(mask=mask, pr_only=pr_only), patch.dict(os.environ, values, clear=True), \
+                        patch.object(self.preflight, 'verify_decision_release_source') as source, \
+                        self.assertRaisesRegex(RuntimeError, 'complete pinned deployment predecessor inputs'):
+                    self.preflight.run_preflight(ROOT, self.revision, pr_only)
+                source.assert_not_called()
+
+    def test_wrong_missing_old_and_arbitrary_well_formed_workflow_identity_are_rejected(self):
+        variants = [dict(self.inputs(), PREVIOUS_SHA=value) for value in ('', guard.BASELINE, 'c' * 40)]
+        variants += [dict(self.inputs(), PREVIOUS_IMAGE=value) for value in (
+            '', 'ghcr.io/jonoka/astra-quant-agent@sha256:' + 'c' * 64,
+            'ghcr.io/jonoka/astra-quant-agent@sha256:9247ceff7e1338c44e2d1592aa8c34e927e6f08784bfc1f0a622ce0b271f7ca6')]
+        for values in variants:
+            with self.subTest(values=values), self.assertRaisesRegex(RuntimeError, 'workflow inputs differ'):
+                self.verify(inputs=values)
+
+    def test_wrong_checkout_head_nested_root_and_tree_are_rejected(self):
+        for path in (ROOT, self.deployed / '.github'):
+            with self.subTest(path=path), self.assertRaisesRegex(RuntimeError, 'deployed source differs'):
+                self.verify(deployed=path)
+        with patch.dict(self.preflight.DEPLOYMENT_PREDECESSOR, {'tree': 'c' * 40}), \
+                self.assertRaisesRegex(RuntimeError, 'deployed source differs'):
+            self.verify()
+
+    def test_dirty_hidden_nonregular_and_mode_drift_are_rejected_with_real_git(self):
+        path = self.deployed / 'Dockerfile'
+        original = path.read_bytes()
+        mutations = ('bytes', 'assume-unchanged', 'skip-worktree', 'executable', 'symlink')
+        for mutation in mutations:
+            with self.subTest(mutation=mutation):
+                try:
+                    if mutation in ('assume-unchanged', 'skip-worktree'):
+                        guard.git(self.deployed, 'update-index', '--' + mutation, 'Dockerfile')
+                    if mutation in ('bytes', 'assume-unchanged', 'skip-worktree'):
+                        path.write_bytes(original + b'\n# changed predecessor\n')
+                    elif mutation == 'executable':
+                        path.chmod(0o755)
+                    else:
+                        path.unlink(); path.symlink_to('README.md')
+                    with self.assertRaises(RuntimeError):
+                        self.verify()
+                finally:
+                    guard.git(self.deployed, 'update-index', '--no-assume-unchanged', 'Dockerfile')
+                    guard.git(self.deployed, 'update-index', '--no-skip-worktree', 'Dockerfile')
+                    if path.is_symlink():
+                        path.unlink()
+                    path.write_bytes(original); path.chmod(0o644)
+        self.assertEqual(self.verify(), self.deployed)
+
+    def test_candidate_must_strictly_descend_from_the_current_deployed_source(self):
+        with self.assertRaisesRegex(RuntimeError, 'candidate equals'):
+            self.verify(revision=self.pin['source'])
+        with self.assertRaises(subprocess.CalledProcessError):
+            self.verify(revision=guard.BASELINE)
+
+    def test_head_drift_during_raw_scan_is_rejected_even_with_identical_tree(self):
+        alias = guard.git(self.deployed, '-c', 'user.name=Decision test fixture',
+                          '-c', 'user.email=fixture@example.invalid', 'commit-tree', self.pin['tree'],
+                          '-p', self.pin['source'], input=b'Synthetic same-tree identity drift\n').decode().strip()
+        original_verify = self.preflight.verify_checkout
+
+        def drift_after_scan(source, revision):
+            original_verify(source, revision)
+            guard.git(source, 'update-ref', 'HEAD', alias)
+
+        try:
+            with patch.object(self.preflight, 'verify_checkout', side_effect=drift_after_scan), \
+                    self.assertRaisesRegex(RuntimeError, 'deployed source differs'):
+                self.verify()
+        finally:
+            guard.git(self.deployed, 'update-ref', 'HEAD', self.pin['source'])
+        self.assertEqual(self.verify(), self.deployed)
 
 
 class DecisionWorkflowBoundaryTests(unittest.TestCase):

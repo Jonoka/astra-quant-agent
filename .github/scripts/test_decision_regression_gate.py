@@ -11,16 +11,17 @@ gate = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(gate)
 
 
-def result(*, successful=True, count=474, skipped=(), expected=()):
+def result(*, successful=True, count=488, skipped=(), expected=()):
     return SimpleNamespace(wasSuccessful=lambda: successful, testsRun=count,
                            skipped=skipped, expectedFailures=expected)
 
 
 class DecisionRegressionGateTests(unittest.TestCase):
     def test_frozen_module_minima_cover_the_reviewed_suite(self):
-        self.assertEqual(sum(gate.TEST_SUITES.values()), 474)
-        self.assertEqual(len(gate.TEST_SUITES), 28)
+        self.assertEqual(sum(gate.TEST_SUITES.values()), 488)
+        self.assertEqual(len(gate.TEST_SUITES), 29)
         self.assertEqual(gate.TEST_SUITES["tests.core.test_proposal_semantic_contract"], 12)
+        self.assertEqual(gate.TEST_SUITES["tests.llm.test_prompt_exhaustion_consistency"], 14)
 
     def test_empty_contract_is_rejected(self):
         with self.assertRaisesRegex(RuntimeError, "Empty"):
@@ -58,23 +59,23 @@ class DecisionRegressionGateTests(unittest.TestCase):
         self.assertEqual(gate.load_required_suites({"synthetic": 1}, loader).countTestCases(), 1)
 
     def test_complete_success_is_accepted(self):
-        gate.require_complete_result(result(), 474)
+        gate.require_complete_result(result(), 488)
 
     def test_failure_is_rejected(self):
         with self.assertRaises(RuntimeError):
-            gate.require_complete_result(result(successful=False), 474)
+            gate.require_complete_result(result(successful=False), 488)
 
     def test_incomplete_execution_is_rejected(self):
         with self.assertRaises(RuntimeError):
-            gate.require_complete_result(result(count=473), 474)
+            gate.require_complete_result(result(count=487), 488)
 
     def test_skip_is_rejected_even_when_unittest_reports_success(self):
         with self.assertRaises(RuntimeError):
-            gate.require_complete_result(result(skipped=[("case", "synthetic")]), 474)
+            gate.require_complete_result(result(skipped=[("case", "synthetic")]), 488)
 
     def test_expected_failure_is_rejected_even_when_unittest_reports_success(self):
         with self.assertRaises(RuntimeError):
-            gate.require_complete_result(result(expected=[("case", "synthetic")]), 474)
+            gate.require_complete_result(result(expected=[("case", "synthetic")]), 488)
 
     def test_guard_failure_cannot_be_reported_as_pass(self):
         guard = Mock()

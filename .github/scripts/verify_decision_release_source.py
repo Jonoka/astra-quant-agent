@@ -31,6 +31,8 @@ RELEASE_INCREMENT_PATHS = frozenset({
     CONTRACT_PATH, VERIFIER_PATH,
     '.github/scripts/test_decision_release_source.py',
     '.github/scripts/run_decision_release_preflight.py',
+    '.github/scripts/run_decision_contract_regressions.py',
+    '.github/scripts/test_decision_regression_gate.py',
     '.github/scripts/runtime_release_upgrade.py',
     '.github/scripts/test_runtime_release_upgrade.py',
     '.github/scripts/test_deployment_plan.py',
@@ -43,6 +45,8 @@ RELEASE_INCREMENT_PATHS = frozenset({
     'scripts/market_data_service.py',
     'tests/ops/test_scheduler_timeout_diagnostics.py',
     'tests/venues/test_indicator_failure_dedup.py',
+    'data/prompt_library.json',
+    'tests/llm/test_prompt_exhaustion_consistency.py',
 })
 # Fixed reviewed scope, not an allowlist derived from the current PR manifest.
 REVIEWED_PATHS = frozenset({

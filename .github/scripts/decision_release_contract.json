@@ -143,9 +143,14 @@
       "sha256": "1bd7d1508eb610c75809bcad64d929b56262fffd800bc24eeaff7d568c5b06e0",
       "mode": "100644"
     },
+    ".github/scripts/run_decision_contract_regressions.py": {
+      "reviewed_sha256": "6e0b7ba9c1f364c24719cfa5abb1da6922c5dbb16305af9482f5b98a3adba36c",
+      "sha256": "1e575a137955a63ab96703860476a89c6b547c9ea65f639fb3a065e7be959148",
+      "mode": "100644"
+    },
     ".github/scripts/run_decision_release_preflight.py": {
       "reviewed_sha256": null,
-      "sha256": "00fa6daa06974bd9bfe44940bc8bd36d0bdf81a926729e5077c40514abf27866",
+      "sha256": "dddd4b5694ee26d01aab024eabc6e01a62a433e95e636b646060d82981c186e3",
       "mode": "100644"
     },
     ".github/scripts/runtime_release_upgrade.py": {
@@ -158,9 +163,14 @@
       "sha256": "6daceb2257a9509e1975ff14820a888d94f985f593d8cbb3a457a94fb5a3eb6c",
       "mode": "100644"
     },
+    ".github/scripts/test_decision_regression_gate.py": {
+      "reviewed_sha256": "1a94559ae302fed0b7867e5ad4142c179d6bc6755a2c6d977f0605fd7ec325de",
+      "sha256": "06a437d8d8b06afb300f7fcc5dbbd66e47b43db9499200e7a388d653535d1782",
+      "mode": "100644"
+    },
     ".github/scripts/test_decision_release_source.py": {
       "reviewed_sha256": null,
-      "sha256": "6300f61c8319821679792d7303e1e39acbef8e4e5727acab9b5e64176e74c1a8",
+      "sha256": "81a89d9510820f1e02d0f6e5678db4e99627f8f600cfa06cb74e40bc8f546d70",
       "mode": "100644"
     },
     ".github/scripts/test_deployment_plan.py": {
@@ -193,9 +203,19 @@
       "sha256": "ce7c298dd8f03ef4ec2c0407399829752141da517cd1ec1b8ca83f2cd7b77d8b",
       "mode": "100644"
     },
+    "data/prompt_library.json": {
+      "reviewed_sha256": "c032575fc4f3af3fc32fcb9ec410770468eecdc83a7e5f7fd6810096a3cf7573",
+      "sha256": "ea9ae97ee05637664b71cfb86a9f32aeea946893e35591f745cb0cccb378ce63",
+      "mode": "100644"
+    },
     "scripts/market_data_service.py": {
       "reviewed_sha256": "965c9305157b280089a5e2fe80a6378de247c3197adf25dacb94c843d87bef31",
       "sha256": "1f0cc3e818b4720c612f2815dc18a3a63f2807f1ac217b09185ca1422cf231bf",
+      "mode": "100644"
+    },
+    "tests/llm/test_prompt_exhaustion_consistency.py": {
+      "reviewed_sha256": null,
+      "sha256": "1a2cf9bc572429c1b4f8348b38f7b26fcd8f7e23913ddc878cddf320f551c9bb",
       "mode": "100644"
     },
     "tests/ops/test_scheduler_timeout_diagnostics.py": {

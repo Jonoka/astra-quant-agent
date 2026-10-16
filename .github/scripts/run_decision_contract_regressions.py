@@ -31,6 +31,7 @@ TEST_SUITES = {
     "tests.extraction.test_factors_candles_15m_extraction": 30,
     "tests.extraction.test_brain_package_extraction": 14,
     "tests.llm.test_prompt_rendering_isolated": 25,
+    "tests.llm.test_prompt_exhaustion_consistency": 14,
     "tests.trading.test_factor_assembly_paths": 27,
     "tests.ops.test_factor_library": 73,
     "tests.llm.test_prompt_math_foundations": 17,

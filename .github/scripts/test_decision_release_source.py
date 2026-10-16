@@ -27,6 +27,20 @@ PRE_FACTOR_RELEASE = '26673ca6668b1df3f5e074e7f760cc593ae1a192'
 PRE_PROMPT_RELEASE = '1bd3c016bf4375114d34022c1528d119d90cd6ad'
 PRE_PROMPT_REFRESH_RELEASE = '29dfe8ff5311addb381c0ee974ac3a280115ae60'
 PRE_HELPER_CHECKOUT_RELEASE = '1469efd9588229f81aee88468e0c228fdd8e1e5d'
+PRE_MAINTENANCE_RELEASE = 'd5e1dc062e7c3fb3ae123c96cda02fa574d1d682'
+MAINTENANCE_ADAPTER_PATHS = frozenset({
+    '.github/scripts/test_deployment_identity.py',
+    '.github/scripts/rehearse_cycle_deadline_upgrade.py',
+})
+MAINTENANCE_RELEASE_PATHS = frozenset({
+    '.github/scripts/runtime_release_upgrade.py',
+    '.github/scripts/rehearse_cycle_deadline_upgrade.py',
+    '.github/scripts/test_runtime_release_upgrade.py',
+    '.github/scripts/test_deployment_plan.py',
+    '.github/scripts/test_deployment_identity.py',
+    '.github/scripts/test_decision_release_source.py',
+    '.github/scripts/run_decision_release_preflight.py',
+})
 HELPER_CHECKOUT_RELEASE_PATHS = frozenset({
     '.github/workflows/build-release-image.yml',
     '.github/scripts/test_decision_release_source.py',
@@ -346,7 +360,7 @@ class DecisionSourceContractTests(unittest.TestCase):
             self.reject_contract(changed, 'contract fields')
         self.assertNotIn('ordinary_pull_request_only', self.contract)
         self.assertEqual(len(guard.REVIEWED_PATHS), 26)
-        self.assertEqual(len(guard.RELEASE_INCREMENT_PATHS), 20)
+        self.assertEqual(len(guard.RELEASE_INCREMENT_PATHS), 22)
 
     def test_wal_increment_is_exactly_three_fixed_tool_paths_with_both_hashes(self):
         prior = '16e12871e51e7cfb13823a370dcbf9bdec9f0804'
@@ -405,7 +419,8 @@ class DecisionSourceContractTests(unittest.TestCase):
         self.assertEqual(set(before_refresh['release_paths']) - set(old['release_paths']),
                          PROMPT_CONSISTENCY_RELEASE_PATHS)
         self.assertEqual(guard.RELEASE_INCREMENT_PATHS,
-                         set(old['release_paths']) | guard.SELF_HASH_EXEMPTIONS | PROMPT_CONSISTENCY_RELEASE_PATHS)
+                         set(old['release_paths']) | guard.SELF_HASH_EXEMPTIONS |
+                         PROMPT_CONSISTENCY_RELEASE_PATHS | MAINTENANCE_ADAPTER_PATHS)
         for field in ('schema', 'upstream', 'baseline', 'baseline_tree', 'reviewed_commit',
                       'reviewed_tree', 'reviewed_paths', 'self_hash_exemptions'):
             self.assertEqual(before_refresh[field], old[field])
@@ -444,13 +459,36 @@ class DecisionSourceContractTests(unittest.TestCase):
 
     def test_helper_checkout_increment_changes_only_three_existing_exact_pins(self):
         old = json.loads(guard.git(ROOT, 'show', PRE_HELPER_CHECKOUT_RELEASE + ':' + guard.CONTRACT_PATH))
+        before_maintenance = json.loads(guard.git(ROOT, 'show', PRE_MAINTENANCE_RELEASE + ':' + guard.CONTRACT_PATH))
+        for field in ('schema', 'upstream', 'baseline', 'baseline_tree', 'reviewed_commit',
+                      'reviewed_tree', 'reviewed_paths', 'self_hash_exemptions'):
+            self.assertEqual(before_maintenance[field], old[field])
+        self.assertEqual(set(before_maintenance['release_paths']), set(old['release_paths']))
+        changed = {relative for relative, pin in old['release_paths'].items()
+                   if pin != before_maintenance['release_paths'][relative]}
+        self.assertEqual(changed, HELPER_CHECKOUT_RELEASE_PATHS)
+        for relative in changed:
+            with self.subTest(relative=relative):
+                previous = old['release_paths'][relative]
+                current = before_maintenance['release_paths'][relative]
+                self.assertEqual(current['reviewed_sha256'], previous['reviewed_sha256'])
+                self.assertEqual(current['mode'], previous['mode'])
+                self.assertEqual(previous['sha256'], hashlib.sha256(guard.git(
+                    ROOT, 'show', PRE_HELPER_CHECKOUT_RELEASE + ':' + relative)).hexdigest())
+                self.assertEqual(current['sha256'], hashlib.sha256(guard.git(
+                    ROOT, 'show', PRE_MAINTENANCE_RELEASE + ':' + relative)).hexdigest())
+                self.assertNotIn(relative, guard.SELF_HASH_EXEMPTIONS)
+
+    def test_maintenance_increment_binds_five_existing_and_two_adapter_exact_pins(self):
+        old = json.loads(guard.git(ROOT, 'show', PRE_MAINTENANCE_RELEASE + ':' + guard.CONTRACT_PATH))
         for field in ('schema', 'upstream', 'baseline', 'baseline_tree', 'reviewed_commit',
                       'reviewed_tree', 'reviewed_paths', 'self_hash_exemptions'):
             self.assertEqual(self.contract[field], old[field])
-        self.assertEqual(set(self.contract['release_paths']), set(old['release_paths']))
+        self.assertEqual(set(self.contract['release_paths']),
+                         set(old['release_paths']) | MAINTENANCE_ADAPTER_PATHS)
         changed = {relative for relative, pin in old['release_paths'].items()
                    if pin != self.contract['release_paths'][relative]}
-        self.assertEqual(changed, HELPER_CHECKOUT_RELEASE_PATHS)
+        self.assertEqual(changed | MAINTENANCE_ADAPTER_PATHS, MAINTENANCE_RELEASE_PATHS)
         for relative in changed:
             with self.subTest(relative=relative):
                 previous = old['release_paths'][relative]
@@ -458,8 +496,17 @@ class DecisionSourceContractTests(unittest.TestCase):
                 self.assertEqual(current['reviewed_sha256'], previous['reviewed_sha256'])
                 self.assertEqual(current['mode'], previous['mode'])
                 self.assertEqual(previous['sha256'], hashlib.sha256(guard.git(
-                    ROOT, 'show', PRE_HELPER_CHECKOUT_RELEASE + ':' + relative)).hexdigest())
+                    ROOT, 'show', PRE_MAINTENANCE_RELEASE + ':' + relative)).hexdigest())
                 self.assertEqual(current['sha256'], hashlib.sha256(self.current[relative]).hexdigest())
+                self.assertNotIn(relative, guard.SELF_HASH_EXEMPTIONS)
+        for relative in MAINTENANCE_ADAPTER_PATHS:
+            with self.subTest(relative=relative):
+                current = self.contract['release_paths'][relative]
+                historical = guard.git(ROOT, 'show', guard.REVIEWED_COMMIT + ':' + relative)
+                self.assertEqual(historical, guard.git(ROOT, 'show', PRE_MAINTENANCE_RELEASE + ':' + relative))
+                self.assertEqual(current['reviewed_sha256'], hashlib.sha256(historical).hexdigest())
+                self.assertEqual(current['sha256'], hashlib.sha256(self.current[relative]).hexdigest())
+                self.assertEqual(current['mode'], '100644')
                 self.assertNotIn(relative, guard.SELF_HASH_EXEMPTIONS)
 
     def test_prompt_pins_bind_exact_original_predecessors_and_current_bytes(self):
@@ -860,7 +907,7 @@ class DecisionPreflightBoundaryTests(unittest.TestCase):
                    if len(command) > 3 and command[1] == '-c' and options.get('cwd') == ROOT]
         expected = dict(preflight.CURRENT_HELPER_SUITES, **preflight.DECISION_RELEASE_SUITES)
         self.assertEqual({Path(command[3]).name for command, _ in current}, set(expected))
-        self.assertEqual(sum(preflight.CURRENT_HELPER_SUITES.values()), 212)
+        self.assertEqual(sum(preflight.CURRENT_HELPER_SUITES.values()), 285)
         self.assertNotIn('test_verify_deployment_source.py', preflight.CURRENT_HELPER_SUITES)
         self.assertEqual(preflight.DECISION_RELEASE_SUITES['test_decision_regression_gate.py'], 13)
         for command, options in current:
@@ -868,14 +915,14 @@ class DecisionPreflightBoundaryTests(unittest.TestCase):
             self.assertEqual(int(command[4]), expected[Path(command[3]).name])
             self.assertEqual(options['env']['ASTRA_CI_EXPECTED_SHA'], 'b' * 40)
 
-    def test_helper_114_and_root_98_cases_run_on_same_candidate_without_skips(self):
+    def test_helper_124_and_root_161_cases_run_on_same_candidate_without_skips(self):
         import run_decision_release_preflight as preflight
-        self.assertEqual(preflight.CURRENT_HELPER_SUITES['test_runtime_release_upgrade.py'], 69)
+        self.assertEqual(preflight.CURRENT_HELPER_SUITES['test_runtime_release_upgrade.py'], 79)
         self.assertEqual(preflight.SUITES['test_runtime_release_upgrade.py'], 39)
         self.assertEqual(sum(n for k, n in preflight.CURRENT_HELPER_SUITES.items()
-                             if k not in preflight.OWNERSHIP_SUITES), 114)
+                             if k not in preflight.OWNERSHIP_SUITES), 124)
         self.assertEqual({k: preflight.CURRENT_HELPER_SUITES[k] for k in preflight.OWNERSHIP_SUITES},
-                         {'test_deployment_plan.py': 59, 'test_deployment_identity.py': 19,
+                         {'test_deployment_plan.py': 122, 'test_deployment_identity.py': 19,
                           'test_recovery_journal.py': 20})
         calls, _, _, _ = self.invoke(uid=1000, environment={'GITHUB_ACTIONS': 'true'})
         observed = {}
@@ -916,7 +963,7 @@ class DecisionPreflightBoundaryTests(unittest.TestCase):
         self.assertEqual(collection.COLLECTION_SUITES, dict(original, **added))
         self.assertEqual(sum(collection.COLLECTION_SUITES.values()), 1086)
         self.assertEqual(preflight.CURRENT_HELPER_SUITES['test_collection_regression_gate.py'], 10)
-        self.assertEqual(preflight.DECISION_RELEASE_SUITES['test_decision_release_source.py'], 108)
+        self.assertEqual(preflight.DECISION_RELEASE_SUITES['test_decision_release_source.py'], 109)
         calls, _, _, _ = self.invoke()
         gate = next((command, options) for command, options in calls
                     if command[-1].endswith('/run_collection_regressions.py'))
@@ -1333,6 +1380,8 @@ class DeploymentPredecessorBoundaryTests(unittest.TestCase):
 class DecisionWorkflowBoundaryTests(unittest.TestCase):
     def test_formal_helper_step_uses_full_source_history_with_real_shallow_ci(self):
         import yaml
+        import run_decision_release_preflight as preflight
+        required = preflight.CURRENT_HELPER_SUITES['test_runtime_release_upgrade.py']
         workflow = yaml.safe_load((ROOT / '.github/workflows/build-release-image.yml').read_text())
         steps = workflow['jobs']['build']['steps']
         source_checkout = next(step for step in steps if step.get('with', {}).get('path') == 'source')
@@ -1364,12 +1413,12 @@ class DecisionWorkflowBoundaryTests(unittest.TestCase):
             self.assertNotEqual(old.returncode, 0)
             self.assertIn('test_custom_prompt_preserved_and_pristine_prompt_refreshed', old.stderr)
             self.assertIn(PRE_PROMPT_RELEASE + ':data/prompt_library.json', old.stderr)
-            self.assertIn('Ran 69 tests', old.stderr)
+            self.assertIn(f'Ran {required} tests', old.stderr)
             self.assertIn('FAILED (errors=1)', old.stderr)
             result = subprocess.run(['bash', '-e', '-c', command], cwd=workspace, env=env,
                                     capture_output=True, text=True, timeout=120)
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertIn('Ran 69 tests', result.stderr)
+            self.assertIn(f'Ran {required} tests', result.stderr)
             self.assertIn('\nOK\n', result.stderr)
             self.assertNotIn('skipped=', result.stderr)
             self.assertEqual(guard.git(workspace / 'source', 'status', '--porcelain'), b'')

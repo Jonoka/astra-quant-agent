@@ -26,6 +26,12 @@ ROOT = Path(__file__).resolve().parents[2]
 PRE_FACTOR_RELEASE = '26673ca6668b1df3f5e074e7f760cc593ae1a192'
 PRE_PROMPT_RELEASE = '1bd3c016bf4375114d34022c1528d119d90cd6ad'
 PRE_PROMPT_REFRESH_RELEASE = '29dfe8ff5311addb381c0ee974ac3a280115ae60'
+PRE_HELPER_CHECKOUT_RELEASE = '1469efd9588229f81aee88468e0c228fdd8e1e5d'
+HELPER_CHECKOUT_RELEASE_PATHS = frozenset({
+    '.github/workflows/build-release-image.yml',
+    '.github/scripts/test_decision_release_source.py',
+    '.github/scripts/run_decision_release_preflight.py',
+})
 PROMPT_REFRESH_RELEASE_PATHS = frozenset({
     '.github/scripts/runtime_release_upgrade.py',
     '.github/scripts/test_runtime_release_upgrade.py',
@@ -416,13 +422,35 @@ class DecisionSourceContractTests(unittest.TestCase):
 
     def test_prompt_refresh_increment_changes_only_five_existing_exact_pins(self):
         old = json.loads(guard.git(ROOT, 'show', PRE_PROMPT_REFRESH_RELEASE + ':' + guard.CONTRACT_PATH))
+        before_checkout = json.loads(guard.git(ROOT, 'show', PRE_HELPER_CHECKOUT_RELEASE + ':' + guard.CONTRACT_PATH))
+        for field in ('schema', 'upstream', 'baseline', 'baseline_tree', 'reviewed_commit',
+                      'reviewed_tree', 'reviewed_paths', 'self_hash_exemptions'):
+            self.assertEqual(before_checkout[field], old[field])
+        self.assertEqual(set(before_checkout['release_paths']), set(old['release_paths']))
+        changed = {relative for relative, pin in old['release_paths'].items()
+                   if pin != before_checkout['release_paths'][relative]}
+        self.assertEqual(changed, PROMPT_REFRESH_RELEASE_PATHS)
+        for relative in changed:
+            with self.subTest(relative=relative):
+                previous = old['release_paths'][relative]
+                current = before_checkout['release_paths'][relative]
+                self.assertEqual(current['reviewed_sha256'], previous['reviewed_sha256'])
+                self.assertEqual(current['mode'], previous['mode'])
+                self.assertEqual(previous['sha256'], hashlib.sha256(guard.git(
+                    ROOT, 'show', PRE_PROMPT_REFRESH_RELEASE + ':' + relative)).hexdigest())
+                self.assertEqual(current['sha256'], hashlib.sha256(guard.git(
+                    ROOT, 'show', PRE_HELPER_CHECKOUT_RELEASE + ':' + relative)).hexdigest())
+                self.assertNotIn(relative, guard.SELF_HASH_EXEMPTIONS)
+
+    def test_helper_checkout_increment_changes_only_three_existing_exact_pins(self):
+        old = json.loads(guard.git(ROOT, 'show', PRE_HELPER_CHECKOUT_RELEASE + ':' + guard.CONTRACT_PATH))
         for field in ('schema', 'upstream', 'baseline', 'baseline_tree', 'reviewed_commit',
                       'reviewed_tree', 'reviewed_paths', 'self_hash_exemptions'):
             self.assertEqual(self.contract[field], old[field])
         self.assertEqual(set(self.contract['release_paths']), set(old['release_paths']))
         changed = {relative for relative, pin in old['release_paths'].items()
                    if pin != self.contract['release_paths'][relative]}
-        self.assertEqual(changed, PROMPT_REFRESH_RELEASE_PATHS)
+        self.assertEqual(changed, HELPER_CHECKOUT_RELEASE_PATHS)
         for relative in changed:
             with self.subTest(relative=relative):
                 previous = old['release_paths'][relative]
@@ -430,7 +458,7 @@ class DecisionSourceContractTests(unittest.TestCase):
                 self.assertEqual(current['reviewed_sha256'], previous['reviewed_sha256'])
                 self.assertEqual(current['mode'], previous['mode'])
                 self.assertEqual(previous['sha256'], hashlib.sha256(guard.git(
-                    ROOT, 'show', PRE_PROMPT_REFRESH_RELEASE + ':' + relative)).hexdigest())
+                    ROOT, 'show', PRE_HELPER_CHECKOUT_RELEASE + ':' + relative)).hexdigest())
                 self.assertEqual(current['sha256'], hashlib.sha256(self.current[relative]).hexdigest())
                 self.assertNotIn(relative, guard.SELF_HASH_EXEMPTIONS)
 
@@ -888,7 +916,7 @@ class DecisionPreflightBoundaryTests(unittest.TestCase):
         self.assertEqual(collection.COLLECTION_SUITES, dict(original, **added))
         self.assertEqual(sum(collection.COLLECTION_SUITES.values()), 1086)
         self.assertEqual(preflight.CURRENT_HELPER_SUITES['test_collection_regression_gate.py'], 10)
-        self.assertEqual(preflight.DECISION_RELEASE_SUITES['test_decision_release_source.py'], 106)
+        self.assertEqual(preflight.DECISION_RELEASE_SUITES['test_decision_release_source.py'], 108)
         calls, _, _, _ = self.invoke()
         gate = next((command, options) for command, options in calls
                     if command[-1].endswith('/run_collection_regressions.py'))
@@ -1303,6 +1331,49 @@ class DeploymentPredecessorBoundaryTests(unittest.TestCase):
 
 
 class DecisionWorkflowBoundaryTests(unittest.TestCase):
+    def test_formal_helper_step_uses_full_source_history_with_real_shallow_ci(self):
+        import yaml
+        workflow = yaml.safe_load((ROOT / '.github/workflows/build-release-image.yml').read_text())
+        steps = workflow['jobs']['build']['steps']
+        source_checkout = next(step for step in steps if step.get('with', {}).get('path') == 'source')
+        self.assertEqual(source_checkout['with']['fetch-depth'], 0)
+        self.assertEqual(source_checkout['with']['ref'], '${{ env.SOURCE_SHA }}')
+        step = next(step for step in steps if step.get('name') == 'Verify runtime upgrade helper')
+        self.assertNotIn('if', step)
+        self.assertNotIn('continue-on-error', step)
+        self.assertNotIn('working-directory', step)
+        command = step['run']
+        target = 'source/.github/scripts/test_runtime_release_upgrade.py'
+        self.assertIn('target = Path("' + target + '")', command)
+        with tempfile.TemporaryDirectory(prefix='astra-formal-helper-step-') as temporary:
+            workspace = Path(temporary)
+            # Match the real workflow: ci has only HEAD, while source retains
+            # the actual history required by the independently pinned fixture.
+            guard.git(ROOT, 'clone', '--depth=1', '--no-tags', ROOT.as_uri(), str(workspace / 'ci'))
+            guard.git(ROOT, 'clone', '--shared', '--no-checkout', str(ROOT), str(workspace / 'source'))
+            head = guard.git(ROOT, 'rev-parse', 'HEAD').decode().strip()
+            guard.git(workspace / 'source', 'checkout', '--detach', head)
+            self.assertEqual(guard.git(workspace / 'ci', 'rev-parse', 'HEAD').decode().strip(), head)
+            self.assertEqual(guard.git(workspace / 'ci', 'rev-parse', '--is-shallow-repository').strip(), b'true')
+            self.assertEqual(guard.git(workspace / 'source', 'rev-parse', '--is-shallow-repository').strip(), b'false')
+            env = guard.clean_environment()
+            env['PATH'] = str(Path(sys.executable).parent) + os.pathsep + env.get('PATH', '')
+            old_command = command.replace(target, 'ci/.github/scripts/test_runtime_release_upgrade.py')
+            old = subprocess.run(['bash', '-e', '-c', old_command], cwd=workspace, env=env,
+                                 capture_output=True, text=True, timeout=120)
+            self.assertNotEqual(old.returncode, 0)
+            self.assertIn('test_custom_prompt_preserved_and_pristine_prompt_refreshed', old.stderr)
+            self.assertIn(PRE_PROMPT_RELEASE + ':data/prompt_library.json', old.stderr)
+            self.assertIn('Ran 69 tests', old.stderr)
+            self.assertIn('FAILED (errors=1)', old.stderr)
+            result = subprocess.run(['bash', '-e', '-c', command], cwd=workspace, env=env,
+                                    capture_output=True, text=True, timeout=120)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn('Ran 69 tests', result.stderr)
+            self.assertIn('\nOK\n', result.stderr)
+            self.assertNotIn('skipped=', result.stderr)
+            self.assertEqual(guard.git(workspace / 'source', 'status', '--porcelain'), b'')
+
     def test_pr_workflow_remains_pr_only_read_only_and_keeps_original_modes(self):
         import yaml
         raw = (ROOT / '.github/workflows/test-taker-parsing.yml').read_text()

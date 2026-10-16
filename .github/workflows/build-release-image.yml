@@ -243,7 +243,7 @@ jobs:
           python - <<'PY'
           from pathlib import Path
           import unittest
-          target = Path("ci/.github/scripts/test_runtime_release_upgrade.py")
+          target = Path("source/.github/scripts/test_runtime_release_upgrade.py")
           assert target.is_file(), f"Required suite missing: {target}"
           suite = unittest.defaultTestLoader.discover(str(target.parent), pattern=target.name)
           assert suite.countTestCases() > 0, f"No tests discovered: {target}"

@@ -150,7 +150,7 @@
     },
     ".github/scripts/run_decision_release_preflight.py": {
       "reviewed_sha256": null,
-      "sha256": "3f28043e1d7aea4ce9b6bd1cc60ac513e4da849c663abf435e0d5b84fe942a99",
+      "sha256": "4af2ad510007137c552a4a0a5afef690524d9e5379bcd6b10c9ddc69782dfff5",
       "mode": "100644"
     },
     ".github/scripts/runtime_release_upgrade.py": {
@@ -170,7 +170,7 @@
     },
     ".github/scripts/test_decision_release_source.py": {
       "reviewed_sha256": null,
-      "sha256": "c7eb14a680e873ca10899f9a36b4f7685f3680eed684db04074522349c79d163",
+      "sha256": "4f4848a610640ff9799ed4384ad648dfe6a73d830403f11052ee468c84912663",
       "mode": "100644"
     },
     ".github/scripts/test_deployment_plan.py": {
@@ -185,7 +185,7 @@
     },
     ".github/workflows/build-release-image.yml": {
       "reviewed_sha256": "c37342884bc53ca7278072865263fc1ac63abee7b0e79ecbfb59e8164dad0aa3",
-      "sha256": "287b373ca08aa2d35d528a0146ccfafdc83333961bb0a6399a19e3c7479b7fb8",
+      "sha256": "27f4ef3fcb012c30d380fc731e66d2980bd27f057072c196344e72c821b30fa4",
       "mode": "100644"
     },
     ".github/workflows/test-taker-parsing.yml": {
